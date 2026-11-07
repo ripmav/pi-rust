@@ -2,8 +2,9 @@
 /**
  * Smoke test: a fake core over pipes that drives the sidecar end-to-end.
  *
- * Loads five UNMODIFIED upstream example extensions (hello.ts, with-deps/,
- * permission-gate.ts, event-bus.ts, claude-rules.ts) plus one scratch test
+ * Loads six UNMODIFIED upstream example extensions (hello.ts, with-deps/,
+ * permission-gate.ts, event-bus.ts, claude-rules.ts, prompt-customizer.ts)
+ * plus one scratch test
  * fixture (created in a temp dir) that exercises sendUserMessage /
  * appendEntry / setSessionName / registerFlag.
  */
@@ -145,6 +146,7 @@ async function main() {
 			"--extension-dir", path.join(EXAMPLES, "permission-gate.ts"),
 			"--extension-dir", path.join(EXAMPLES, "event-bus.ts"),
 			"--extension-dir", path.join(EXAMPLES, "claude-rules.ts"),
+			"--extension-dir", path.join(EXAMPLES, "prompt-customizer.ts"),
 			"--extension-dir", extDir,
 			"--agent-dir", agentDir,
 		],
@@ -175,7 +177,7 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 6 extensions, no errors", ready.extensions.length === 6 && ready.errors.length === 0, ready.errors);
+		check("ready lists 7 extensions, no errors", ready.extensions.length === 7 && ready.errors.length === 0, ready.errors);
 
 		// (c) session_start: pi.events round-trip + claude-rules scan
 		core.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
@@ -258,6 +260,12 @@ async function main() {
 			bas.data,
 		);
 
+		// (j) before_agent_start with systemPromptOptions: prompt-customizer mutates
+		// sections.tool_guidance and the sidecar renders it via the upstream prompt
+		// builder. Runs in an ISOLATED sidecar instance (phase 2, after the main
+		// shutdown): in the main instance claude-rules forces a string in the same
+		// run, and forced prompts are opaque upstream (sections would not render).
+
 		// (h) fast paths + error model. Decision events with no handler answer success with data: null.
 		const fastPaths = [
 			["user_bash", { type: "user_bash", command: "echo x", excludeFromContext: false, cwd: tmp }],
@@ -282,6 +290,40 @@ async function main() {
 		core.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
 		const code = await Promise.race([core.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("clean exit 0 after session_shutdown", code === 0, code);
+
+		// (j) phase 2: isolated sidecar, prompt-customizer only — section rendering
+		// through the upstream prompt builder (buildSystemPrompt, dist/core/system-prompt.js).
+		const agentDir2 = path.join(tmp, "agent2");
+		mkdirSync(agentDir2, { recursive: true });
+		const child2 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", path.join(EXAMPLES, "prompt-customizer.ts"), "--agent-dir", agentDir2],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child2.stderr.on("data", (d) => process.stderr.write(d));
+		const core2 = new FakeCore(child2);
+		const init2 = await core2.request({
+			type: "init",
+			protocolVersion: 0,
+			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
+		});
+		check("isolated sidecar init", init2.success === true, init2);
+		await core2.nextEvent((e) => e.type === "ready", "ready (isolated)");
+		const basSections = await core2.request({
+			type: "before_agent_start",
+			event: { type: "user", messageType: "user", prompt: "hi" },
+			systemPrompt: "BASE PROMPT 2",
+			systemPromptOptions: { cwd: tmp, selectedTools: ["read", "bash", "write"], sections: {} },
+		});
+		check(
+			"before_agent_start renders tool_guidance section",
+			typeof basSections.data?.systemPrompt === "string" &&
+				/Use `read` for file contents/.test(basSections.data.systemPrompt),
+			basSections.data,
+		);
+		core2.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code2 = await Promise.race([core2.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("isolated sidecar clean exit 0", code2 === 0, code2);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);

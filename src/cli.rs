@@ -55,6 +55,7 @@ pub async fn run() -> Result<i32> {
     let mut agent_dir: Option<PathBuf> = None;
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
+    let mut commands: Vec<(String, Vec<String>)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let val = |args: &Vec<String>, i: &mut usize| -> Result<String> {
@@ -66,7 +67,17 @@ pub async fn run() -> Result<i32> {
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] --scenario <s> [--session-file <p>]"),
+            "--command" => {
+                let name = val(&args, &mut i)?;
+                // Variadic args: consume until the next `--` flag (or end).
+                let mut cargs: Vec<String> = Vec::new();
+                while i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 1;
+                    cargs.push(args[i].clone());
+                }
+                commands.push((name, cargs));
+            }
+            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> [--session-file <p>]"),
         }
         i += 1;
     }
@@ -146,6 +157,23 @@ pub async fn run() -> Result<i32> {
         if ev.contains("session_start") {
             client.fire(json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}));
         }
+    }
+
+    // --command: run each registered extension command after ready, before the
+    // scenario. Unknown command or handler error logs ok:false + error and
+    // continues (does not abort the run).
+    for (name, cargs) in &commands {
+        let resp = client.request("command", json!({"name":name,"args":cargs})).await;
+        let (ok, error) = match resp {
+            Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
+            Decision::Response(r) => (false, r.get("error").and_then(Value::as_str).map(str::to_string)),
+            Decision::Unavailable => (false, Some("command unanswered: bridge not running".into())),
+        };
+        let mut line = json!({"kind":"command","name":name,"ok":ok});
+        if let Some(e) = error {
+            line["error"] = json!(e);
+        }
+        log.emit(line);
     }
 
     // Seed the scenario: one agent run per user message with its own script.

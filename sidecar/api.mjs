@@ -69,7 +69,9 @@ export function createDialogManager({ output, uiMethods, defaultTimeoutMs }) {
 		getEditorText: () => "",
 		onTerminalInput: () => () => {},
 		get theme() {
-			return {};
+			// No TUI in bridge mode: style helpers are identity pass-throughs
+			// (extensions like plan-mode call theme.fg / theme.strikethrough).
+			return { fg: (_style, text) => text, strikethrough: (text) => text };
 		},
 		getAllThemes: () => [],
 		getTheme: () => undefined,
