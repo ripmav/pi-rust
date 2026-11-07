@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Child;
@@ -35,6 +36,10 @@ pub struct BridgeClient {
     state_tx: watch::Sender<State>,
     state_rx: watch::Receiver<State>,
     exit_rx: watch::Receiver<Option<i32>>,
+    /// True once the bridge transitioned Running -> Degraded. `Stopped` is a
+    /// later state, so the current state alone cannot tell a degraded run from
+    /// a clean one (the exit code must still be 3, not 0/2).
+    degraded_seen: Arc<AtomicBool>,
 }
 
 impl BridgeClient {
@@ -47,11 +52,13 @@ impl BridgeClient {
         let (state_tx, state_rx) = watch::channel(State::Stopped);
         let (exit_tx, exit_rx) = watch::channel(None::<i32>);
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let degraded_seen = Arc::new(AtomicBool::new(false));
 
         // Demux: responses correlate strictly by id (a response for an unknown
         // or already-timed-out id is ignored — protocol rule); everything else
         // is a sidecar→core event.
         let (p, st) = (pending.clone(), state_tx.clone());
+        let seen = degraded_seen.clone();
         tokio::spawn(async move {
             while let Some(v) = rx.recv().await {
                 if v.get("type").and_then(Value::as_str) == Some("response") {
@@ -64,29 +71,36 @@ impl BridgeClient {
                     let _ = events.send(v);
                 }
             }
-            Self::degrade(&st); // stdout EOF: transport error unless already stopped
+            Self::degrade(&st, &seen); // stdout EOF: transport error unless already stopped
         });
 
         // Child exit: an unexpected exit is a transport error; the exit code is
         // recorded so a clean shutdown can be verified.
         let st2 = state_tx.clone();
+        let seen2 = degraded_seen.clone();
         tokio::spawn(async move {
             let code = child.wait().await.ok().and_then(|s| s.code());
             let _ = exit_tx.send_replace(code);
-            Self::degrade(&st2);
+            Self::degrade(&st2, &seen2);
         });
 
         (
-            Self { tx, pending, state_tx, state_rx, exit_rx },
+            Self { tx, pending, state_tx, state_rx, exit_rx, degraded_seen },
             events_rx,
         )
     }
 
-    fn degrade(st: &watch::Sender<State>) {
+    fn degrade(st: &watch::Sender<State>, seen: &AtomicBool) {
         if *st.borrow() == State::Running {
+            seen.store(true, Ordering::SeqCst);
             eprintln!("[core] bridge DEGRADED: sidecar transport lost; built-ins continue, extension tools unavailable, no respawn");
             let _ = st.send(State::Degraded);
         }
+    }
+
+    /// The bridge was degraded at some point (sidecar crashed mid-run).
+    pub fn degraded_seen(&self) -> bool {
+        self.degraded_seen.load(Ordering::SeqCst)
     }
 
     pub fn state(&self) -> State {
@@ -125,7 +139,7 @@ impl BridgeClient {
         payload["type"] = json!(ty);
         if self.tx.send(payload.to_string()).is_err() {
             self.pending.lock().unwrap().remove(&id);
-            Self::degrade(&self.state_tx);
+            Self::degrade(&self.state_tx, &self.degraded_seen);
             return Decision::Unavailable;
         }
         match tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), orx).await {
@@ -133,7 +147,7 @@ impl BridgeClient {
             // Timeout: blocking command unanswered after the init timeoutMs.
             _ => {
                 self.pending.lock().unwrap().remove(&id);
-                Self::degrade(&self.state_tx);
+                Self::degrade(&self.state_tx, &self.degraded_seen);
                 Decision::Unavailable
             }
         }
@@ -147,7 +161,7 @@ impl BridgeClient {
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
-            Self::degrade(&self.state_tx);
+            Self::degrade(&self.state_tx, &self.degraded_seen);
         }
     }
 
@@ -159,7 +173,7 @@ impl BridgeClient {
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
-            Self::degrade(&self.state_tx);
+            Self::degrade(&self.state_tx, &self.degraded_seen);
         }
     }
 
