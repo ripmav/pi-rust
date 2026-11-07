@@ -177,6 +177,7 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
 /// v0 has no human UI: blocking dialogs are answered with the upstream
 /// defaults immediately (select/input/editor → cancelled, confirm → false) and
 /// logged to stderr; F&F ui requests (notify, setStatus, ...) need no reply.
+/// Every ui request is logged to the event log with its v0 default answer.
 fn ui_default(ctx: &Core, ev: &Value) {
     let (Some(id), Some(method)) = (ev.get("id").and_then(Value::as_str), ev.get("method").and_then(Value::as_str)) else {
         return;
@@ -185,12 +186,18 @@ fn ui_default(ctx: &Core, ev: &Value) {
     eprintln!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)");
     let resp = if method == "confirm" {
         json!({"type":"extension_ui_response","id":id,"confirmed":false})
-    } else {
+    } else if matches!(method, "select" | "input" | "editor") {
         json!({"type":"extension_ui_response","id":id,"cancelled":true})
+    } else {
+        Value::Null // F&F methods: no reply line
     };
-    if matches!(method, "select" | "input" | "editor" | "confirm") {
-        ctx.client.send(resp);
+    if !resp.is_null() {
+        ctx.client.send(resp.clone());
     }
+    ctx.log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+        "title":ev.get("title").cloned().unwrap_or(Value::Null),
+        "message":ev.get("message").cloned().unwrap_or(Value::Null),
+        "response":resp}));
 }
 
 /// Sidecar→core `tool_call_request` (nested `ctx.executeTool`): execute the
@@ -369,7 +376,17 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let mut system_prompt = BASE_SYSTEM_PROMPT.to_string();
     if subscribed(ctx, "before_agent_start") {
         let event = json!({"type":"before_agent_start","messageType":"user","prompt":text});
-        let req = json!({"event":event,"systemPrompt":BASE_SYSTEM_PROMPT});
+        // BuildSystemPromptOptions subset for the sidecar: core cwd, currently
+        // active built-in tool names, empty sections (handlers mutate in place).
+        let selected_tools: Vec<String> = tools::schemas().iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let spon = json!({
+            "cwd": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "selectedTools": selected_tools,
+            "sections": {},
+        });
+        let req = json!({"event":event,"systemPrompt":BASE_SYSTEM_PROMPT,"systemPromptOptions":spon});
         let data = decision_data(ctx, ctx.client.request("before_agent_start", req.clone()).await, "before_agent_start", &req, &Value::Null);
         if let Some(ms) = data.get("messages").and_then(Value::as_array) {
             custom = ms.to_vec();

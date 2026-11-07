@@ -14,6 +14,9 @@ const DIST =
 	process.env.PI_EXTENSION_SIDECAR_DIST ??
 	path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "upstream", "packages", "coding-agent", "dist", "index.js");
 const ca = await import(DIST);
+// The prompt builder is not re-exported by dist/index.js; import the built
+// module directly (source of truth: src/core/system-prompt.ts).
+const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(path.join(path.dirname(DIST), "core", "system-prompt.js"));
 
 const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level".split(" "),
@@ -246,13 +249,39 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				if (!runner.hasHandlers("before_agent_start")) return response(id, type, true, null);
 				const base = command.systemPrompt;
 				session.view.systemPrompt = base ?? session.view.systemPrompt;
-				const options = { cwd, ...(base !== undefined ? { forceSystemPrompt: base } : {}) };
+				// Merge the core's BuildSystemPromptOptions subset (sections, selectedTools,
+				// skills, ...); cwd and forceSystemPrompt come from the sidecar/base.
+				const options = {
+					cwd,
+					...(command.systemPromptOptions ?? {}),
+					...(base !== undefined ? { forceSystemPrompt: base } : {}),
+				};
 				const combined = await safe(
 					runner.emitBeforeAgentStart(command.event, options),
 					{ messages: [], systemPromptOptions: options },
 					"before_agent_start",
 				);
-				const finalPrompt = combined.systemPromptOptions.forceSystemPrompt;
+				const opts = combined.systemPromptOptions;
+				// Normalized base (the runner normalizes internally and applies defaults,
+				// e.g. selectedTools): mutation checks must compare against the same
+				// normalized shape, not the raw request options.
+				const baseOpts = normalizeBuildSystemPromptOptions(options);
+				// A structural mutation (sections/selectedTools/skills) renders through
+				// the upstream prompt builder with the base stand-in forceSystemPrompt
+				// suppressed, so the sections appear in the prompt.
+				const structural =
+					JSON.stringify(opts.sections ?? {}) !== JSON.stringify(baseOpts.sections ?? {}) ||
+					JSON.stringify(opts.selectedTools ?? []) !== JSON.stringify(baseOpts.selectedTools ?? []) ||
+					JSON.stringify(opts.skills ?? []) !== JSON.stringify(baseOpts.skills ?? []);
+				// Precedence follows upstream: a forced prompt is opaque (claude-rules
+				// style direct string mutations win); otherwise structural mutations
+				// render, and with no mutation the final string is the (forced) base.
+				const finalPrompt =
+					opts.forceSystemPrompt !== options.forceSystemPrompt
+						? opts.forceSystemPrompt
+						: structural
+							? buildSystemPrompt({ ...opts, forceSystemPrompt: undefined })
+							: opts.forceSystemPrompt;
 				// Return the rendered systemPrompt string only when a handler changed it; otherwise omission.
 				return response(id, type, true, {
 					...(combined.messages.length ? { messages: combined.messages } : {}),
