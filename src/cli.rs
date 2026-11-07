@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agent::{Core, EventLog, Item, QueuedUser};
-use crate::client::{BridgeClient, Decision, State, INIT_TIMEOUT_MS};
+use crate::client::{BridgeClient, Decision, INIT_TIMEOUT_MS};
 use crate::model::FakeDriver;
 use crate::session::Session;
 use crate::transport;
@@ -35,14 +35,24 @@ fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
     if let Ok(p) = std::env::var("PI_RUST_SIDECAR") {
         return Ok(PathBuf::from(p));
     }
-    let mut dir = cwd.to_path_buf();
-    for _ in 0..6 {
-        let cand = dir.join("sidecar").join("index.mjs");
-        if cand.is_file() {
-            return Ok(cand);
+    // Walk up from cwd, then from the executable's directory (a deployed
+    // binary finds its own sidecar regardless of cwd).
+    let mut roots = vec![cwd.to_path_buf()];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            roots.push(d.to_path_buf());
         }
-        if !dir.pop() {
-            break;
+    }
+    for root in roots {
+        let mut dir = root;
+        for _ in 0..6 {
+            let cand = dir.join("sidecar").join("index.mjs");
+            if cand.is_file() {
+                return Ok(cand);
+            }
+            if !dir.pop() {
+                break;
+            }
         }
     }
     bail!("sidecar/index.mjs not found from {} (set PI_RUST_SIDECAR)", cwd.display())
@@ -87,7 +97,9 @@ pub async fn run() -> Result<i32> {
     let runs = parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?;
 
     // Isolated agent dir (owned by the core when defaulted) so extension
-    // discovery stays deterministic; the sidecar's cwd is the agent dir.
+    // discovery stays deterministic. Upstream semantics: ctx.cwd is the
+    // project directory (the child inherits the core's cwd); the agent dir
+    // is discovery-only.
     let agent_dir = agent_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
 
@@ -99,7 +111,7 @@ pub async fn run() -> Result<i32> {
     let node = std::env::var("PI_RUST_NODE").unwrap_or_else(|_| "node".into());
     let mut sidecar_args: Vec<String> = Vec::new();
     for d in &ext_dirs {
-        // The sidecar's cwd is the isolated agent dir, so make relative paths absolute first.
+        // Absolute paths keep the sidecar's extension discovery cwd-independent.
         let p = PathBuf::from(d);
         let abs = if p.is_absolute() { p } else { cwd.join(&p) };
         sidecar_args.push("--extension-dir".into());
@@ -115,7 +127,8 @@ pub async fn run() -> Result<i32> {
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
-    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &agent_dir).await?;
+    // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
+    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd).await?;
     let (client, events_rx) = BridgeClient::connect(child, tx, rx);
     let client = Arc::new(client);
 
@@ -188,25 +201,31 @@ pub async fn run() -> Result<i32> {
 
     // Clean shutdown: session_shutdown → sidecar exits 0. The core marks the
     // state Stopped once the shutdown is sent (avoids misclassifying the
-    // normal-exit race); a non-zero sidecar exit is still recorded as a failure.
-    client.fire(json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}));
-    client.set_stopped();
-    match tokio::time::timeout(Duration::from_secs(10), client.wait_exited()).await {
-        Ok(Some(0)) => {}
-        Ok(Some(c)) => {
-            fail.lock().unwrap().get_or_insert(format!("sidecar exited with {c} during shutdown"));
+    // normal-exit race); a non-zero sidecar exit is still recorded as a
+    // failure. A degraded bridge has no live sidecar to shut down: skip the
+    // handshake and exit 3 below.
+    if !client.degraded_seen() {
+        client.fire(json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}));
+        client.set_stopped();
+        match tokio::time::timeout(Duration::from_secs(10), client.wait_exited()).await {
+            Ok(Some(0)) => {}
+            Ok(Some(c)) => {
+                fail.lock().unwrap().get_or_insert(format!("sidecar exited with {c} during shutdown"));
+            }
+            Ok(None) => unreachable!("wait_exited resolves only on exit"),
+            Err(_) => {
+                eprintln!("[core] sidecar did not exit 10s after session_shutdown");
+                fail.lock().unwrap().get_or_insert("sidecar did not exit after session_shutdown".into());
+            }
         }
-        Ok(None) => unreachable!("wait_exited resolves only on exit"),
-        Err(_) => {
-            eprintln!("[core] sidecar did not exit 10s after session_shutdown");
-            fail.lock().unwrap().get_or_insert("sidecar did not exit after session_shutdown".into());
-        }
+    } else {
+        client.set_stopped();
     }
 
     // Final event: the full session (acked: written+flushed before exit).
     log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
 
-    // 0 = clean; 2 = scenario/model-script failure; 3 = degraded/crashed.
-    let state = client.state();
-    Ok(if fail.lock().unwrap().is_some() { 2 } else if state != State::Stopped { 3 } else { 0 })
+    // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
+    // (sidecar crashed mid-run — protocol: degraded is terminal, no respawn).
+    Ok(if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 })
 }

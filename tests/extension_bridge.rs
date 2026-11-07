@@ -326,3 +326,111 @@ fn nested_tool_call_request_round_trip() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// T5: unmodified claude-rules.ts scans <cwd>/.claude/rules on session_start
+/// and appends the rule list to the system prompt on before_agent_start.
+#[test]
+fn claude_rules_system_prompt_injection() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-t5-claude-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let proj = tmp.join("proj");
+    std::fs::create_dir_all(proj.join(".claude/rules")).unwrap();
+    std::fs::write(proj.join(".claude/rules/testing.md"), "# Testing\nAlways run tests.\n").unwrap();
+
+    let ext = repo().join("upstream/packages/coding-agent/examples/extensions");
+    let scenario = json!({ "user_messages": ["hi"], "model_scripts": [[{ "text": "done" }]] });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    // claude-rules scans ctx.cwd/.claude/rules; the sidecar inherits the core's cwd.
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .current_dir(&proj)
+        .arg("--extension-dir").arg(ext.join("claude-rules.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    let bas = lines
+        .iter()
+        .find(|l| l.get("kind").and_then(Value::as_str) == Some("decision")
+            && l.get("name").and_then(Value::as_str) == Some("before_agent_start"))
+        .expect("before_agent_start decision missing\n{stdout}");
+    let sp = bas["response"]["systemPrompt"]
+        .as_str()
+        .expect("rendered systemPrompt missing\n{bas}");
+    assert!(sp.contains("## Project Rules"), "rules section missing\n{sp}");
+    assert!(sp.contains(".claude/rules/testing.md"), "rule file missing\n{sp}");
+
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
+        "unexpected extension_error\n{stdout}",
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// T5: sidecar crash mid extension_tool_call (test fixture kills the process)
+/// -> core marks degraded: built-ins keep working, the transcript is still
+/// emitted, and the run exits 3 (degraded) per the T4 exit-code table.
+#[test]
+fn sidecar_crash_degraded_continues_with_builtins() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-t5-crash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let fixture = repo().join("tests/fixtures/crash-tool.ts");
+    let scenario = json!({
+        "user_messages": ["crash then continue", "second message"],
+        "model_scripts": [[
+            { "tool_call": { "name": "crash", "input": {} } },
+            { "text": "after crash" }
+        ], [
+            { "tool_call": { "name": "bash", "input": { "command": "echo post-crash" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(&fixture)
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "expected degraded exit 3\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // Built-in bash executes fine after the crash (degraded semantics).
+    assert!(
+        lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("tool_execution")
+            && l["name"] == "bash" && l["input"]["command"] == "echo post-crash" && l["blocked"] == json!(false)),
+        "post-crash bash tool_execution missing\n{stdout}",
+    );
+
+    // The run was marked degraded/transport-failed in the event log.
+    assert!(
+        lines.iter().any(|l| l.to_string().contains("degraded") || l.to_string().contains("sidecar")),
+        "no degraded/sidecar marker in event log\n{stdout}",
+    );
+
+    // The transcript is still the final line.
+    assert_eq!(lines.last().expect("no stdout lines")["kind"], "transcript");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
