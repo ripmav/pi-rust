@@ -22,6 +22,7 @@ const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level".split(" "),
 );
 const message = (err) => (err instanceof Error ? err.message : String(err));
+const MAX_LINE = 1024 * 1024; // v0: a single NDJSON command line never exceeds 1 MB
 const response = (id, command, success, data, error) =>
 	({ id, type: "response", command, success, ...(success ? (data === undefined ? {} : { data }) : { error }) });
 
@@ -48,7 +49,21 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			let line = buf.slice(0, i);
 			buf = buf.slice(i + 1);
 			if (line.endsWith("\r")) line = line.slice(0, -1);
-			if (line.trim()) queue.push(line);
+			if (!line.trim()) continue;
+			// v0 hardening: a single command line never exceeds 1 MB. Reject it
+			// (parse-error model) instead of letting JSON.parse eat the memory.
+			if (line.length > MAX_LINE) {
+				output({ id: null, type: "response", command: "parse", success: false, error: `line too long (${line.length} bytes, max ${MAX_LINE})` });
+				continue;
+			}
+			queue.push(line);
+		}
+		// An unterminated line already past the cap means a broken protocol: report
+		// and reset the buffer instead of accumulating forever (it would swallow
+		// every later line, including valid ones).
+		if (buf.length > MAX_LINE) {
+			output({ id: null, type: "response", command: "parse", success: false, error: `line too long (unterminated, max ${MAX_LINE} bytes)` });
+			buf = "";
 		}
 		wake();
 	});
