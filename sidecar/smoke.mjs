@@ -4,9 +4,10 @@
  *
  * Loads six UNMODIFIED upstream example extensions (hello.ts, with-deps/,
  * permission-gate.ts, event-bus.ts, claude-rules.ts, prompt-customizer.ts)
- * plus one scratch test
- * fixture (created in a temp dir) that exercises sendUserMessage /
- * appendEntry / setSessionName / registerFlag.
+ * plus one scratch test fixture (created in a temp dir) that exercises
+ * sendUserMessage / appendEntry / setSessionName / registerFlag /
+ * setThinkingLevel, and pins the P1 advisory fixes: shutdown dispatch
+ * guard and orderly exit on a broken stdout pipe.
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -100,6 +101,17 @@ class FakeCore {
 				const waiter = this.pending.get(obj.id);
 				this.pending.delete(obj.id);
 				waiter(obj);
+			} else if (obj.type === "set_thinking_level_request") {
+				// Test policy: the fake core accepts only "high".
+				const ok = obj.level === "high";
+				this.send({
+					id: obj.id,
+					type: "response",
+					command: obj.type,
+					success: ok,
+					data: { ok },
+					...(ok ? {} : { error: "test: core declines" }),
+				});
 			} else {
 				// response lines for unknown/null ids (e.g. the parse error) are observable events here
 				this.events.push(obj);
@@ -122,6 +134,21 @@ export default function (pi) {
 			pi.appendEntry("probe", { n: 1 });
 			pi.setSessionName("smoke-session");
 			return { content: [{ type: "text", text: "probed" }], details: { ok: true } };
+		},
+	});
+	pi.registerTool({
+		name: "thinking_probe",
+		label: "Thinking Probe",
+		description: "Smoke fixture: reports setThinkingLevel acceptance",
+		parameters: { type: "object", properties: { level: { type: "string" } } },
+		async execute(_toolCallId, args) {
+			pi.setThinkingLevel(args.level);
+			// The upstream loader wrapper drops the return value; wait for the
+			// request round-trip, then report the view state (the observable).
+			await new Promise((r) => setTimeout(r, 300));
+			const after = pi.getThinkingLevel();
+			pi.appendEntry("thinking-probe", { after });
+			return { content: [{ type: "text", text: "probed" }], details: { after } };
 		},
 	});
 }
@@ -155,6 +182,7 @@ async function main() {
 	child.stderr.on("data", (d) => process.stderr.write(d));
 	const core = new FakeCore(child);
 
+	let child2 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
@@ -236,6 +264,20 @@ async function main() {
 		const renamed = await core.nextEvent((e) => e.type === "session_info_changed", "session_info_changed");
 		check("session_info_changed emitted", renamed.name === "smoke-session", renamed);
 
+		// (f2) setThinkingLevel: the core's answer gates the sidecar state update
+		await core.request({ type: "extension_tool_call", toolCallId: "tc_5", toolName: "thinking_probe", input: { level: "low" } });
+		const probeDeclined = await core.nextEvent(
+			(e) => e.type === "session_append_entry" && e.entry?.customType === "thinking-probe",
+			"thinking probe (declined)",
+		);
+		check("declined setThinkingLevel leaves view unchanged", probeDeclined.entry?.data?.after === "off", probeDeclined);
+		await core.request({ type: "extension_tool_call", toolCallId: "tc_6", toolName: "thinking_probe", input: { level: "high" } });
+		const probeAccepted = await core.nextEvent(
+			(e) => e.type === "session_append_entry" && e.entry?.customType === "thinking-probe",
+			"thinking probe (accepted)",
+		);
+		check("accepted setThinkingLevel updates view", probeAccepted.entry?.data?.after === "high", probeAccepted);
+
 		// registered command invocation (bridge v0.1 addition, see README)
 		const cmd = await core.request({ type: "command", name: "emit", args: "smoke" });
 		check("command invoke succeeds", cmd.success === true, cmd);
@@ -287,8 +329,16 @@ async function main() {
 		const unknown = await core.request({ type: "bogus_command" });
 		check("unknown command error", unknown.success === false && /Unknown command: bogus_command/.test(unknown.error), unknown);
 
-		// (i) clean shutdown
+		// (i) shutdown: a command queued behind session_shutdown must not be dispatched
 		core.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		core.send({
+			id: "tc-post",
+			type: "tool_call",
+			event: { type: "tool_call", toolName: "bash", toolCallId: "tc_z", input: { command: "rm -rf /" } },
+		});
+		await new Promise((r) => setTimeout(r, 800)); // window in which a wrong dispatch would ask the gate
+		const postShutdownUi = core.events.find((e) => e.type === "extension_ui_request" && e.method === "select");
+		check("no dispatch after session_shutdown", !postShutdownUi, postShutdownUi);
 		const code = await Promise.race([core.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("clean exit 0 after session_shutdown", code === 0, code);
 
@@ -296,12 +346,16 @@ async function main() {
 		// through the upstream prompt builder (buildSystemPrompt, dist/core/system-prompt.js).
 		const agentDir2 = path.join(tmp, "agent2");
 		mkdirSync(agentDir2, { recursive: true });
-		const child2 = spawn(
+		child2 = spawn(
 			process.execPath,
 			[ENTRY, "--extension-dir", path.join(EXAMPLES, "prompt-customizer.ts"), "--agent-dir", agentDir2],
 			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
 		);
-		child2.stderr.on("data", (d) => process.stderr.write(d));
+		const stderr2 = [];
+		child2.stderr.on("data", (d) => {
+			stderr2.push(d.toString());
+			process.stderr.write(d);
+		});
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
@@ -322,14 +376,22 @@ async function main() {
 				/Use `read` for file contents/.test(basSections.data.systemPrompt),
 			basSections.data,
 		);
-		core2.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		// (k) broken stdout pipe (core died): orderly exit, no uncaught crash stack
+		child2.stdout.destroy();
+		core2.send({ id: "crash-trig", type: "tool_call", event: { type: "tool_call", toolName: "bash", toolCallId: "tc_c", input: { command: "echo boom" } } });
 		const code2 = await Promise.race([core2.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
-		check("isolated sidecar clean exit 0", code2 === 0, code2);
+		const stderr2Text = stderr2.join("");
+		check(
+			"broken stdout: orderly exit, no crash stack",
+			code2 !== "timeout" && /stdout write failed/.test(stderr2Text) && !/UnhandledPromiseRejection|\n\s+at /.test(stderr2Text),
+			{ code2, tail: stderr2Text.slice(-400) },
+		);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
 		try {
 			child.kill("SIGKILL");
+			child2?.kill("SIGKILL");
 		} catch {}
 	}
 
