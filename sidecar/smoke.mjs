@@ -239,6 +239,7 @@ async function main() {
 		// registered command invocation (bridge v0.1 addition, see README)
 		const cmd = await core.request({ type: "command", name: "emit", args: "smoke" });
 		check("command invoke succeeds", cmd.success === true, cmd);
+		check("command data carries handler return value (null when void)", cmd.data === null, cmd);
 		const cmdNotify = await core.nextEvent(
 			(e) => e.type === "extension_ui_request" && e.method === "notify" && /smoke/.test(e.message),
 			"command-triggered notify",
