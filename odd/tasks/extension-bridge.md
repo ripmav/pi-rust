@@ -50,3 +50,9 @@ PoC success criteria (derived from S1+S2):
   (3) bridge.mjs: `process.stdout.on("error")` handler — broken pipe (core died) now logs "stdout write failed: ...; exiting" and exits 1 orderly instead of crashing with an uncaught EPIPE stack. Pin: smoke (k) destroys the read end of the sidecar stdout on the isolated child, triggers a write, asserts clean log + no crash stack.
   Verification: node sidecar/smoke.mjs -> 38 passed, 0 failed (was 35); cargo test -> 6 passed.
   Note: upstream loader.ts:463 wrapper `setThinkingLevel` does not propagate the return value (unlike setModel which does `return`) — unmodified upstream, so the gate is observable via state, not the call result.
+- L16: P2 implemented (stdin line-length cap, TDD RED then GREEN):
+  bridge.mjs: MAX_LINE = 1 MB. Terminated over-long line -> parse-error response ("line too long (N bytes, max 1048576)"), connection continues. Unterminated buffer past the cap -> parse-error response + buffer reset (previously it would accumulate forever and swallow every later line, valid ones included).
+  Smoke (h2): 4 new checks (terminated reject + alive, unterminated reject + commands work).
+  Debugging note (kept for the record): the first GREEN attempt showed 2 spurious failures; timestamped probes proved the sidecar emitted both errors 9 ms after the write. Root cause: a latent bug in the SMOKE HARNESS — nextEvent's wake() never removed a resolved waiter from this.waiters, so the (h) malformed-line waiter (predicate: command === "parse") stayed alive and silently stole later parse-error events. Fixed: waiter is spliced on resolution. No sidecar behavior was involved.
+  Verification: node sidecar/smoke.mjs -> 42 passed, 0 failed; cargo test -> 6 passed.
+  All 8 native-review advisories are now resolved or explicitly deferred (L14/L15/L16).

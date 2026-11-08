@@ -7,7 +7,7 @@
  * plus one scratch test fixture (created in a temp dir) that exercises
  * sendUserMessage / appendEntry / setSessionName / registerFlag /
  * setThinkingLevel, and pins the P1 advisory fixes: shutdown dispatch
- * guard and orderly exit on a broken stdout pipe.
+ * guard, orderly exit on a broken stdout pipe, and the 1 MB stdin line cap.
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -83,6 +83,9 @@ class FakeCore {
 				const ev = find();
 				if (ev) {
 					clearTimeout(timer);
+					// Drop the waiter once satisfied: a lingering resolved waiter would
+					// keep stealing later events that match its predicate.
+					this.waiters.splice(this.waiters.indexOf(wake), 1);
 					resolve(ev);
 				}
 			};
@@ -326,6 +329,29 @@ async function main() {
 		core.sendRaw("this is not json {");
 		const parseErr = await core.nextEvent((e) => e.type === "response" && e.command === "parse", "parse error");
 		check("malformed line -> parse error", parseErr.success === false && /Failed to parse command/.test(parseErr.error), parseErr);
+
+		// (h2) line-length cap: over-long lines are rejected with a parse error
+		// and the connection survives (v0 stdin hardening)
+		core.sendRaw("a".repeat(1024 * 1024 + 1));
+		const tooLong = await core.nextEvent(
+			(e) => e.type === "response" && e.command === "parse" && /too long/.test(e.error),
+			"too-long line",
+			5000,
+		).catch(() => null);
+		check("over-long line rejected with parse error", tooLong?.success === false, tooLong);
+		const alive = await core.request({ type: "user_bash", event: { type: "user_bash", command: "echo alive", excludeFromContext: false, cwd: tmp } });
+		check("connection alive after over-long line", alive.success === true && alive.data === null, alive);
+		child.stdin.write("a".repeat(1024 * 1024 + 1)); // unterminated: no newline yet
+		const untermErr = await core.nextEvent(
+			(e) => e.type === "response" && e.command === "parse" && /unterminated/.test(e.error),
+			"unterminated too-long line",
+			5000,
+		).catch(() => null);
+		check("unterminated over-long line rejected and reset", untermErr !== null, untermErr);
+		const alive2 = await core
+			.request({ type: "user_bash", event: { type: "user_bash", command: "echo alive2", excludeFromContext: false, cwd: tmp } }, 5000)
+			.catch((e) => ({ success: false, error: e.message }));
+		check("commands work after unterminated over-long line", alive2.success === true, alive2);
 		const unknown = await core.request({ type: "bogus_command" });
 		check("unknown command error", unknown.success === false && /Unknown command: bogus_command/.test(unknown.error), unknown);
 
