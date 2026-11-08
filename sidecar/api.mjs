@@ -151,12 +151,18 @@ export function createBridgeActions({ output, sendRequest, session, state }) {
 			return false;
 		},
 		getThinkingLevel: () => session.view.thinkingLevel,
-		setThinkingLevel: (level) => {
-			session.view.thinkingLevel = level;
-			session.sessionManager.appendThinkingLevelChange(level);
-			void sendRequest({ type: "set_thinking_level_request", level }).then((res) => {
-				if (!res.success || !res.data?.ok) log(`set_thinking_level_request for "${level}" not applied by core`);
-			});
+		// Gated like setModel: the sidecar state and the session log only move once
+		// the core confirmed the change (an unconfirmed optimistic update would
+		// claim a change the core never applied).
+		setThinkingLevel: async (level) => {
+			const res = await sendRequest({ type: "set_thinking_level_request", level });
+			if (res.success && res.data?.ok) {
+				session.view.thinkingLevel = level;
+				session.sessionManager.appendThinkingLevelChange(level);
+				return true;
+			}
+			log(`set_thinking_level_request for "${level}" not applied by core`);
+			return false;
 		},
 	};
 }

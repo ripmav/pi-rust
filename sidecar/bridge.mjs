@@ -29,6 +29,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	const cwd = process.cwd();
 	const output = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
+	// A broken pipe (core died) must not crash the sidecar: log and exit orderly.
+	process.stdout.on("error", (err) => {
+		log(`stdout write failed: ${message(err)}; exiting`);
+		process.exit(1);
+	});
+
 	// ---- stdin pump (upstream jsonl semantics: \n-delimited, strip \r, flush non-empty tail at end)
 	const queue = [];
 	let buf = "";
@@ -329,6 +335,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			shutdown();
 			return;
 		}
+		if (shuttingDown) break; // shutdown in flight: stop dispatching queued commands
 		let parsed;
 		try {
 			parsed = JSON.parse(line);
