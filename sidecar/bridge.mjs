@@ -294,8 +294,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				// Bridge v0.1 addition (not in the protocol doc yet): invoke a registered extension command.
 				const resolved = runner.getCommand(command.name) ?? runner.getRegisteredCommands().find((c) => c.name === command.name);
 				if (!resolved) return response(id, type, false, undefined, `Unknown command: ${command.name}`);
-				await resolved.handler(command.args ?? "", runner.createCommandContext());
-				return response(id, type, true);
+				const result = await resolved.handler(command.args ?? "", runner.createCommandContext());
+				return response(id, type, true, result ?? null);
 			}
 			default: {
 				if (F_AND_FORGET.has(type)) {
