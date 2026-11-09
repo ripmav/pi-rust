@@ -1,10 +1,12 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 
 /// One scripted tool call.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolCallSpec {
     pub id: String,
     pub name: String,
@@ -12,16 +14,21 @@ pub struct ToolCallSpec {
 }
 
 /// One scripted assistant turn: optional text plus zero or more tool calls.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AssistantTurn {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallSpec>,
 }
 
-/// Scripted model driver: emits turns in the scripted order.
+/// Model driver: produces the next assistant turn for the conversation so far.
+/// Object-safe async without a trait macro: `dyn ModelDriver` is used at the
+/// agent-loop seam (fake driver in scenarios/tests, real providers otherwise).
 pub trait ModelDriver: Send + Sync {
-    /// Next scripted turn; `None` = script exhausted (a model script error).
-    fn next_turn(&self) -> Option<AssistantTurn>;
+    /// `Err` = the run cannot finish (script exhausted or provider failure).
+    fn complete<'a>(
+        &'a self,
+        convo: &'a [Value],
+    ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>>;
 }
 
 pub struct FakeDriver {
@@ -61,7 +68,16 @@ impl FakeDriver {
 }
 
 impl ModelDriver for FakeDriver {
-    fn next_turn(&self) -> Option<AssistantTurn> {
-        self.turns.lock().unwrap().pop_front()
+    fn complete<'a>(
+        &'a self,
+        _convo: &'a [Value],
+    ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+        Box::pin(async move {
+            self.turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("model script exhausted before the run could finish"))
+        })
     }
 }
