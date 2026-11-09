@@ -53,6 +53,20 @@ compaction events, MCP transport, provider invocation, `ctx.ui.custom`,
 interactive REPL/TUI. Details in
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
+### Extension discovery and `~/.pi`
+
+The sidecar runs the original upstream loader, so discovery follows the
+upstream three-stage order: (1) `<project>/.pi/extensions/`, (2)
+`<agent-dir>/extensions/`, (3) explicit `--extension-dir` paths (deduped by
+resolved path). By default the core passes a **fresh, isolated agent dir**, so
+`~/.pi` is **not read**: your global extensions in `~/.pi/agent/extensions/`
+do not load, and nothing else in `~/.pi` (settings, models, sessions, auth)
+is touched by the core — sessions use its own v0 JSONL format, and models
+and credentials come from the CLI/env. To also load your global user
+extensions, run with `--agent-dir ~/.pi/agent`. Individual extensions can of
+course still access `~/.pi` themselves (the sidecar is a regular Node
+process).
+
 Validated end-to-end (unmodified upstream examples, `tests/extension_bridge.rs`):
 `hello`, `with-deps` (npm deps), `permission-gate`, `claude-rules`,
 `plan-mode`, `prompt-customizer` + the degraded sidecar-crash path.
