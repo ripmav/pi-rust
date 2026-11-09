@@ -67,8 +67,8 @@ stable, npm.
 cd upstream && npm ci --no-audit --no-fund && npm run build && cd ..
 
 # 2. Run the test suite (spawns real sidecar + unmodified extensions):
-cargo test                 # 6 e2e integration tests
-node sidecar/smoke.mjs     # 34 sidecar protocol assertions (fake core)
+cargo test                 # 7 e2e integration tests + 7 provider/unit tests
+node sidecar/smoke.mjs     # 42 sidecar protocol assertions (fake core)
 
 # 3. Run a scenario:
 source $HOME/.cargo/env    # if rustup is not on PATH
@@ -81,9 +81,12 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
 ```
 pi-rust --extension-dir <path> (repeatable)
         [--agent-dir <path>]          # isolated discovery dir (default: temp)
-        --scenario <scenario.json>    # required
+        --scenario <scenario.json>    # one of --scenario / --prompt
+        | --prompt <text>             # one of --scenario / --prompt (provider mode)
         [--session-file <path>]       # default: .pi-rust/sessions/<uuid>.jsonl
-        [--command <name> [args...]]  # repeatable; run after ready, before the scenario
+        [--command <name> [args...]]  # repeatable; run after ready, before the runs
+        [--provider fake|openai|anthropic]  # default: fake
+        [--model <id>]                # required for real providers
 ```
 
 Env: `PI_RUST_SIDECAR` (sidecar entry override), `PI_RUST_NODE` (node binary).
@@ -110,6 +113,32 @@ directory.
 `user_messages[i]` (consecutive `tool_call` entries form one multi-call turn).
 Unknown tool names abort the run (exit 2) — that is a test assertion signal.
 
+### Real model providers
+
+`--provider openai` speaks the OpenAI-compatible `chat/completions` endpoint
+(streaming SSE, tool calls by `index`), `--provider anthropic` speaks the
+native `messages` endpoint (`content_block_*` events, `tool_use` blocks).
+Credentials come **only** from environment variables; nothing reads keys from
+config files:
+
+| Provider  | Key env | Base URL env | Default base URL |
+|-----------|---------|--------------|------------------|
+| openai    | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` |
+| anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
+
+```sh
+OPENAI_API_KEY=... cargo run -- --provider openai --model gpt-4o --prompt "hello"
+ANTHROPIC_API_KEY=... cargo run -- --provider anthropic --model claude-sonnet-4-20250514 --prompt "hello"
+```
+
+The conversation sent to the provider is the full transcript
+(system prompt incl. extension additions, user/assistant/tool results), and
+extension tool results flow back as `tool` / `tool_result` messages — so
+extensions with tools work unchanged against real models. `max_tokens` is
+fixed at 4096 in v0. The bridge protocol, sidecar, and scenario mode are
+unaffected (providers are core-side only). Provider behavior is tested
+against local mock HTTP servers (no live APIs in CI).
+
 ### Output contract
 
 - **stdout**: machine-readable NDJSON event log — `user_input`, `decision`
@@ -129,7 +158,7 @@ session-file compatible (a later milestone).
 ## Repository layout
 
 ```
-src/            Rust core (transport, client, model, tools, session, agent, cli)
+src/            Rust core (transport, client, model, provider, tools, session, agent, cli)
 sidecar/        Node sidecar (protocol server, API shim, dialogs, session view, smoke)
 tests/          e2e integration tests (spawn core + sidecar + unmodified extensions)
 tests/fixtures/ test-only fixture extensions (clearly marked; not upstream code)
@@ -140,6 +169,6 @@ upstream/       earendil-works/pi @ 085c84e (gitignored reference clone)
 
 ## Next milestones (not in this PoC)
 
-Interactive TUI (ratatui) with theme/keybinding parity, real model drivers
-(OpenAI-compatible first), compaction, MCP transport, upstream session-file
-compat, provider invocation of `registerProvider` extensions, sidecar respawn.
+Interactive TUI (ratatui) with theme/keybinding parity, compaction, MCP
+transport, upstream session-file compat, provider invocation of
+`registerProvider` extensions, sidecar respawn, token/cost accounting.

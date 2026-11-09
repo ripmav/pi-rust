@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::client::{BridgeClient, Decision, State};
 use crate::model::{AssistantTurn, FakeDriver, ModelDriver};
+use crate::provider::ProviderDriver;
 use crate::session::{now_ms, Session};
 use crate::tools;
 
@@ -79,6 +80,8 @@ pub struct Core {
     pub model: Arc<Mutex<(Value, Option<String>)>>,     // (active model, thinking level)
     pub msg_tx: mpsc::UnboundedSender<Item>,
     pub done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Live provider driver (None = scripted fake driver per scenario run).
+    pub provider: Option<ProviderDriver>,
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -345,7 +348,11 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
 /// `agent_start` → turns (`context_with_system` → model output events → tool
 /// calls → `turn_end`) → `agent_end`.
 async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
-    let driver = Arc::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?);
+    let driver: Box<dyn ModelDriver> = match ctx.provider.as_ref() {
+        Some(ProviderDriver::OpenAi(d)) => Box::new(d.clone()),
+        Some(ProviderDriver::Anthropic(d)) => Box::new(d.clone()),
+        None => Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?),
+    };
 
     // `input` decision: transforms chain; "handled" drops the input (no turn).
     let mut text = u.text.clone();
@@ -404,17 +411,17 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     loop {
         // `context` always answers data:null; the single emitContext runs on
         // `context_with_system` — send the full transcript and use the returned
-        // conversation as-is for the (fake) provider request.
+        // conversation as-is for the provider request (sidecar may transform it).
+        let mut convo = build_conversation(ctx, &system_prompt, &custom);
         if subscribed(ctx, "context_with_system") {
-            let convo = build_conversation(ctx, &system_prompt, &custom);
-            let event = json!({"type":"context_with_system","messages":convo});
-            decision_data(ctx, ctx.client.request("context_with_system", json!({"event":event.clone()})).await, "context_with_system", &event, &Value::Null);
+            let event = json!({"type":"context_with_system","messages":convo.clone()});
+            let resp = decision_data(ctx, ctx.client.request("context_with_system", json!({"event":event.clone()})).await, "context_with_system", &event, &Value::Null);
+            if let Some(ms) = resp.as_array() {
+                convo = ms.clone();
+            }
         }
 
-        let turn = match driver.next_turn() {
-            Some(t) => t,
-            None => return Err("model script exhausted before the run could finish".into()),
-        };
+        let turn = driver.complete(&convo).await.map_err(|e| e.to_string())?;
         if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
         ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
 

@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod model;
 mod session;
+mod provider;
 mod tools;
 mod transport;
 
