@@ -52,3 +52,5 @@ for scenarios and tests.
 - L3: PR #2 (milestone 1) open and MERGEABLE on ripmav/pi-rust (merge is the user's
   decision); base `main` = 978c3aa (scaffold), feature branch `feat/extension-bridge`
   — this milestone builds on it.
+- L4: Slice boundary: milestone 1 ships as PR #2 (already split); milestone 2 is the
+  next PR slice (T1-T4 + this doc) — one PR per milestone, work-unit commits inside.
