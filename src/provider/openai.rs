@@ -203,7 +203,11 @@ mod tests {
 		let turn = d.complete(&mock::test_convo()).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("ok"));
 		let req = rx.recv().await.unwrap();
-		let (first, auth, body) = (req.lines().next().unwrap(), req.lines().nth(1).unwrap_or(""), req.lines().skip(2).collect::<Vec<_>>().join("\n"));
+		let lines: Vec<&str> = req.lines().collect();
+		let sep = lines.iter().position(|l| *l == "---").unwrap();
+		let first = lines[0];
+		let auth = lines[1..sep].iter().find(|l| l.starts_with("authorization:")).copied().unwrap_or("");
+		let body = lines[sep + 1..].join("\n");
 		assert_eq!(first, "POST /chat/completions", "{first}");
 		assert_eq!(auth, "authorization: bearer test-key", "{auth}");
 		let v: Value = serde_json::from_str(&body).unwrap();

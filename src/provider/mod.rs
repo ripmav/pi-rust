@@ -48,13 +48,12 @@ pub(crate) mod mock {
 			let first = head.lines().next().unwrap_or_default();
 			let mut parts = first.split_whitespace();
 			let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
-			let auth = head
+			let headers: Vec<String> = head
 				.lines()
-				.find(|l| l.to_lowercase().starts_with("authorization:"))
-				.unwrap_or("")
-				.trim()
-				.to_lowercase();
-			let _ = tx.send(format!("{method} {path}\n{auth}\n{body}")).await;
+				.skip(1)
+				.map(|l| l.trim().to_lowercase())
+				.collect();
+			let _ = tx.send(format!("{method} {path}\n{}\n---\n{body}", headers.join("\n"))).await;
 			let _ = sock.write_all(response.as_bytes()).await;
 			let _ = sock.shutdown().await;
 		});
