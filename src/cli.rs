@@ -100,7 +100,7 @@ pub async fn run() -> Result<i32> {
     }
     let cwd = std::env::current_dir().context("cwd")?;
     let runs = match (&scenario_path, &prompt) {
-        (Some(p), Some(_)) => bail!("--scenario and --prompt are mutually exclusive"),
+        (Some(_), Some(_)) => bail!("--scenario and --prompt are mutually exclusive"),
         (Some(p), None) => {
             let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
