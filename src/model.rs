@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 
 /// One scripted tool call.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolCallSpec {
     pub id: String,
     pub name: String,
@@ -14,7 +14,7 @@ pub struct ToolCallSpec {
 }
 
 /// One scripted assistant turn: optional text plus zero or more tool calls.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AssistantTurn {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallSpec>,
