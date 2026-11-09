@@ -1,0 +1,10 @@
+{
+	"name": "pi-rust-extension-sidecar",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Node sidecar: runs the original upstream pi extension loader + ExtensionRunner and serves the bridge protocol (NDJSON over stdio) to the Rust core.",
+	"scripts": {
+		"smoke": "node smoke.mjs"
+	}
+}
