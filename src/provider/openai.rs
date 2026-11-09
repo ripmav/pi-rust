@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
+#[derive(Debug)]
 pub struct OpenAiDriver {
 	base_url: String,
 	api_key: String,

@@ -13,6 +13,7 @@ use std::pin::Pin;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+#[derive(Debug)]
 pub struct AnthropicDriver {
 	base_url: String,
 	api_key: String,
