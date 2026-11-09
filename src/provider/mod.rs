@@ -5,6 +5,85 @@
 pub mod anthropic;
 pub mod openai;
 
+pub use anthropic::AnthropicDriver;
+pub use openai::OpenAiDriver;
+
+use crate::model::{AssistantTurn, ModelDriver};
+use anyhow::{Context, Result};
+use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+/// A live provider driver shared by the agent loop (cloned per run).
+#[derive(Clone, Debug)]
+pub enum ProviderDriver {
+	OpenAi(Arc<OpenAiDriver>),
+	Anthropic(Arc<AnthropicDriver>),
+}
+
+/// Builds the driver from CLI values + env vars (S3: keys only from env).
+pub fn build_provider(name: &str, model: Option<&str>) -> Result<Option<ProviderDriver>> {
+	match name {
+		"fake" => Ok(None),
+		"openai" => {
+			let model = model.context("--provider openai requires --model <id>")?;
+			let key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is not set")?;
+			let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
+			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
+		}
+		"anthropic" => {
+			let model = model.context("--provider anthropic requires --model <id>")?;
+			let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
+			let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
+			Ok(Some(ProviderDriver::Anthropic(Arc::new(AnthropicDriver::new(base, key, model.to_string())))))
+		}
+		other => anyhow::bail!("--provider must be fake|openai|anthropic (got {other})"),
+	}
+}
+
+impl ModelDriver for Arc<OpenAiDriver> {
+	fn complete<'a>(&'a self, convo: &'a [Value]) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		self.as_ref().complete(convo)
+	}
+}
+
+impl ModelDriver for Arc<AnthropicDriver> {
+	fn complete<'a>(&'a self, convo: &'a [Value]) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		self.as_ref().complete(convo)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn build_provider_requires_env_keys() {
+		let _ = std::env::remove_var("OPENAI_API_KEY");
+		let _ = std::env::remove_var("ANTHROPIC_API_KEY");
+		let err = build_provider("openai", Some("m")).unwrap_err().to_string();
+		assert!(err.contains("OPENAI_API_KEY"), "{err}");
+		let err = build_provider("anthropic", Some("m")).unwrap_err().to_string();
+		assert!(err.contains("ANTHROPIC_API_KEY"), "{err}");
+		let err = build_provider("openai", None).unwrap_err().to_string();
+		assert!(err.contains("--model"), "{err}");
+		assert!(build_provider("bogus", Some("m")).is_err());
+		std::env::set_var("OPENAI_API_KEY", "test-key");
+		match build_provider("openai", Some("m")).unwrap().unwrap() {
+			ProviderDriver::OpenAi(_) => {}
+			_ => panic!("expected OpenAi"),
+		}
+		std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+		match build_provider("anthropic", Some("m")).unwrap().unwrap() {
+			ProviderDriver::Anthropic(_) => {}
+			_ => panic!("expected Anthropic"),
+		}
+		std::env::remove_var("OPENAI_API_KEY");
+		std::env::remove_var("ANTHROPIC_API_KEY");
+	}
+}
+
 #[cfg(test)]
 pub(crate) mod mock {
 	/// Minimal mock: accepts ONE HTTP request, records it as

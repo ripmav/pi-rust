@@ -54,3 +54,25 @@ for scenarios and tests.
   — this milestone builds on it.
 - L4: Slice boundary: milestone 1 ships as PR #2 (already split); milestone 2 is the
   next PR slice (T1-T4 + this doc) — one PR per milestone, work-unit commits inside.
+- L5: T1-T4 complete and green:
+    - T1: `ModelDriver::complete(conversation)` async + object-safe (boxed
+      future, no async_trait); agent loop sends `context_with_system` (system
+      prompt + tool schemas from the sidecar) and honors an extension
+      replacement of the conversation.
+    - T2: OpenAI-compatible driver (POST {base}/chat/completions, Bearer,
+      SSE, chunked tool_calls by index, non-2xx mapped to errors) + 3
+      mock-server tests.
+    - T3: Anthropic driver (x-api-key + anthropic-version 2023-06-01,
+      top-level system, toolResult -> user tool_result blocks, same-role
+      merge for alternation, content_block_* assembly incl. input_json_delta)
+      + 3 mock-server tests.
+    - T4: --provider fake|openai|anthropic, --model, --prompt (mutually
+      exclusive with --scenario); keys only from env (S3, pinned by
+      build_provider_requires_env_keys); README provider section; e2e
+      provider_e2e_prompt_via_mock_openai (core+sidecar+mock provider, exit 0,
+      transcript contains the completion).
+  - Verification: cargo test 13 passed (7 unit/provider + 6 e2e + 1 provider
+    e2e = 7+7 across the two binaries), node sidecar/smoke.mjs 42 passed.
+  - Mock lesson: a std-socket mock must search the received buffer for the
+    CRLFCRLF terminator (reqwest delivers headers+body in one segment); a
+    tail-only check hangs the second read on EAGAIN.

@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::client::{BridgeClient, Decision, State};
 use crate::model::{AssistantTurn, FakeDriver, ModelDriver};
+use crate::provider::ProviderDriver;
 use crate::session::{now_ms, Session};
 use crate::tools;
 
@@ -79,6 +80,8 @@ pub struct Core {
     pub model: Arc<Mutex<(Value, Option<String>)>>,     // (active model, thinking level)
     pub msg_tx: mpsc::UnboundedSender<Item>,
     pub done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Live provider driver (None = scripted fake driver per scenario run).
+    pub provider: Option<ProviderDriver>,
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -345,7 +348,11 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
 /// `agent_start` → turns (`context_with_system` → model output events → tool
 /// calls → `turn_end`) → `agent_end`.
 async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
-    let driver = Arc::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?);
+    let driver: Box<dyn ModelDriver> = match ctx.provider.as_ref() {
+        Some(ProviderDriver::OpenAi(d)) => Box::new(d.clone()),
+        Some(ProviderDriver::Anthropic(d)) => Box::new(d.clone()),
+        None => Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?),
+    };
 
     // `input` decision: transforms chain; "handled" drops the input (no turn).
     let mut text = u.text.clone();
