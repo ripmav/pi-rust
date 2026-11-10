@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::agent::{Core, EventLog, Item, QueuedUser};
 use crate::client::{BridgeClient, Decision, INIT_TIMEOUT_MS};
 use crate::model::FakeDriver;
+use crate::provider::{build_provider, ProviderDriver};
 use crate::session::Session;
 use crate::transport;
 
@@ -66,6 +67,9 @@ pub async fn run() -> Result<i32> {
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
+    let mut provider_name = String::from("fake");
+    let mut model_id: Option<String> = None;
+    let mut prompt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let val = |args: &Vec<String>, i: &mut usize| -> Result<String> {
@@ -77,6 +81,9 @@ pub async fn run() -> Result<i32> {
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
+            "--provider" => provider_name = val(&args, &mut i)?,
+            "--model" => model_id = Some(val(&args, &mut i)?),
+            "--prompt" => prompt = Some(val(&args, &mut i)?),
             "--command" => {
                 let name = val(&args, &mut i)?;
                 // Variadic args: consume until the next `--` flag (or end).
@@ -87,14 +94,23 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> [--session-file <p>]"),
+            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> [--session-file <p>] [--provider fake|openai|anthropic] [--model <id>] [--prompt <text>]"),
         }
         i += 1;
     }
     let cwd = std::env::current_dir().context("cwd")?;
-    let spath = scenario_path.clone().context("--scenario <file> is required")?;
-    let raw = std::fs::read_to_string(&spath).with_context(|| format!("reading {}", spath.display()))?;
-    let runs = parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?;
+    let runs = match (&scenario_path, &prompt) {
+        (Some(_), Some(_)) => bail!("--scenario and --prompt are mutually exclusive"),
+        (Some(p), None) => {
+            let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
+        }
+        (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
+        (None, None) => bail!("--scenario <file> or --prompt <text> is required"),
+    };
+    // S3: provider credentials come from env only; the fake driver needs none.
+    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref())?;
+    let fake_mode = provider.is_none();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
@@ -151,6 +167,7 @@ pub async fn run() -> Result<i32> {
         model: Arc::default(),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
+        provider,
     });
     tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
@@ -189,10 +206,14 @@ pub async fn run() -> Result<i32> {
         log.emit(line);
     }
 
-    // Seed the scenario: one agent run per user message with its own script.
+    // Seed the runs: one agent run per user message. Fake mode validates each
+    // model_script up front; provider mode ignores scripts (real completions).
     for r in &runs {
-        FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
-        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source: "rpc", steps: r.steps.clone() })).unwrap();
+        if fake_mode {
+            FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+        }
+        let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
+        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone() })).unwrap();
     }
     msg_tx.send(Item::End).unwrap();
 
