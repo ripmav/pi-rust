@@ -42,7 +42,7 @@ order, errors), the WP file wins.
 | T4 | S4 | 304 | #14 | inline TDD | 9bb9352 |
 | T5 | S5 | 305 | #15 | inline TDD | 8aa1a11 |
 | T6 | S6 | 306 | #16 | inline TDD | c152ce4 |
-| T7 | S7 | 307 | #17 | inline TDD | — |
+| T7 | S7 | 307 | #17 | inline TDD | 3a740c0 |
 
 ## Log
 
@@ -130,3 +130,18 @@ order, errors), the WP file wins.
   var default and --isolated escape. provider_e2e made hermetic with an
   explicit --agent-dir (it previously relied on the temp default). Suite:
   31 in-crate + 12 e2e.
+- L13: T7/WP-307 done (3a740c0): `src/templates.rs` — discovery
+  (<agentDir>/prompts + .pi/prompts, project wins), expansion ported from
+  upstream prompt-templates.ts ($1..$9, $@/$ARGUMENTS, ${N:-default},
+  ${ARGUMENTS:-default}, one pass, no recursion), bash-style arg parsing;
+  --template <name> [args...] (mutually exclusive with --scenario/--prompt).
+  v0 deviations recorded in the WP file: no frontmatter parsing, no
+  ${@:N:M} slicing, $A-alone literal. Fake driver: prompt runs (no scenario
+  script) get a deterministic `echo: <prompt>` turn (scripted runs unchanged).
+  Suite: 35 in-crate + 14 e2e + 42 smoke.
+- L14: M3 delivered: PR #18 (main ← feat/m3-config-and-state,
+  type:feature). PR #18 carries M2 as well (M2 merged into
+  feat/extension-branch via PR #4, not main) — merging #18 makes PR #10
+  superseded (to be closed after merge). All WP issues #11–#17 closed with
+  commits. README updated (agent dir, sessions v3, credentials, templates,
+  CLI). Roadmap statuses updated (M3 done).
