@@ -3,6 +3,7 @@
 //! and sidecar never see provider details. Credentials come from the caller
 //! (env vars at the CLI layer) — never from config files.
 pub mod anthropic;
+pub mod google;
 pub mod openai;
 
 pub use anthropic::AnthropicDriver;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 pub enum ProviderDriver {
 	OpenAi(Arc<OpenAiDriver>),
 	Anthropic(Arc<AnthropicDriver>),
+	Google(Arc<google::GoogleDriver>),
 }
 
 impl ProviderDriver {
@@ -32,6 +34,7 @@ impl ProviderDriver {
 		match self {
 			ProviderDriver::OpenAi(d) => d.complete(convo),
 			ProviderDriver::Anthropic(d) => d.complete(convo),
+			ProviderDriver::Google(d) => d.complete(convo),
 		}
 	}
 }
@@ -55,10 +58,30 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 				.unwrap_or_else(|_| compat_family_base(p).unwrap().to_string());
 			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
 		}
+		"google" => {
+			let model = model.context("--provider google requires --model <id>")?;
+			let key = crate::auth::resolve_api_key("google", agent_dir)?;
+			let base = std::env::var("GOOGLE_BASE_URL")
+				.unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".into());
+			Ok(Some(ProviderDriver::Google(Arc::new(google::GoogleDriver::new(base, key, model.to_string())))))
+		}
+		"google-vertex" => {
+			let model = model.context("--provider google-vertex requires --model <id>")?;
+			let key = crate::auth::resolve_api_key("google-vertex", agent_dir)?;
+			// v0: explicit API key only (x-goog-api-key). ADC/bearer needs the
+			// gcloud token flow, which is a typed rejection here.
+			let project = std::env::var("GOOGLE_CLOUD_PROJECT")
+				.context("--provider google-vertex requires GOOGLE_CLOUD_PROJECT (API key auth; ADC is not supported in v0)")?;
+			let location = std::env::var("GOOGLE_CLOUD_LOCATION")
+				.context("--provider google-vertex requires GOOGLE_CLOUD_LOCATION (API key auth; ADC is not supported in v0)")?;
+			let base = std::env::var("GOOGLE_VERTEX_BASE_URL")
+				.unwrap_or_else(|_| format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google"));
+			Ok(Some(ProviderDriver::Google(Arc::new(google::GoogleDriver::new(base, key, model.to_string())))))
+		}
 		p if not_supported_v0(p).is_some() => {
 			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
 		}
-		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, openai, groq, cerebras, deepseek, together, huggingface, openrouter; google/azure/cloudflare/bedrock arrive in later M4 WPs)"),
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, openai, groq, cerebras, deepseek, together, huggingface, openrouter; azure/cloudflare/bedrock arrive in later M4 WPs)"),
 	}
 }
 
@@ -77,6 +100,42 @@ impl ModelDriver for Arc<AnthropicDriver> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn build_google_and_vertex() {
+		let agent_dir = std::env::temp_dir().join(format!("pi-rust-gbuild-{}", uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&agent_dir).unwrap();
+		std::fs::write(
+			agent_dir.join("auth.json"),
+			serde_json::json!({"google":{"type":"api_key","key":"g-key"},
+			                   "google-vertex":{"type":"api_key","key":"v-key"}}).to_string(),
+		)
+		.unwrap();
+		// google: env base override + auth.json key.
+		std::env::set_var("GOOGLE_BASE_URL", "http://127.0.0.1:1");
+		match build_provider("google", Some("gemini-2.0-flash"), &agent_dir).unwrap().unwrap() {
+			ProviderDriver::Google(_) => {}
+			_ => panic!("expected Google"),
+		}
+		// vertex: project/location env required (typed error without them).
+		std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+		let err = build_provider("google-vertex", Some("gemini-2.0-flash-001"), &agent_dir)
+			.unwrap_err()
+			.to_string();
+		assert!(err.contains("GOOGLE_CLOUD_PROJECT"), "{err}");
+		std::env::set_var("GOOGLE_CLOUD_PROJECT", "proj-x");
+		std::env::set_var("GOOGLE_CLOUD_LOCATION", "us-central1");
+		std::env::remove_var("GOOGLE_VERTEX_BASE_URL");
+		match build_provider("google-vertex", Some("gemini-2.0-flash-001"), &agent_dir).unwrap().unwrap() {
+			ProviderDriver::Google(_) => {}
+			_ => panic!("expected Google (vertex)"),
+		}
+		std::env::remove_var("GOOGLE_BASE_URL");
+		std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+	}
+
 
 	#[test]
 	fn build_provider_requires_credentials() {
