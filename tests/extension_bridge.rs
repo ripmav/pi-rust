@@ -95,18 +95,20 @@ fn bridge_scenario_end_to_end() {
     assert_eq!(model_outputs.len(), 2);
     assert_eq!(model_outputs[0]["toolCalls"], json!(["bash", "hello", "bash"]));
 
-    // Final transcript: full session = 1 user + 2 assistant + 3 tool results.
+    // Final transcript: full session = 1 user + 2 assistant + 3 tool results,
+    // all as upstream v3 `message` entries.
     let last = lines.last().expect("no stdout lines");
     assert_eq!(last["kind"], "transcript");
     let entries = last["session"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 6, "transcript entries wrong\n{stdout}");
-    let types: Vec<&str> = entries.iter().map(|e| e["type"].as_str().unwrap()).collect();
-    assert_eq!(types, vec!["user", "assistant", "tool_result", "tool_result", "tool_result", "assistant"]);
+    assert!(entries.iter().all(|e| e["type"] == "message"), "upstream v3 entry types: {entries:?}");
+    let roles: Vec<&str> = entries.iter().map(|e| e["message"]["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "toolResult", "toolResult", "toolResult", "assistant"]);
     assert_eq!(last["session"]["messages"].as_array().unwrap().len(), 6);
 
-    // The session JSONL file was written (same 6 entries).
+    // The session JSONL file was written: v3 header + same 6 entries.
     let file_lines = std::fs::read_to_string(&session_file).unwrap().lines().count();
-    assert_eq!(file_lines, 6);
+    assert_eq!(file_lines, 7);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -503,4 +505,64 @@ fn provider_e2e_prompt_via_mock_openai() {
     assert_eq!(final_line["kind"], "transcript");
     let dump = final_line["session"].to_string();
     assert!(dump.contains("Hello from mock"), "transcript: {dump}");
+}
+
+/// S4 cross-compatibility: a session file written by pi-rust must be loaded
+/// by the ORIGINAL upstream SessionManager (read-only: open + read API).
+#[test]
+fn upstream_sessionmanager_reads_pirust_session() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-cross-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let ext = std::path::Path::new("tests/fixtures");
+    let scenario = json!({
+        "user_messages": ["cross-check session"],
+        "model_scripts": [[
+            { "tool_call": { "name": "bash", "input": { "command": "echo x" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("cross.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(ext.join("hello.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    // The original upstream SessionManager opens and reads the file.
+    let node = std::env::var("PI_RUST_NODE").unwrap_or_else(|_| "node".into());
+    let script = format!(r#"
+import {{ SessionManager }} from "{dist}";
+const sm = await SessionManager.open("{file}");
+const header = sm.getHeader();
+const entries = sm.getEntries();
+const branch = sm.getBranch();
+if (header.version !== 3) throw new Error("bad version " + header.version);
+if (entries.length !== 4) throw new Error("bad entry count " + entries.length);
+if (branch.length !== 4) throw new Error("bad branch length " + branch.length);
+const roles = branch.filter(e => e.type === "message").map(e => e.message.role);
+const want = ["user","assistant","toolResult","assistant"];
+if (JSON.stringify(roles) !== JSON.stringify(want)) throw new Error("bad roles " + JSON.stringify(roles));
+if (sm.getSessionFile() === null) throw new Error("no session file");
+console.log("UPSTREAM-READ-OK");
+"#,
+        dist = format!("file://{}/upstream/packages/coding-agent/dist/index.js", env!("CARGO_MANIFEST_DIR")),
+        file = session_file.to_string_lossy(),
+    );
+    let node_out = Command::new(&node)
+        .arg("--input-type=module")
+        .arg("--eval")
+        .arg(script)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("running node");
+    let node_stdout = String::from_utf8_lossy(&node_out.stdout).to_string();
+    let node_stderr = String::from_utf8_lossy(&node_out.stderr).to_string();
+    assert!(node_stdout.contains("UPSTREAM-READ-OK"), "upstream SessionManager failed to read pi-rust session\n{node_stdout}\n{node_stderr}");
 }
