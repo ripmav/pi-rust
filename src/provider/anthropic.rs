@@ -44,7 +44,19 @@ impl AnthropicDriver {
 		let mut out: Vec<Value> = Vec::new();
 		for m in convo {
 			let (role, content) = match m.get("role").and_then(Value::as_str) {
-				Some("user") => ("user", json!([json!({"type":"text","text":Self::text_of(m.get("content"))})])),
+				Some("user") => {
+					let mut blocks: Vec<Value> = vec![json!({"type":"text","text":Self::text_of(m.get("content"))})];
+					// S8: pi-ai image blocks -> Anthropic base64 image sources.
+					if let Some(src) = m.get("content").and_then(Value::as_array) {
+						for b in src.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("image")) {
+							if let Some(data) = b.get("data").and_then(Value::as_str) {
+								let mime = b.get("mimeType").and_then(Value::as_str).unwrap_or("image/png");
+								blocks.push(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}));
+							}
+						}
+					}
+					("user", json!(blocks))
+				}
 				Some("assistant") => {
 					let mut blocks = Vec::new();
 					if let Some(src) = m.get("content").and_then(Value::as_array) {
@@ -261,7 +273,24 @@ mod tests {
 	use super::*;
 	use crate::provider::mock;
 
-	#[tokio::test]
+		#[test]
+	fn user_image_becomes_base64_source() {
+		let convo = vec![json!({"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image","mimeType":"image/jpeg","data":"aW1hZ2U="}
+		]})];
+		let msgs = AnthropicDriver::map_messages(&convo);
+		let user = &msgs[0];
+		assert_eq!(user["role"], "user");
+		let blocks = user["content"].as_array().unwrap();
+		assert_eq!(blocks[0], json!({"type":"text","text":"describe"}));
+		assert_eq!(
+			blocks[1],
+			json!({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"aW1hZ2U="}})
+		);
+	}
+
+#[tokio::test]
 	async fn captures_usage_from_start_and_delta() {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let sse = concat!(

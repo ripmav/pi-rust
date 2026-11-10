@@ -14,6 +14,51 @@ use crate::transport;
 struct RunSpec {
     text: String,
     steps: Vec<Value>,
+    /// (mime, base64) attachments for `--image` (first prompt run only).
+    images: Vec<(String, String)>,
+}
+
+/// MIME detection by magic bytes (png/jpeg/gif/webp — the formats the
+/// upstream `@file` image path accepts).
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+	if bytes.len() > 7 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+		Some("image/png")
+	} else if bytes.len() > 2 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+		Some("image/jpeg")
+	} else if bytes.len() > 3 && &bytes[..4] == b"GIF8" {
+		Some("image/gif")
+	} else if bytes.len() > 11 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+		Some("image/webp")
+	} else {
+		None
+	}
+}
+
+fn b64(data: &[u8]) -> String {
+	const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	let mut out = String::new();
+	for chunk in data.chunks(3) {
+		let b0 = chunk[0];
+		let b1 = *chunk.get(1).unwrap_or(&0);
+		let b2 = *chunk.get(2).unwrap_or(&0);
+		out.push(T[(b0 >> 2) as usize] as char);
+		out.push(T[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+		out.push(if chunk.len() > 1 { T[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+		out.push(if chunk.len() > 2 { T[(b2 & 63) as usize] as char } else { '=' });
+	}
+	out
+}
+
+/// Read + validate an `--image` attachment: typed errors for missing files
+/// and unsupported formats (S8).
+fn read_image_attachment(path: &Path) -> Result<(String, String)> {
+	let bytes = std::fs::read(path)
+		.with_context(|| format!("--image: cannot read file: {}", path.display()))?;
+	let mime = match detect_image_mime(&bytes) {
+		Some(m) => m,
+		None => bail!("--image: not a supported image format (png, jpeg, gif, webp): {}", path.display()),
+	};
+	Ok((mime.to_string(), b64(&bytes)))
 }
 
 /// Scenario JSON: `user_messages: [string]` plus per-message `model_scripts`
@@ -26,7 +71,7 @@ fn parse_scenario(v: &Value) -> Result<Vec<RunSpec>> {
     for (i, m) in user_messages.iter().enumerate() {
         let text = m.as_str().with_context(|| format!("user_messages[{i}] must be a string"))?.to_string();
         let steps = scripts.get(i).and_then(Value::as_array).cloned().unwrap_or_default();
-        runs.push(RunSpec { text, steps });
+        runs.push(RunSpec { text, steps, images: Vec::new() });
     }
     if runs.is_empty() { bail!("scenario needs at least one user message"); }
     Ok(runs)
@@ -75,6 +120,7 @@ pub async fn run() -> Result<i32> {
     let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut image_paths: Vec<PathBuf> = Vec::new();
     let mut template_name: Option<String> = None;
     let mut template_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -96,6 +142,7 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            "--image" => image_paths.push(PathBuf::from(val(&args, &mut i)?)),
             "--template" => {
                 template_name = Some(val(&args, &mut i)?);
                 // Template args: positional tokens until the next flag.
@@ -137,6 +184,9 @@ pub async fn run() -> Result<i32> {
     {
         bail!("--scenario, --prompt and --template are mutually exclusive");
     }
+    if !image_paths.is_empty() && scenario_path.is_some() {
+        bail!("--image requires --prompt or --template (v0: no scenario attachments)");
+    }
     // --template expands to the prompt (S7); discovery reads
     // <agentDir>/prompts + .pi/prompts.
     if let Some(name) = &template_name {
@@ -150,7 +200,11 @@ pub async fn run() -> Result<i32> {
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
         }
         (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
-        (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
+        (None, Some(text)) => vec![RunSpec {
+            text: text.clone(),
+            steps: vec![],
+            images: image_paths.iter().map(|p| read_image_attachment(p)).collect::<Result<_>>()?,
+        }],
         (None, None) => {
             if list_sessions {
                 Vec::new() // --list-sessions needs no scenario
@@ -184,6 +238,32 @@ pub async fn run() -> Result<i32> {
     } else {
         json!({"id":model_id,"provider":provider_name})
     };
+
+    // S8: --image requires an image-capable registry model (openai/anthropic
+    // drivers emit the wire parts; other drivers drop images).
+    if !image_paths.is_empty() {
+        if fake_mode {
+            anyhow::bail!("--image requires a provider model (the fake driver has no image support)");
+        }
+        let model_str = model_id.as_deref().unwrap_or_default();
+        let m = crate::registry::ModelRegistry::bundled()
+            .resolve(&provider_name, model_str)
+            .ok_or_else(|| anyhow::anyhow!("--image: model {provider_name}/{model_str} not in the bundled registry"))?;
+        if !m.input.iter().any(|i| i == "image") {
+            anyhow::bail!("--image: model {provider_name}/{model_str} does not accept image input (input: {})", m.input.join(", "));
+        }
+        if provider_name != "openai" && provider_name != "anthropic" {
+            // OpenAI-compatible providers carry the OpenAI wire; anthropic is
+            // native. Other v0 drivers do not emit image parts.
+            let is_openai_wire = provider_name == "openai"
+                || crate::provider::compat_family_base(&provider_name).is_some()
+                || provider_name == "azure"
+                || provider_name.starts_with("cloudflare");
+            if !is_openai_wire {
+                anyhow::bail!("--image: provider {provider_name} does not support image input in v0");
+            }
+        }
+    }
 
     // Session file: --resume/--fork continue an existing session;
     // --session-file points at one; else the upstream layout under the
@@ -309,7 +389,7 @@ pub async fn run() -> Result<i32> {
             FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
         }
         let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone() })).unwrap();
+        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
     }
     msg_tx.send(Item::End).unwrap();
 
@@ -435,4 +515,51 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
         }
     }
     anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", root.display())
+}
+
+#[cfg(test)]
+mod image_tests {
+	use super::*;
+
+	const PNG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+	const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2];
+	const GIF: &[u8] = b"GIF89a1234";
+	const WEBP: &[u8] = b"RIFF\x0c\x00\x00\x00WEBPVP8 ";
+
+	#[test]
+	fn detects_supported_mimes() {
+		assert_eq!(detect_image_mime(PNG), Some("image/png"));
+		assert_eq!(detect_image_mime(JPEG), Some("image/jpeg"));
+		assert_eq!(detect_image_mime(GIF), Some("image/gif"));
+		assert_eq!(detect_image_mime(WEBP), Some("image/webp"));
+		assert_eq!(detect_image_mime(b"plain text"), None);
+		assert_eq!(detect_image_mime(b"RIFFxxxxxxx"), None); // RIFF but not WEBP
+	}
+
+	#[test]
+	fn b64_encodes_std_vectors() {
+		assert_eq!(b64(b""), "");
+		assert_eq!(b64(b"f"), "Zg==");
+		assert_eq!(b64(b"fo"), "Zm8=");
+		assert_eq!(b64(b"foo"), "Zm9v");
+		assert_eq!(b64(b"foob"), "Zm9vYg==");
+	}
+
+	#[test]
+	fn read_image_attachment_typed_errors() {
+		let dir = std::env::temp_dir().join(format!("pi-rust-img-{}", uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let png = dir.join("a.png");
+		std::fs::write(&png, PNG).unwrap();
+		let (mime, data) = read_image_attachment(&png).unwrap();
+		assert_eq!(mime, "image/png");
+		assert_eq!(data, b64(PNG));
+		let missing = dir.join("nope.png");
+		let err = read_image_attachment(&missing).unwrap_err().to_string();
+		assert!(err.contains("cannot read file"), "{err}");
+		let txt = dir.join("b.png");
+		std::fs::write(&txt, b"definitely not an image").unwrap();
+		let err = read_image_attachment(&txt).unwrap_err().to_string();
+		assert!(err.contains("not a supported image format"), "{err}");
+	}
 }
