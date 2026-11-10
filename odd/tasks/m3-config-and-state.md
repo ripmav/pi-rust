@@ -39,7 +39,7 @@ order, errors), the WP file wins.
 | T1 | S1 | 301 | #11 | inline TDD | bee3fd7 |
 | T2 | S2 | 302 | #12 | inline TDD | — |
 | T3 | S3 | 303 | #13 | inline TDD | 386aa6e |
-| T4 | S4 | 304 | #14 | inline TDD | — |
+| T4 | S4 | 304 | #14 | inline TDD | 9bb9352 |
 | T5 | S5 | 305 | #15 | inline TDD | — |
 | T6 | S6 | 306 | #16 | inline TDD | — |
 | T7 | S7 | 307 | #17 | inline TDD | — |
@@ -98,3 +98,20 @@ order, errors), the WP file wins.
   Security pin: redaction test (no key material in errors). 8 auth unit
   tests, each using its own env var (no parallel-test races). Suite: 22
   in-crate + 7 e2e.
+- L10: T4/WP-304 done (9bb9352): `src/session.rs` rewritten — session files
+  now in the upstream JSONL v3 format: header
+  ({type:"session",version:3,id,timestamp,cwd}), entries
+  (message/session_info/custom/custom_message/thinking_level_change/
+  model_change) with id+parentId tree, ISO-8601 timestamps, pi-ai message
+  shapes (toolCall `input`). `Session::create` / `Session::load` (leaf-chain
+  walk — branches handled structurally). Default path = upstream layout
+  `<agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl` (encode_cwd =
+  upstream `getDefaultSessionDirPath`). **Cross-compat proven by test:**
+  the original upstream `SessionManager.open()` (built dist) loads a
+  pi-rust-written session (header version, entry count, branch roles).
+  Reverse direction: golden hand-written upstream-shaped file loads in
+  pi-rust. `set_model`/`set_thinking_level` requests now persist
+  model_change/thinking_level_change entries. v0 files: typed migration
+  error (no implicit migration — decision recorded). Assistant usage fields
+  stay zero until WP-407 captures real usage. Deps added: chrono (ISO
+  timestamps). Suite: 27 in-crate + 8 e2e + 42 smoke.
