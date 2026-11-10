@@ -136,3 +136,47 @@ mod tests {
 		assert_eq!(resolve_provider_flags(None, None, &AgentConfig::default()).unwrap(), ("fake".into(), None));
 	}
 }
+
+#[cfg(test)]
+mod agent_dir_tests {
+    use super::resolve_agent_dir;
+    use std::path::Path;
+
+    #[test]
+	fn flag_beats_env_and_home() {
+        let p = resolve_agent_dir(Some(Path::new("/x/agent")), Some("/y/agent"), Path::new("/home/u"));
+        assert_eq!(p, Path::new("/x/agent"));
+    }
+
+    #[test]
+	fn env_beats_home_default() {
+        let p = resolve_agent_dir(None, Some("/y/agent"), Path::new("/home/u"));
+        assert_eq!(p, Path::new("/y/agent"), "PI_CODING_AGENT_DIR wins over ~/.pi/agent");
+    }
+
+    #[test]
+	fn home_default_is_pi_agent() {
+        let p = resolve_agent_dir(None, None, Path::new("/home/u"));
+        assert_eq!(p, Path::new("/home/u/.pi/agent"));
+    }
+
+    #[test]
+	fn empty_env_falls_back_to_home() {
+        let p = resolve_agent_dir(None, Some(""), Path::new("/home/u"));
+        assert_eq!(p, Path::new("/home/u/.pi/agent"));
+    }
+}
+
+/// Upstream `getAgentDir` resolution (without the flag, which the caller
+/// passes): env `PI_CODING_AGENT_DIR` > `~/.pi/agent`.
+pub fn resolve_agent_dir(flag: Option<&std::path::Path>, env_dir: Option<&str>, home: &std::path::Path) -> std::path::PathBuf {
+    if let Some(f) = flag {
+        return f.to_path_buf();
+    }
+    if let Some(e) = env_dir {
+        if !e.is_empty() {
+            return std::path::PathBuf::from(e);
+        }
+    }
+    home.join(".pi").join("agent")
+}
