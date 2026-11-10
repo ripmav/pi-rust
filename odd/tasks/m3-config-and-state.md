@@ -34,7 +34,7 @@ order, errors), the WP file wins.
 
 | ID | Spec | WP | Issue | Route | Commit |
 |----|------|----|-------|-------|--------|
-| T1 | S1 | 301 | #11 | inline TDD | — |
+| T1 | S1 | 301 | #11 | inline TDD | bee3fd7 |
 | T2 | S2 | 302 | #12 | inline TDD | — |
 | T3 | S3 | 303 | #13 | inline TDD | — |
 | T4 | S4 | 304 | #14 | inline TDD | — |
@@ -52,3 +52,17 @@ order, errors), the WP file wins.
   revisit at M6 when the TUI needs more surfaces).
 - L3: Execution order by dependencies: T1(301) → T2(302) → T3(303);
   T4(304) → T5(305) → T6(306); T7(307) after T1.
+- L4: T1/WP-301 done (bee3fd7): `src/config.rs` (AgentConfig from
+  `<agent-dir>/settings.json`, camelCase, unknown keys ignored, missing file
+  = defaults, malformed = error with path); `resolve_provider_flags`
+  (flags > settings > fake; `provider/model` split; bare settings model
+  without provider = error until WP-302 registry). CLI: provider/model
+  resolve after agent-dir setup; settings `defaultThinkingLevel` seeds the
+  core thinking level when present (built-in default stays "off" — M2
+  drivers don't send thinking params yet; WP-406 makes the level
+  functional). Project `cwd/.pi/settings.json` not read (needs trust model;
+  headless v0 scope, recorded in the WP file). RED/GREEN: before wiring
+  `--provider openai` without `--model` failed "requires --model"; after,
+  settings defaultModel is used (fails on missing key instead);
+  `provider/model` settings form resolves the provider. Tests: 4 new config
+  unit tests; full suite 18 passed + 42 smoke.
