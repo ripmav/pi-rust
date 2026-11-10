@@ -9,7 +9,7 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 |---|-----------|------|-----|--------|
 | M1 | Extension bridge (PoC) | original loader on a Rust core, NDJSON bridge, 6 unmodified extensions proven | — | ✅ done (PR #2) |
 | M2 | Real model providers | openai-compat + anthropic, streaming, tool calls, env-only creds | — | ✅ done (PR #4) |
-| M3 | `~/.pi` & session state | a user's existing config/sessions just work | 301–307 | done (PR #18, pending merge) |
+| M3 | `~/.pi` & session state | a user's existing config/sessions just work | 301–307 | done (PR #20, pending merge; #18 closed after rebase) |
 | M4 | Model ecosystem | all provider families + runtime model switching + accounting | 401–408 | open |
 | M5 | Built-in tool parity | read/write/edit/bash behave like upstream | 501–506 | open |
 | M6 | Interactive TUI | ratatui REPL: chat, dialogs, editor, keybindings, themes, pickers | 601–610 | open |

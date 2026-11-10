@@ -139,9 +139,12 @@ order, errors), the WP file wins.
   ${@:N:M} slicing, $A-alone literal. Fake driver: prompt runs (no scenario
   script) get a deterministic `echo: <prompt>` turn (scripted runs unchanged).
   Suite: 35 in-crate + 14 e2e + 42 smoke.
-- L14: M3 delivered: PR #18 (main ← feat/m3-config-and-state,
-  type:feature). PR #18 carries M2 as well (M2 merged into
-  feat/extension-branch via PR #4, not main) — merging #18 makes PR #10
-  superseded (to be closed after merge). All WP issues #11–#17 closed with
-  commits. README updated (agent dir, sessions v3, credentials, templates,
+- L14: M3 delivered: PR #20 (main ← feat/m3-config-and-state-v2,
+  type:feature). PR #18 (first attempt, stacked on pre-#10 main) closed
+  after the user merged PR #10 (M2 into main); the branch was rebased onto
+  main (clean — M2 commits already applied), force-push refused by the
+  safety guard, and GitHub cannot change a PR's head branch, so the PR was
+  re-created as #20. The #20 diff is pure M3 (19 files, +1990/-137).
+  Re-verified on the rebased branch: 35 in-crate + 14 e2e + 42 smoke green.
+  All WP issues #11–#17 closed with commits. README updated (agent dir, sessions v3, credentials, templates,
   CLI). Roadmap statuses updated (M3 done).
