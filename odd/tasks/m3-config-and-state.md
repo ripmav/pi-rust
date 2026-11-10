@@ -17,8 +17,10 @@ order, errors), the WP file wins.
 - S2 (WP-302): model registry resolves `provider/model` ids from the bundled
   upstream catalog; capability queries (`supports_tools`, `supports_thinking`,
   default `max_tokens`); catalog count matches upstream data at build time.
-- S3 (WP-303): key resolution order env → auth storage → clear error naming
-  the exact env var; key material never appears in logs/error text.
+- S3 (WP-303): key resolution in verified upstream order (`resolve.ts`: a
+  stored credential owns the provider): override → `auth.json` → ambient env
+  → clear error naming the exact env var; key material never appears in logs
+  or error text. v0: literal keys + `${ENV}` refs only, no command execution.
 - S4 (WP-304): session files written AND read in the upstream JSONL format
   (round-trip + golden-file vs a real upstream session); v0 files: `--migrate-v0`
   or left behind (decide at implementation, record here).
@@ -69,3 +71,21 @@ order, errors), the WP file wins.
 - L5: Slice boundary for M3 delivery: one PR `feat/m3-config-and-state` →
   `main` (base main is only correct after PR #10 lands M2 in main; the
   milestone slice = commits since `feat/extension-bridge`, not since main).
+- L6: T2/WP-302 done (b2e00cf): `src/registry.rs` + `build.rs` — the 43
+  upstream provider data files merged at build time into OUT_DIR (zero new
+  deps, frozen to the pin); `ModelRegistry::bundled()` (OnceLock),
+  `resolve(provider, id)`, `providers()`, `models_of()`, `count()`. Dedup per
+  `provider/id` (upstream lists one model under several api groups — api
+  variants matter only for M4 driver dispatch). Drift test compares the baked
+  catalog against the data dir (unique-key count). Capability surface:
+  reasoning/thinking, input modalities, context window, max tokens, cost — a
+  `supports_tools` query is a consumer concern of WP-406 (recorded).
+  Full suite: 15 in-crate + 7 e2e.
+- L7: S3 correction (verified in upstream `ai/src/auth/resolve.ts:26-28,68-87`):
+  a STORED auth.json credential wins over ambient env; env is consulted only
+  when nothing is stored. WP-303 file + this spec updated.
+- L8: Merged origin/main into feat/m3-config-and-state (d1b71cb) to carry the
+  roadmap (PR #9) into the branch — the branch was cut from
+  feat/extension-bridge, which predates the roadmap. Consequence: the M3 PR
+  (main ← feat/m3-config-and-state) contains M2 as well; after the M3 PR
+  merges, PR #10 (M2 → main) is superseded and can be closed.
