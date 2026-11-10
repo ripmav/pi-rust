@@ -260,7 +260,8 @@ pub async fn run() -> Result<i32> {
         model: Arc::new(Mutex::new((initial_model, agent_config.default_thinking_level.clone()))),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
-        provider,
+        provider: Arc::new(Mutex::new(provider)),
+        agent_dir: Arc::new(agent_dir.clone()),
         usage_total: Arc::default(),
         cost_total: Arc::default(),
     });
