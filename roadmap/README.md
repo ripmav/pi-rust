@@ -38,7 +38,12 @@ is updated with the issue/PR numbers as evidence.
 - **M1 extension bridge (PoC) — done** (PR #2): Node sidecar runs the
   original upstream extension loader over an NDJSON bridge; six unmodified
   upstream example extensions validated end-to-end.
+- **M3 `~/.pi` & session state — done** (PR #18, pending merge): agent
+  config from `~/.pi/agent`, bundled model registry, upstream auth order,
+  upstream v3 session files (cross-checked against the original
+  SessionManager), `--list-sessions`/`--resume`/`--fork`, default agent dir
+  `~/.pi/agent` + `--isolated`, prompt templates.
 - **M2 real model providers — done** (PR #4): OpenAI-compatible
   `chat/completions` and Anthropic native `messages`, streaming, tool calls,
   env-only credentials, mock-server tests.
-- Everything below M3 is `open`.
+- Everything below M4 is `open`. (M3 delivered via PR #18, which also carries M2 into main; after the merge, PR #10 is superseded.)
