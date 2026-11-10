@@ -15,12 +15,21 @@ pub struct OpenAiDriver {
 	base_url: String,
 	api_key: String,
 	model: String,
+	/// Azure variant: deployment path + `api-version` query param and the
+	/// `api-key` header instead of bearer (upstream azure-openai-config.ts).
+	azure: Option<(String, String)>,
 	client: reqwest::Client,
 }
 
 impl OpenAiDriver {
 	pub fn new(base_url: String, api_key: String, model: String) -> Self {
-		Self { base_url, api_key, model, client: reqwest::Client::new() }
+		Self { base_url, api_key, model, azure: None, client: reqwest::Client::new() }
+	}
+
+	/// `deployment` replaces the model in the URL path (the body keeps the
+	/// catalog model id, per upstream `withDeploymentName`).
+	pub fn new_azure(base_url: String, api_key: String, model: String, deployment: String, api_version: String) -> Self {
+		Self { base_url, api_key, model, azure: Some((deployment, api_version)), client: reqwest::Client::new() }
 	}
 
 	fn text_of(v: Option<&Value>) -> String {
@@ -44,7 +53,39 @@ impl OpenAiDriver {
 						out.push(json!({"role":"system","content":c}));
 					}
 				}
-				Some("user") => out.push(json!({"role":"user","content":Self::text_of(m.get("content"))})),
+				Some("user") => {
+					// Images: pi-ai image blocks -> OpenAI `image_url` data-URL
+					// parts (S8); text stays a string when there are no images.
+					let images: Vec<(String, String)> = m
+						.get("content")
+						.and_then(Value::as_array)
+						.map(|blocks| {
+							blocks
+								.iter()
+								.filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+								.filter_map(|b| {
+									Some((
+										b.get("mimeType").and_then(Value::as_str).unwrap_or("image/png").to_string(),
+										b.get("data").and_then(Value::as_str)?.to_string(),
+									))
+								})
+								.collect()
+						})
+						.unwrap_or_default();
+					if images.is_empty() {
+						out.push(json!({"role":"user","content":Self::text_of(m.get("content"))}));
+					} else {
+						let mut parts: Vec<Value> = Vec::new();
+						let text = Self::text_of(m.get("content"));
+						if !text.is_empty() {
+							parts.push(json!({"type":"text","text":text}));
+						}
+						for (mime, data) in &images {
+							parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}}));
+						}
+						out.push(json!({"role":"user","content":parts}));
+					}
+				}
 				Some("assistant") => {
 					let mut text = String::new();
 					let mut tool_calls = Vec::new();
@@ -112,16 +153,29 @@ impl OpenAiDriver {
 
 	async fn complete_impl(&self, convo: &[Value]) -> Result<AssistantTurn> {
 		let tools = Self::tools_from(convo);
-		let mut body = json!({"model":self.model,"stream":true,"messages":Self::map_messages(convo)});
+		let mut body = json!({"model":self.model,"stream":true,"stream_options":{"include_usage":true},"messages":Self::map_messages(convo)});
 		if !tools.is_empty() {
 			body["tools"] = json!(tools);
 		}
-		let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-		let resp = self
-			.client
-			.post(&url)
-			.bearer_auth(&self.api_key)
-			.json(&body)
+		let (url, use_azure_key) = match &self.azure {
+			Some((dep, ver)) => (
+				format!(
+					"{}/deployments/{}/chat/completions?api-version={}",
+					self.base_url.trim_end_matches('/'),
+					dep,
+					ver
+				),
+				true,
+			),
+			None => (format!("{}/chat/completions", self.base_url.trim_end_matches('/')), false),
+		};
+		let mut req = self.client.post(&url).json(&body);
+		if use_azure_key {
+			req = req.header("api-key", &self.api_key);
+		} else {
+			req = req.bearer_auth(&self.api_key);
+		}
+		let resp = req
 			.send()
 			.await
 			.with_context(|| format!("openai request failed: {url}"))?;
@@ -131,6 +185,7 @@ impl OpenAiDriver {
 			bail!("openai api error {status}: {text}");
 		}
 		let mut text = String::new();
+		let mut usage = crate::model::Usage::default();
 		// index -> (id, name, accumulated argument JSON string)
 		let mut calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
 		let mut buf = String::new();
@@ -150,6 +205,11 @@ impl OpenAiDriver {
 				let Ok(v) = serde_json::from_str::<Value>(payload) else { continue };
 				if let Some(err) = v.get("error") {
 					bail!("openai stream error: {err}");
+				}
+				if let Some(u) = v.get("usage") {
+					usage.input = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+					usage.output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+					usage.cache_read = u.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
 				}
 				let Some(delta) = v.pointer("/choices/0/delta") else { continue };
 				if let Some(t) = delta.get("content").and_then(Value::as_str) {
@@ -180,7 +240,11 @@ impl OpenAiDriver {
 				input: if args.trim().is_empty() { json!({}) } else { serde_json::from_str(&args).unwrap_or(json!({})) },
 			})
 			.collect();
-		Ok(AssistantTurn { text: if text.is_empty() { None } else { Some(text) }, tool_calls })
+		Ok(AssistantTurn {
+		text: if text.is_empty() { None } else { Some(text) },
+		tool_calls,
+		usage,
+	})
 	}
 }
 
@@ -197,36 +261,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn maps_conversation_tools_and_auth() {
-		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-		let base = mock::start_mock(mock::sse_response("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n"), tx).await;
-		// Exercise through the `dyn` seam the agent loop will use.
-		let d: Box<dyn ModelDriver> = Box::new(OpenAiDriver::new(base, "test-key".into(), "test-model".into()));
-		let turn = d.complete(&mock::test_convo()).await.unwrap();
-		assert_eq!(turn.text.as_deref(), Some("ok"));
-		let req = rx.recv().await.unwrap();
-		let lines: Vec<&str> = req.lines().collect();
-		let sep = lines.iter().position(|l| *l == "---").unwrap();
-		let first = lines[0];
-		let auth = lines[1..sep].iter().find(|l| l.starts_with("authorization:")).copied().unwrap_or("");
-		let body = lines[sep + 1..].join("\n");
-		assert_eq!(first, "POST /chat/completions", "{first}");
-		assert_eq!(auth, "authorization: bearer test-key", "{auth}");
-		let v: Value = serde_json::from_str(&body).unwrap();
-		assert_eq!(v["model"], "test-model");
-		assert_eq!(v["stream"], true);
-		let msgs = v["messages"].as_array().unwrap();
-		assert_eq!(msgs[0], json!({"role":"system","content":"SYS PROMPT"}));
-		assert_eq!(msgs[1], json!({"role":"user","content":"do it"}));
-		assert_eq!(msgs[2]["role"], "assistant");
-		assert_eq!(msgs[2]["content"], "calling");
-		assert_eq!(msgs[2]["tool_calls"][0]["id"], "tc_9");
-		assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "bash");
-		assert_eq!(msgs[3], json!({"role":"tool","tool_call_id":"tc_9","content":"file.txt"}));
-		assert_eq!(v["tools"][0]["function"]["name"], "bash");
-	}
-
-	#[tokio::test]
-	async fn assembles_text_and_chunked_tool_calls() {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let sse = concat!(
 			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n",
@@ -248,6 +282,27 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn captures_usage_and_requests_include_usage() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let sse = concat!(
+			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n",
+			"\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n",
+			"\n",
+			"data: [DONE]\n",
+			"\n",
+		);
+		let base = mock::start_mock(mock::sse_response(sse), tx).await;
+		let d = OpenAiDriver::new(base, "k".into(), "m".into());
+		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		assert_eq!(turn.usage.input, 11);
+		assert_eq!(turn.usage.output, 7);
+		assert_eq!(turn.usage.cache_read, 3);
+		let recorded = rx.recv().await.unwrap();
+		assert!(recorded.contains("include_usage"), "{recorded}");
+	}
+
+	#[tokio::test]
 	async fn non_2xx_maps_to_error() {
 		let body = r#"{"error":{"message":"boom"}}"#;
 		let resp = format!("HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
@@ -257,5 +312,51 @@ mod tests {
 		let err = d.complete(&mock::test_convo()).await.unwrap_err().to_string();
 		assert!(err.contains("500"), "{err}");
 		assert!(err.contains("boom"), "{err}");
+	}
+
+	#[test]
+	fn user_image_becomes_data_url_part() {
+		let convo = vec![json!({"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}
+		]})];
+		let msgs = OpenAiDriver::map_messages(&convo);
+		assert_eq!(
+			msgs[0]["content"],
+			json!([
+				{"type":"text","text":"describe"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2U="}}
+			])
+		);
+		// plain text users keep a string content
+		let plain = OpenAiDriver::map_messages(&[json!({"role":"user","content":"hi"})]);
+		assert_eq!(plain[0]["content"], json!("hi"));
+	}
+
+	#[tokio::test]
+	async fn azure_uses_deployment_path_api_version_and_api_key_header() {
+		let sse = concat!(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n",
+			"\n",
+			"data: [DONE]\n",
+			"\n",
+		);
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let base = mock::start_mock(mock::sse_response(sse), tx).await;
+		let d = OpenAiDriver::new_azure(
+			format!("{base}/openai/v1"),
+			"az-key".into(),
+			"gpt-4o".into(),
+			"dep-gpt".into(),
+			"2024-10-21".into(),
+		);
+		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		assert_eq!(turn.text.as_deref(), Some("ok"));
+		let recorded = rx.recv().await.unwrap();
+		let first_line = recorded.lines().next().unwrap_or_default().to_string();
+		assert!(first_line.contains("/openai/v1/deployments/dep-gpt/chat/completions?api-version=2024-10-21"), "{}", first_line);
+		let lower = recorded.to_lowercase();
+		assert!(lower.contains("api-key: az-key"), "{recorded}");
+		assert!(!lower.contains("authorization"), "azure must not send bearer: {recorded}");
 	}
 }

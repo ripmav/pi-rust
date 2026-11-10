@@ -508,6 +508,204 @@ fn provider_e2e_prompt_via_mock_openai() {
     assert!(dump.contains("Hello from mock"), "transcript: {dump}");
 }
 
+/// WP-407: provider run with --print-usage emits a cumulative usage event
+/// (cost from the bundled registry for a real model id) and writes a usage
+/// entry into the session file.
+#[test]
+fn provider_e2e_print_usage_and_session_entry() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":"ok"}}]}).to_string();
+    let c2 = json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}).to_string();
+    let sse = format!("data: {c1}\ndata: {c2}\ndata: [DONE]\n");
+    let mut body = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+    for line in sse.split_inclusive('\n') {
+        if line.trim().is_empty() { continue; }
+        let b = line.as_bytes();
+        body.push_str(&format!("{:x}\r\n", b.len()));
+        body.push_str(line);
+        body.push_str("\r\n");
+    }
+    body.push_str("0\r\n\r\n");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut buf = vec![0u8; 65536];
+        let mut n = 0usize;
+        loop {
+            match s.read(&mut buf[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => {
+                    n += k;
+                    if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                }
+            }
+        }
+        use std::io::Write;
+        let _ = s.write_all(body.as_bytes());
+    });
+
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("OPENAI_API_KEY", "e2e-key")
+        .env("OPENAI_BASE_URL", &base)
+        .arg("--provider").arg("openai")
+        .arg("--model").arg("gpt-4o-mini")
+        .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(&session_file)
+        .arg("--print-usage")
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    let _ = server.join();
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("stdout line not JSON: {l}: {e}")))
+        .collect();
+    let usage = lines
+        .iter()
+        .find(|l| l["kind"] == "usage")
+        .expect("no usage event with --print-usage");
+    assert_eq!(usage["input"], 100);
+    assert_eq!(usage["output"], 50);
+    // gpt-4o-mini registry cost: 0.15/1M in, 0.6/1M out -> 100*0.15 + 50*0.6 per 1M
+    let expected = 100f64 / 1e6 * 0.15 + 50f64 / 1e6 * 0.6;
+    assert!(
+        (usage["costUsd"].as_f64().unwrap() - expected).abs() < 1e-12,
+        "costUsd: {}", usage["costUsd"]
+    );
+    assert_eq!(lines.last().unwrap()["kind"], "transcript");
+
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let entry: Value = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|e| e.get("type").and_then(Value::as_str) == Some("usage"))
+        .expect("no usage entry in session file");
+    assert_eq!(entry["usage"]["input"], 100);
+    assert_eq!(entry["usage"]["output"], 50);
+}
+
+/// Looping SSE mock (same framing as the M2 e2e helper): accepts connections
+/// until the process exits and always answers with the same body.
+fn sse_loop_mock(text: &str) -> String {
+    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":text}}]}).to_string();
+    let sse = format!("data: {c1}\ndata: [DONE]\n");
+    let mut body = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+    for line in sse.split_inclusive('\n') {
+        if line.trim().is_empty() { continue; }
+        let b = line.as_bytes();
+        body.push_str(&format!("{:x}\r\n", b.len()));
+        body.push_str(line);
+        body.push_str("\r\n");
+    }
+    body.push_str("0\r\n\r\n");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        loop {
+            let Ok((mut s, _)) = listener.accept() else { break };
+            let body_c = body.clone();
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0usize;
+                loop {
+                    match s.read(&mut buf[n..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => {
+                            n += k;
+                            if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                        }
+                    }
+                }
+                let _ = s.write_all(body_c.as_bytes());
+            });
+        }
+    });
+    base
+}
+
+/// WP-406: runtime setModel from an extension. The invalid id is declined
+/// (no state change); after the core confirms the valid switch, a second
+/// run (injected by the fixture) is served by the new driver. One
+/// model_change entry, the declined id never recorded.
+#[test]
+fn provider_e2e_runtime_setmodel() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-setmodel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("agent")).unwrap();
+    std::fs::write(
+        tmp.join("agent").join("auth.json"),
+        json!({"groq":{"type":"api_key","key":"groq-key"},
+               "openai":{"type":"api_key","key":"openai-key"}}).to_string(),
+    )
+    .unwrap();
+
+    // Looping mocks (the run is short; each mock may be hit 0..n times).
+    // `before_agent_start` is a decision event the core awaits, so the
+    // fixture's setModel calls are confirmed before the model call of the
+    // same run — no race with the agent loop.
+    let base_groq = sse_loop_mock("groq-text");
+    let base_openai = sse_loop_mock("openai-text");
+
+    // Two sequential runs: run 1 keeps the groq driver; the switch (confirmed
+    // during run 2's before_agent_start) serves run 2's model call with the
+    // new driver.
+    let scenario = tmp.join("scenario.json");
+    std::fs::write(&scenario, r#"{"user_messages":["first","second"]}"#).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/setmodel.ts");
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("GROQ_BASE_URL", &base_groq)
+        .env("OPENAI_BASE_URL", &base_openai)
+        .arg("--provider").arg("groq")
+        .arg("--model").arg("llama-3.3-70b-versatile")
+        .arg("--extension-dir").arg(&fixture)
+        .arg("--scenario").arg(&scenario)
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("stdout line not JSON: {l}: {e}")))
+        .collect();
+    let dump = lines.last().unwrap()["session"].to_string();
+    // Run 1 (prompt "first") was served by the original groq driver.
+    assert!(dump.contains("groq-text"), "first run lost its driver: {dump}");
+    // Run 2 (prompt "second") was served by the post-swap openai driver.
+    assert!(dump.contains("second"), "second run missing: {dump}");
+    assert!(dump.contains("openai-text"), "second run not served by openai: {dump}");
+
+    // Exactly one model_change entry: the successful switch only.
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let changes: Vec<Value> = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("model_change"))
+        .collect();
+    assert_eq!(changes.len(), 1, "model_change entries: {file}");
+    assert_eq!(changes[0]["provider"], "openai");
+    assert_eq!(changes[0]["modelId"], "gpt-4o-mini");
+    // The declined id must not appear anywhere in the session.
+    assert!(!file.contains("nope-model"), "declined model leaked: {file}");
+}
+
 /// S4 cross-compatibility: a session file written by pi-rust must be loaded
 /// by the ORIGINAL upstream SessionManager (read-only: open + read API).
 #[test]
@@ -754,4 +952,168 @@ fn template_unknown_is_error() {
     assert_ne!(out.status.code(), Some(0), "unknown template must fail");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(stderr.contains("missing"), "{stderr}");
+}
+
+/// WP-408: --image <path> attaches a base64 image part to the prompt user
+/// message; the OpenAI wire carries a data-URL image_url part and the
+/// session file keeps the pi-ai image block.
+#[test]
+fn provider_e2e_image_attachment_openai() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-image-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // Minimal PNG: 8-byte magic + a few payload bytes.
+    let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03, 0x04];
+    let image_path = tmp.join("pic.png");
+    std::fs::write(&image_path, png).unwrap();
+
+    const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut expected_b64 = String::new();
+    for chunk in png.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        expected_b64.push(B64_TABLE[(b0 >> 2) as usize] as char);
+        expected_b64.push(B64_TABLE[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+        expected_b64.push(if chunk.len() > 1 { B64_TABLE[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+        expected_b64.push(if chunk.len() > 2 { B64_TABLE[(b2 & 63) as usize] as char } else { '=' });
+    }
+
+    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":"I see a picture"}}]}).to_string();
+    let sse = format!("data: {c1}\ndata: [DONE]\n");
+    let mut resp = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+    for line in sse.split_inclusive('\n') {
+        if line.trim().is_empty() { continue; }
+        let b = line.as_bytes();
+        resp.push_str(&format!("{:x}\r\n", b.len()));
+        resp.push_str(line);
+        resp.push_str("\r\n");
+    }
+    resp.push_str("0\r\n\r\n");
+
+    let capture = tmp.join("captured-request.txt");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let capture_in = capture.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut buf = Vec::new();
+        let mut tmp2 = [0u8; 8192];
+        loop {
+            match s.read(&mut tmp2) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => {
+                    buf.extend_from_slice(&tmp2[..k]);
+                    // Complete request = header terminator + content-length body.
+                    if let Some(h) = String::from_utf8_lossy(&buf).find("\r\n\r\n") {
+                        let head = &buf[..h];
+                        let len = head
+                            .windows(15)
+                            .find_map(|w| {
+                                let s = String::from_utf8_lossy(w);
+                                let lower = s.to_lowercase();
+                                lower.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs::write(&capture_in, &buf);
+        let _ = s.write_all(resp.as_bytes());
+    });
+
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("OPENAI_API_KEY", "e2e-key")
+        .env("OPENAI_BASE_URL", &base)
+        .arg("--provider").arg("openai")
+        .arg("--model").arg("gpt-4o-mini")
+        .arg("--prompt").arg("describe the image")
+        .arg("--image").arg(&image_path)
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    let _ = server.join();
+
+    let captured = std::fs::read_to_string(&capture).unwrap_or_default();
+    let data_url = format!("data:image/png;base64,{expected_b64}");
+    assert!(captured.contains(&data_url), "request missing data URL: {data_url}\ncaptured tail: {}", &captured[captured.len().saturating_sub(400)..]);
+
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let has_image_block = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .any(|e| {
+            e.pointer("/message/content")
+                .and_then(Value::as_array)
+                .is_some_and(|c| c.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("image")))
+        });
+    assert!(has_image_block, "session file has no image block:\n{file}");
+}
+
+/// WP-408: --image against a text-only registry model is a clear, typed
+/// startup error (no model call).
+#[test]
+fn provider_e2e_image_model_not_capable() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-imagecap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let image_path = tmp.join("pic.png");
+    std::fs::write(&image_path, &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("OPENAI_API_KEY", "e2e-key")
+        .arg("--provider").arg("openai")
+        .arg("--model").arg("gpt-4")
+        .arg("--prompt").arg("hi")
+        .arg("--image").arg(&image_path)
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    assert_ne!(out.status.code(), Some(0), "text-only model with --image must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("does not accept image input"), "{stderr}");
+    assert!(stderr.contains("gpt-4"), "{stderr}");
+}
+
+/// WP-408: --image file errors are typed (missing file, not-an-image).
+#[test]
+fn provider_e2e_image_file_errors_typed() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-imageerr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider").arg("fake")
+        .arg("--prompt").arg("hi")
+        .arg("--image").arg(tmp.join("missing.png"))
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr.contains("cannot read file"), "{stderr}");
+
+    let txt = tmp.join("not-image.png");
+    std::fs::write(&txt, b"this is text, not an image").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider").arg("fake")
+        .arg("--prompt").arg("hi")
+        .arg("--image").arg(&txt)
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr.contains("not a supported image format"), "{stderr}");
 }
