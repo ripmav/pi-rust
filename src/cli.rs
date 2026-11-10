@@ -127,9 +127,15 @@ pub async fn run() -> Result<i32> {
     let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
     let fake_mode = provider.is_none();
 
-    // v0 session file: --session-file or .pi-rust/sessions/<uuid>.jsonl.
-    let session_file = session_file.unwrap_or_else(|| PathBuf::from(".pi-rust").join("sessions").join(format!("{}.jsonl", uuid::Uuid::new_v4())));
-    let session = Arc::new(Session::open(session_file)?);
+    // Session file: --session-file, else the upstream layout under the
+    // agent dir (`<agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl`).
+    let session_file = session_file.unwrap_or_else(|| {
+        let dir = agent_dir.join("sessions").join(crate::session::encode_cwd(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&dir).ok();
+        let ts = crate::session::now_iso().replace(":", "-");
+        dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4()))
+    });
+    let session = Arc::new(Session::create(session_file, &cwd.to_string_lossy()).context("creating session file")?);
 
     let sidecar = find_sidecar(&cwd)?;
     let node = std::env::var("PI_RUST_NODE").unwrap_or_else(|_| "node".into());

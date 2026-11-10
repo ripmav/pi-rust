@@ -156,6 +156,9 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 let prev = ctx.model.lock().unwrap().0.clone();
                 let model = json!({"id":model_id,"provider":provider}); // v0: core tracks id/provider only
                 ctx.model.lock().unwrap().0 = model.clone();
+                if let (Some(p), Some(m)) = (&provider, &model_id) {
+                    ctx.session.set_model(p, m);
+                }
                 ctx.client.send(json!({"id":id,"type":"response","command":"set_model_request","success":true,"data":{"ok":model_id.is_some()}}));
                 if subscribed(&ctx, "model_select") {
                     ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
@@ -166,6 +169,9 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 let level = ev.get("level").and_then(Value::as_str).map(str::to_string);
                 let prev = ctx.model.lock().unwrap().1.clone().unwrap_or_else(|| "off".into());
                 ctx.model.lock().unwrap().1 = level.clone();
+                if let Some(l) = &level {
+                    ctx.session.set_thinking_level(l);
+                }
                 ctx.client.send(json!({"id":id,"type":"response","command":"set_thinking_level_request","success":true,"data":{"ok":level.is_some()}}));
                 if subscribed(&ctx, "thinking_level_select") {
                     ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
@@ -373,7 +379,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         }
     }
 
-    let user_msg = json!({"role":"user","content":[{"type":"text","text":text}],"timestamp":now_ms()});
+    let user_msg = json!({"role":"user","content":[{"type":"text","text":text}],"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
 
     // `before_agent_start`: prepend returned custom messages; a returned
@@ -490,11 +496,12 @@ fn assistant_message(turn: &AssistantTurn) -> Value {
         content.push(json!({"type":"text","text":t}));
     }
     for tc in &turn.tool_calls {
-        content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"arguments":tc.input}));
+        // pi-ai shape: toolCall blocks carry `input` (upstream session files).
+        content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"input":tc.input}));
     }
     json!({"role":"assistant","content":content,"api":"fake","provider":"fake","model":"fake",
         "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-        "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":now_ms()})
+        "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":crate::session::now_iso()})
 }
 
 fn summarize(content: &Value) -> String {
