@@ -124,7 +124,7 @@ pub async fn run() -> Result<i32> {
     let (provider_name, model_id) =
         crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
     // S3: provider credentials come from env only; the fake driver needs none.
-    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref())?;
+    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
     let fake_mode = provider.is_none();
 
     // v0 session file: --session-file or .pi-rust/sessions/<uuid>.jsonl.
