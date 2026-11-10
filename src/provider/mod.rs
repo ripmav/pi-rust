@@ -3,6 +3,7 @@
 //! and sidecar never see provider details. Credentials come from the caller
 //! (env vars at the CLI layer) — never from config files.
 pub mod anthropic;
+pub mod bedrock;
 pub mod google;
 pub mod openai;
 
@@ -22,6 +23,7 @@ pub enum ProviderDriver {
 	OpenAi(Arc<OpenAiDriver>),
 	Anthropic(Arc<AnthropicDriver>),
 	Google(Arc<google::GoogleDriver>),
+	Bedrock(Arc<bedrock::BedrockDriver>),
 }
 
 impl ProviderDriver {
@@ -35,6 +37,7 @@ impl ProviderDriver {
 			ProviderDriver::OpenAi(d) => d.complete(convo),
 			ProviderDriver::Anthropic(d) => d.complete(convo),
 			ProviderDriver::Google(d) => d.complete(convo),
+			ProviderDriver::Bedrock(d) => d.complete(convo),
 		}
 	}
 }
@@ -100,6 +103,25 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 				OpenAiDriver::new_azure(base, key, model.to_string(), deployment, api_version),
 			))))
 		}
+		"amazon-bedrock" => {
+			let model = model.context("--provider amazon-bedrock requires --model <id>")?;
+			// Env credentials only in v0 (profile files are a typed rejection).
+			if std::env::var("AWS_PROFILE").is_ok() {
+				anyhow::bail!("amazon-bedrock: AWS_PROFILE file credentials are not supported in v0 (env keys only)")
+			}
+			let access = std::env::var("AWS_ACCESS_KEY_ID")
+				.context("amazon-bedrock requires AWS_ACCESS_KEY_ID (env credentials; AWS_PROFILE files are not supported in v0)")?;
+			let secret = std::env::var("AWS_SECRET_ACCESS_KEY")
+				.context("amazon-bedrock requires AWS_SECRET_ACCESS_KEY")?;
+			let token = std::env::var("AWS_SESSION_TOKEN").ok().filter(|t| !t.is_empty());
+			let region = std::env::var("AWS_REGION")
+				.ok()
+				.filter(|r| !r.is_empty())
+				.unwrap_or_else(|| "us-east-1".into());
+			Ok(Some(ProviderDriver::Bedrock(Arc::new(
+				bedrock::BedrockDriver::new(region, access, secret, token, model.to_string()),
+			))))
+		}
 		"cloudflare-workers-ai" | "cloudflare-ai-gateway" => {
 			let model = model
 				.with_context(|| format!("--provider {name} requires --model <id>"))?;
@@ -144,7 +166,7 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 		p if not_supported_v0(p).is_some() => {
 			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
 		}
-		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, cloudflare-workers-ai, cloudflare-ai-gateway, openai, groq, cerebras, deepseek, together, huggingface, openrouter; bedrock arrives in a later M4 WP)"),
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, cloudflare-workers-ai, cloudflare-ai-gateway, amazon-bedrock, openai, groq, cerebras, deepseek, together, huggingface, openrouter)"),
 	}
 }
 
@@ -270,6 +292,11 @@ pub(crate) mod mock {
 	/// Minimal mock: accepts ONE HTTP request, records it as
 	/// `METHOD PATH\n<authorization line>\n<body>`, and answers with the raw HTTP payload.
 	pub async fn start_mock(response: String, tx: tokio::sync::mpsc::Sender<String>) -> String {
+		start_mock_bytes(response.into_bytes(), tx).await
+	}
+
+	/// Byte-exact variant for non-UTF8 responses (e.g. AWS event streams).
+	pub async fn start_mock_bytes(response: Vec<u8>, tx: tokio::sync::mpsc::Sender<String>) -> String {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		tokio::spawn(async move {
@@ -314,7 +341,7 @@ pub(crate) mod mock {
 				.map(|l| l.trim().to_lowercase())
 				.collect();
 			let _ = tx.send(format!("{method} {path}\n{}\n---\n{body}", headers.join("\n"))).await;
-			let _ = sock.write_all(response.as_bytes()).await;
+			let _ = sock.write_all(&response).await;
 			let _ = sock.shutdown().await;
 		});
 		format!("http://{addr}")
