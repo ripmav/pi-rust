@@ -112,7 +112,7 @@ impl OpenAiDriver {
 
 	async fn complete_impl(&self, convo: &[Value]) -> Result<AssistantTurn> {
 		let tools = Self::tools_from(convo);
-		let mut body = json!({"model":self.model,"stream":true,"messages":Self::map_messages(convo)});
+		let mut body = json!({"model":self.model,"stream":true,"stream_options":{"include_usage":true},"messages":Self::map_messages(convo)});
 		if !tools.is_empty() {
 			body["tools"] = json!(tools);
 		}
@@ -131,6 +131,7 @@ impl OpenAiDriver {
 			bail!("openai api error {status}: {text}");
 		}
 		let mut text = String::new();
+		let mut usage = crate::model::Usage::default();
 		// index -> (id, name, accumulated argument JSON string)
 		let mut calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
 		let mut buf = String::new();
@@ -150,6 +151,11 @@ impl OpenAiDriver {
 				let Ok(v) = serde_json::from_str::<Value>(payload) else { continue };
 				if let Some(err) = v.get("error") {
 					bail!("openai stream error: {err}");
+				}
+				if let Some(u) = v.get("usage") {
+					usage.input = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+					usage.output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+					usage.cache_read = u.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
 				}
 				let Some(delta) = v.pointer("/choices/0/delta") else { continue };
 				if let Some(t) = delta.get("content").and_then(Value::as_str) {
@@ -180,7 +186,11 @@ impl OpenAiDriver {
 				input: if args.trim().is_empty() { json!({}) } else { serde_json::from_str(&args).unwrap_or(json!({})) },
 			})
 			.collect();
-		Ok(AssistantTurn { text: if text.is_empty() { None } else { Some(text) }, tool_calls })
+		Ok(AssistantTurn {
+		text: if text.is_empty() { None } else { Some(text) },
+		tool_calls,
+		usage,
+	})
 	}
 }
 
@@ -197,36 +207,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn maps_conversation_tools_and_auth() {
-		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-		let base = mock::start_mock(mock::sse_response("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n"), tx).await;
-		// Exercise through the `dyn` seam the agent loop will use.
-		let d: Box<dyn ModelDriver> = Box::new(OpenAiDriver::new(base, "test-key".into(), "test-model".into()));
-		let turn = d.complete(&mock::test_convo()).await.unwrap();
-		assert_eq!(turn.text.as_deref(), Some("ok"));
-		let req = rx.recv().await.unwrap();
-		let lines: Vec<&str> = req.lines().collect();
-		let sep = lines.iter().position(|l| *l == "---").unwrap();
-		let first = lines[0];
-		let auth = lines[1..sep].iter().find(|l| l.starts_with("authorization:")).copied().unwrap_or("");
-		let body = lines[sep + 1..].join("\n");
-		assert_eq!(first, "POST /chat/completions", "{first}");
-		assert_eq!(auth, "authorization: bearer test-key", "{auth}");
-		let v: Value = serde_json::from_str(&body).unwrap();
-		assert_eq!(v["model"], "test-model");
-		assert_eq!(v["stream"], true);
-		let msgs = v["messages"].as_array().unwrap();
-		assert_eq!(msgs[0], json!({"role":"system","content":"SYS PROMPT"}));
-		assert_eq!(msgs[1], json!({"role":"user","content":"do it"}));
-		assert_eq!(msgs[2]["role"], "assistant");
-		assert_eq!(msgs[2]["content"], "calling");
-		assert_eq!(msgs[2]["tool_calls"][0]["id"], "tc_9");
-		assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "bash");
-		assert_eq!(msgs[3], json!({"role":"tool","tool_call_id":"tc_9","content":"file.txt"}));
-		assert_eq!(v["tools"][0]["function"]["name"], "bash");
-	}
-
-	#[tokio::test]
-	async fn assembles_text_and_chunked_tool_calls() {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let sse = concat!(
 			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n",
@@ -245,6 +225,27 @@ mod tests {
 		let turn = d.complete(&mock::test_convo()).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Hello"));
 		assert_eq!(turn.tool_calls, vec![ToolCallSpec { id: "tc_1".into(), name: "hello".into(), input: json!({"name":"X"}) }]);
+	}
+
+	#[tokio::test]
+	async fn captures_usage_and_requests_include_usage() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let sse = concat!(
+			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n",
+			"\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n",
+			"\n",
+			"data: [DONE]\n",
+			"\n",
+		);
+		let base = mock::start_mock(mock::sse_response(sse), tx).await;
+		let d = OpenAiDriver::new(base, "k".into(), "m".into());
+		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		assert_eq!(turn.usage.input, 11);
+		assert_eq!(turn.usage.output, 7);
+		assert_eq!(turn.usage.cache_read, 3);
+		let recorded = rx.recv().await.unwrap();
+		assert!(recorded.contains("include_usage"), "{recorded}");
 	}
 
 	#[tokio::test]

@@ -102,6 +102,14 @@ impl Inner {
         self.push(json!({"type":"model_change","id":new_entry_id(),"parentId":self.leaf_id,
             "timestamp":now_iso(),"provider":provider,"modelId":model}));
     }
+
+    fn set_usage(&mut self, usage: &crate::model::Usage, cost_usd: f64) {
+        self.push(json!({"type":"usage","id":new_entry_id(),"parentId":self.leaf_id,
+            "timestamp":now_iso(),
+            "usage":{"input":usage.input,"output":usage.output,
+                     "cacheRead":usage.cache_read,"cacheWrite":usage.cache_write},
+            "costUsd":cost_usd}));
+    }
 }
 
 fn new_entry_id() -> String {
@@ -275,6 +283,10 @@ impl Session {
 
     pub fn set_model(&self, provider: &str, model: &str) {
         self.inner.lock().unwrap().set_model(provider, model);
+    }
+
+    pub fn set_usage(&self, usage: &crate::model::Usage, cost_usd: f64) {
+        self.inner.lock().unwrap().set_usage(usage, cost_usd);
     }
 
     pub fn transcript(&self) -> Vec<Value> {

@@ -82,6 +82,9 @@ pub struct Core {
     pub done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Live provider driver (None = scripted fake driver per scenario run).
     pub provider: Option<ProviderDriver>,
+    /// Cumulative token usage / cost for --print-usage (WP-407).
+    pub usage_total: Arc<Mutex<crate::model::Usage>>,
+    pub cost_total: Arc<Mutex<f64>>,
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -435,6 +438,20 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         }
 
         let turn = driver.complete(&convo).await.map_err(|e| e.to_string())?;
+
+        // Usage accounting (WP-407): per-turn session entry + cumulative
+        // total; cost from the bundled registry (unknown model → 0).
+        if turn.usage != crate::model::Usage::default() {
+            let active = ctx.model.lock().unwrap().0.clone();
+            let p = active.get("provider").and_then(Value::as_str).unwrap_or("fake").to_string();
+            let m = active.get("id").and_then(Value::as_str).unwrap_or("fake").to_string();
+            let cost = turn
+                .usage
+                .cost_usd(crate::registry::ModelRegistry::bundled().resolve(&p, &m).map(|x| &x.cost));
+            ctx.session.set_usage(&turn.usage, cost);
+            ctx.usage_total.lock().unwrap().add(&turn.usage);
+            *ctx.cost_total.lock().unwrap() += cost;
+        }
         if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
         ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
 
@@ -507,7 +524,8 @@ fn assistant_message(turn: &AssistantTurn) -> Value {
         content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"input":tc.input}));
     }
     json!({"role":"assistant","content":content,"api":"fake","provider":"fake","model":"fake",
-        "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+        "usage":{"input":turn.usage.input,"output":turn.usage.output,
+                 "cacheRead":turn.usage.cache_read,"cacheWrite":turn.usage.cache_write},
         "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":crate::session::now_iso()})
 }
 
