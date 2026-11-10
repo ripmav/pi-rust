@@ -40,7 +40,7 @@ order, errors), the WP file wins.
 | T2 | S2 | 302 | #12 | inline TDD | — |
 | T3 | S3 | 303 | #13 | inline TDD | 386aa6e |
 | T4 | S4 | 304 | #14 | inline TDD | 9bb9352 |
-| T5 | S5 | 305 | #15 | inline TDD | — |
+| T5 | S5 | 305 | #15 | inline TDD | 8aa1a11 |
 | T6 | S6 | 306 | #16 | inline TDD | — |
 | T7 | S7 | 307 | #17 | inline TDD | — |
 
@@ -115,3 +115,11 @@ order, errors), the WP file wins.
   error (no implicit migration — decision recorded). Assistant usage fields
   stay zero until WP-407 captures real usage. Deps added: chrono (ISO
   timestamps). Suite: 27 in-crate + 8 e2e + 42 smoke.
+- L11: T5/WP-305 done (8aa1a11): `--list-sessions` (NDJSON per session:
+  file/id/cwd/name/parentSession/updated/entries; no sidecar), `--resume
+  <file|id>` (Session::load, chain continues from the leaf, session id kept),
+  `--fork <file|id>` (new file, new id, header `parentSession` = old id,
+  original untouched; `Session::fork`). Reference resolution: existing file
+  path wins, else session-id match under `<agentDir>/sessions/`. Three e2e
+  tests (resume append, fork parent+immutability, list). Suite: 27 in-crate
+  + 11 e2e + 42 smoke.
