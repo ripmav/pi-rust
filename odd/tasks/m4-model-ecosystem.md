@@ -50,7 +50,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 
 | ID | Spec | WP | Issue | Route | Commit |
 |----|------|----|-------|-------|--------|
-| T1 | S1 | 401 | #21 | inline TDD | — |
+| T1 | S1 | 401 | #21 | inline TDD | cc54ae9 |
 | T2 | S2 | 407 | #22 | inline TDD | — |
 | T3 | S3 | 406 | #23 | inline TDD | — |
 | T4 | S4 | 402 | #24 | inline TDD (explorer for wire details) | — |
@@ -76,3 +76,9 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 - L3: Execution order T1→T8 as listed: 407 before the new drivers so the
   usage-capture pattern (S2) is in place for 402–405 to follow; 406 after
   401 so setModel can switch across families.
+- L4: T1/WP-401 done (cc54ae9): `provider::compat_family_base` (table per
+  L2) + `not_supported_v0` (typed wire-API rejections); `build_provider`
+  now serves the whole completions family (per-family BASE_URL override
+  env `<PROVIDER>_BASE_URL`, key via WP-303); `ProviderDriver::complete`
+  forward. Tests: table, rejections, per-family mock harness on the M2
+  tokio mock. Suite: 38 in-crate + 14 e2e + 42 smoke.
