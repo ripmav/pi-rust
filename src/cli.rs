@@ -74,6 +74,8 @@ pub async fn run() -> Result<i32> {
     let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut template_name: Option<String> = None;
+    let mut template_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let val = |args: &Vec<String>, i: &mut usize| -> Result<String> {
@@ -92,6 +94,14 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            "--template" => {
+                template_name = Some(val(&args, &mut i)?);
+                // Template args: positional tokens until the next flag.
+                while i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 1;
+                    template_args.push(args[i].clone());
+                }
+            }
             "--command" => {
                 let name = val(&args, &mut i)?;
                 // Variadic args: consume until the next `--` flag (or end).
@@ -107,26 +117,7 @@ pub async fn run() -> Result<i32> {
         i += 1;
     }
     let cwd = std::env::current_dir().context("cwd")?;
-    let runs = match (&scenario_path, &prompt) {
-        (Some(_), Some(_)) => bail!("--scenario and --prompt are mutually exclusive"),
-        (Some(p), None) => {
-            let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-            parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
-        }
-        (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
-        (None, None) => {
-            if list_sessions {
-                Vec::new() // --list-sessions needs no scenario
-            } else {
-                bail!("--scenario <file> or --prompt <text> is required (or --list-sessions)")
-            }
-        }
-    };
 
-    // Isolated agent dir (owned by the core when defaulted) so extension
-    // discovery stays deterministic. Upstream semantics: ctx.cwd is the
-    // project directory (the child inherits the core's cwd); the agent dir
-    // is discovery-only.
     // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
     // (upstream getAgentDir). --isolated forces a fresh temp dir (the M1
     // hermetic behavior, now opt-in).
@@ -138,6 +129,39 @@ pub async fn run() -> Result<i32> {
     };
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
 
+    // --scenario/--prompt/--template are mutually exclusive (original flags).
+    if scenario_path.is_some() && (prompt.is_some() || template_name.is_some())
+        || prompt.is_some() && template_name.is_some()
+    {
+        bail!("--scenario, --prompt and --template are mutually exclusive");
+    }
+    // --template expands to the prompt (S7); discovery reads
+    // <agentDir>/prompts + .pi/prompts.
+    if let Some(name) = &template_name {
+        let text = crate::templates::apply(&agent_dir, &cwd, name, &template_args.join(" "))?;
+        prompt = Some(text);
+    }
+
+    let runs = match (&scenario_path, &prompt) {
+        (Some(p), None) => {
+            let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
+        }
+        (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
+        (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
+        (None, None) => {
+            if list_sessions {
+                Vec::new() // --list-sessions needs no scenario
+            } else {
+                bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
+            }
+        }
+    };
+
+    // Isolated agent dir (owned by the core when defaulted) so extension
+    // discovery stays deterministic. Upstream semantics: ctx.cwd is the
+    // project directory (the child inherits the core's cwd); the agent dir
+    // is discovery-only.
     // M3/WP-301: agent settings from the agent dir (global file only — the
     // project `cwd/.pi/settings.json` merge needs a trust model, out of
     // scope for the headless core). Flags beat settings; settings beat the
