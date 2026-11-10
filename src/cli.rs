@@ -64,6 +64,7 @@ pub async fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
+    let mut isolated = false;
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
     let mut list_sessions = false;
@@ -82,6 +83,7 @@ pub async fn run() -> Result<i32> {
         match args[i].as_str() {
             "--extension-dir" => ext_dirs.push(val(&args, &mut i)?),
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
+            "--isolated" => isolated = true,
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
             "--list-sessions" => list_sessions = true,
@@ -125,7 +127,15 @@ pub async fn run() -> Result<i32> {
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
     // project directory (the child inherits the core's cwd); the agent dir
     // is discovery-only.
-    let agent_dir = agent_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4())));
+    // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
+    // (upstream getAgentDir). --isolated forces a fresh temp dir (the M1
+    // hermetic behavior, now opt-in).
+    let agent_dir = if isolated {
+        std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4()))
+    } else {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        crate::config::resolve_agent_dir(agent_dir.as_deref(), std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(), &home)
+    };
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
 
     // M3/WP-301: agent settings from the agent dir (global file only — the
