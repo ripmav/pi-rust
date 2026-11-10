@@ -5,6 +5,7 @@ mod config;
 mod model;
 mod session;
 mod provider;
+mod registry;
 mod tools;
 mod transport;
 
