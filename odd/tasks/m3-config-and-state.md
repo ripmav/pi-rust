@@ -41,7 +41,7 @@ order, errors), the WP file wins.
 | T3 | S3 | 303 | #13 | inline TDD | 386aa6e |
 | T4 | S4 | 304 | #14 | inline TDD | 9bb9352 |
 | T5 | S5 | 305 | #15 | inline TDD | 8aa1a11 |
-| T6 | S6 | 306 | #16 | inline TDD | — |
+| T6 | S6 | 306 | #16 | inline TDD | c152ce4 |
 | T7 | S7 | 307 | #17 | inline TDD | — |
 
 ## Log
@@ -123,3 +123,10 @@ order, errors), the WP file wins.
   path wins, else session-id match under `<agentDir>/sessions/`. Three e2e
   tests (resume append, fork parent+immutability, list). Suite: 27 in-crate
   + 11 e2e + 42 smoke.
+- L12: T6/WP-306 done (c152ce4): agent-dir resolution now matches upstream
+  getAgentDir: `--agent-dir` > `PI_CODING_AGENT_DIR` > `~/.pi/agent`;
+  `--isolated` restores the M1 hermetic temp dir (now opt-in). Pure,
+  unit-tested `config::resolve_agent_dir` (4 tests) + e2e proving the env
+  var default and --isolated escape. provider_e2e made hermetic with an
+  explicit --agent-dir (it previously relied on the temp default). Suite:
+  31 in-crate + 12 e2e.
