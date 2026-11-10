@@ -17,6 +17,8 @@ pub struct QueuedUser {
     pub text: String,
     pub source: &'static str,
     pub steps: Vec<Value>,
+    /// (mime, base64) `--image` attachments (S8).
+    pub images: Vec<(String, String)>,
 }
 
 pub enum Item {
@@ -153,7 +155,7 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
                 eprintln!("[core] extension user_message: {text}");
                 // Steer for v0 = append to the same queue (drained in order).
-                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new() }));
+                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
             }
             "set_model_request" => {
                 let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -418,7 +420,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         }
     }
 
-    let user_msg = json!({"role":"user","content":[{"type":"text","text":text}],"timestamp":crate::session::now_iso()});
+    let mut user_content: Vec<Value> = vec![json!({"type":"text","text":text})];
+    for (mime, data) in &u.images {
+        user_content.push(json!({"type":"image","mimeType":mime,"data":data}));
+    }
+    let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
 
     // `before_agent_start`: prepend returned custom messages; a returned

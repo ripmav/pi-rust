@@ -53,7 +53,39 @@ impl OpenAiDriver {
 						out.push(json!({"role":"system","content":c}));
 					}
 				}
-				Some("user") => out.push(json!({"role":"user","content":Self::text_of(m.get("content"))})),
+				Some("user") => {
+					// Images: pi-ai image blocks -> OpenAI `image_url` data-URL
+					// parts (S8); text stays a string when there are no images.
+					let images: Vec<(String, String)> = m
+						.get("content")
+						.and_then(Value::as_array)
+						.map(|blocks| {
+							blocks
+								.iter()
+								.filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+								.filter_map(|b| {
+									Some((
+										b.get("mimeType").and_then(Value::as_str).unwrap_or("image/png").to_string(),
+										b.get("data").and_then(Value::as_str)?.to_string(),
+									))
+								})
+								.collect()
+						})
+						.unwrap_or_default();
+					if images.is_empty() {
+						out.push(json!({"role":"user","content":Self::text_of(m.get("content"))}));
+					} else {
+						let mut parts: Vec<Value> = Vec::new();
+						let text = Self::text_of(m.get("content"));
+						if !text.is_empty() {
+							parts.push(json!({"type":"text","text":text}));
+						}
+						for (mime, data) in &images {
+							parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}}));
+						}
+						out.push(json!({"role":"user","content":parts}));
+					}
+				}
 				Some("assistant") => {
 					let mut text = String::new();
 					let mut tool_calls = Vec::new();
@@ -280,6 +312,25 @@ mod tests {
 		let err = d.complete(&mock::test_convo()).await.unwrap_err().to_string();
 		assert!(err.contains("500"), "{err}");
 		assert!(err.contains("boom"), "{err}");
+	}
+
+	#[test]
+	fn user_image_becomes_data_url_part() {
+		let convo = vec![json!({"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}
+		]})];
+		let msgs = OpenAiDriver::map_messages(&convo);
+		assert_eq!(
+			msgs[0]["content"],
+			json!([
+				{"type":"text","text":"describe"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2U="}}
+			])
+		);
+		// plain text users keep a string content
+		let plain = OpenAiDriver::map_messages(&[json!({"role":"user","content":"hi"})]);
+		assert_eq!(plain[0]["content"], json!("hi"));
 	}
 
 	#[tokio::test]
