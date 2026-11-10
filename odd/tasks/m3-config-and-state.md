@@ -38,7 +38,7 @@ order, errors), the WP file wins.
 |----|------|----|-------|-------|--------|
 | T1 | S1 | 301 | #11 | inline TDD | bee3fd7 |
 | T2 | S2 | 302 | #12 | inline TDD | — |
-| T3 | S3 | 303 | #13 | inline TDD | — |
+| T3 | S3 | 303 | #13 | inline TDD | 386aa6e |
 | T4 | S4 | 304 | #14 | inline TDD | — |
 | T5 | S5 | 305 | #15 | inline TDD | — |
 | T6 | S6 | 306 | #16 | inline TDD | — |
@@ -89,3 +89,12 @@ order, errors), the WP file wins.
   feat/extension-bridge, which predates the roadmap. Consequence: the M3 PR
   (main ← feat/m3-config-and-state) contains M2 as well; after the M3 PR
   merges, PR #10 (M2 → main) is superseded and can be closed.
+- L9: T3/WP-303 done (386aa6e): `src/auth.rs` — resolve_api_key(provider,
+  agent_dir): stored auth.json api_key credential (literal or ${ENV} ref
+  with credential-env overlay) > ambient env (per-provider table, subset of
+  upstream env-api-keys) > typed error naming the env var. v0 deviations
+  recorded in the WP file: no command-ref execution, oauth = typed error.
+  build_provider now takes agent_dir (M2 env behavior = the fallback step).
+  Security pin: redaction test (no key material in errors). 8 auth unit
+  tests, each using its own env var (no parallel-test races). Suite: 22
+  in-crate + 7 e2e.
