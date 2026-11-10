@@ -54,7 +54,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 | T2 | S2 | 407 | #22 | inline TDD | 96ea486 |
 | T3 | S3 | 406 | #23 | inline TDD | 3f2628e |
 | T4 | S4 | 402 | #24 | inline TDD (explorer for wire details) | — |
-| T5 | S5 | 403 | #25 | inline TDD | — |
+| T5 | S5 | 403 | #25 | inline TDD | 1f20cd1 |
 | T6 | S6 | 404 | #26 | inline TDD | — |
 | T7 | S7 | 405 | #27 | inline TDD (explorer for sigv4/converse) | — |
 | T8 | S8 | 408 | #28 | inline TDD | — |
@@ -122,3 +122,14 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 - L8: Delivery strategy recorded (slice 1120 lines / 9 commits): ONE
   milestone PR (M2/M3 precedent, PR #4/#10/#20) — the work-unit commits
   keep the PR reviewable per slice. No forced mid-branch PRs.
+- L9: T5/WP-403 done (1f20cd1): Azure OpenAI = OpenAiDriver
+  `new_azure(deployment, api_version)`: URL `{base}/deployments/{dep}/
+  chat/completions?api-version={ver}`, `api-key` header instead of bearer,
+  body keeps catalog model id (upstream withDeploymentName). Base from
+  AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME (->
+  https://{r}.openai.azure.com/openai/v1), deployment from
+  AZURE_OPENAI_DEPLOYMENT_NAME_MAP (model=dep, comma) or model id,
+  AZURE_OPENAI_API_VERSION (default v1), key AZURE_OPENAI_API_KEY
+  (auth.json or env). Mock test asserts deployment path, api-version,
+  api-key header and absence of authorization. Suite: 45 in-crate + 16 e2e
+  + 42 smoke.
