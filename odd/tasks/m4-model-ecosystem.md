@@ -104,3 +104,18 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   model_change entry; declined id never recorded. Suite: 39+16+42.
   NOTE: F&F `agent_start` handlers must not be relied on for request/response
   work (core does not await them — matches upstream semantics).
+- L7: T4/WP-402 done (905484a): `provider::google::GoogleDriver` (SSE
+  `:streamGenerateContent?alt=sse`, `x-goog-api-key`; wire shapes mirrored
+  from upstream google-generative-ai.ts/google-shared.ts: systemInstruction,
+  contents with role model/user, consecutive toolResults merged into one
+  user turn as functionResponse parts {output|error}, tools as
+  functionDeclarations with parametersJsonSchema; stream assembly text +
+  functionCall with stable ids; usageMetadata (prompt-cached, candidates+
+  thoughts, cached); finishReason mapping (STOP/MAX_TOKENS/SAFETY/
+  RECITATION/TOOL_USE; other/missing = error). build_provider: `google`
+  (GEMINI_API_KEY or auth.json; GOOGLE_BASE_URL override) and
+  `google-vertex` (GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION, API key
+  only — ADC is a typed v0 rejection). v0 drops: thought parts/signatures,
+  image tool-result parts (WP-408), thinkingConfig. Tests: mapping, tools,
+  stream assembly (text+functionCall+usage), non-2xx, build variants.
+  Suite: 44 in-crate + 16 e2e + 42 smoke.
