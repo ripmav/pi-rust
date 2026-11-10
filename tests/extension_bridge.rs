@@ -566,3 +566,111 @@ console.log("UPSTREAM-READ-OK");
     let node_stderr = String::from_utf8_lossy(&node_out.stderr).to_string();
     assert!(node_stdout.contains("UPSTREAM-READ-OK"), "upstream SessionManager failed to read pi-rust session\n{node_stdout}\n{node_stderr}");
 }
+
+/// S5: --resume continues an existing session file (same id, chain grows).
+#[test]
+fn resume_appends_to_existing_session() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-resume-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent");
+    let f = tmp.join("s.jsonl");
+    let mk = |msgs: Vec<&str>| -> Value {
+        json!({"user_messages": msgs, "model_scripts": msgs.iter().map(|m| vec![json!({"text": "ok: "})]).collect::<Vec<_>>()})
+    };
+    let s1 = tmp.join("s1.json");
+    std::fs::write(&s1, mk(vec!["first"]).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir).arg("--scenario").arg(&s1).arg("--session-file").arg(&f)
+        .output().expect("run 1");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let id1: Value = serde_json::from_str(std::fs::read_to_string(&f).unwrap().lines().next().unwrap()).unwrap();
+    let lines1 = std::fs::read_to_string(&f).unwrap().lines().count();
+    assert_eq!(lines1, 3, "header + user + assistant");
+
+    let s2 = tmp.join("s2.json");
+    std::fs::write(&s2, mk(vec!["second"]).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir).arg("--resume").arg(&f).arg("--scenario").arg(&s2)
+        .output().expect("run 2");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let raw = std::fs::read_to_string(&f).unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines.len(), lines1 + 2, "resume appends, never rewrites: {lines:?}");
+    let h: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(h["id"], id1["id"], "resume keeps the session id");
+    // Final transcript of run 2 contains BOTH messages.
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    let msgs = last["session"]["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 4, "transcript = 2 + 2 messages");
+    let first_entry: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first_entry["parentId"].is_null(), true, "first entry has no parent");
+    let prev: Value = serde_json::from_str(lines[lines1 - 1]).unwrap();
+    let appended: Value = serde_json::from_str(lines[lines1]).unwrap();
+    assert_eq!(appended["parentId"], prev["id"], "chain continues from the old leaf");
+}
+
+/// S5: --fork writes a NEW session (new id, parentSession = old id); the
+/// original file is untouched.
+#[test]
+fn fork_creates_new_session_with_parent() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-fork-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent");
+    let f = tmp.join("s.jsonl");
+    let s1 = tmp.join("s1.json");
+    std::fs::write(&s1, json!({"user_messages":["base"],"model_scripts":[[{"text":"base done"}]]}).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir).arg("--scenario").arg(&s1).arg("--session-file").arg(&f)
+        .output().expect("base run");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let base_raw = std::fs::read_to_string(&f).unwrap();
+    let base_id: Value = serde_json::from_str(base_raw.lines().next().unwrap()).unwrap();
+
+    let s2 = tmp.join("s2.json");
+    std::fs::write(&s2, json!({"user_messages":["branch"],"model_scripts":[[{"text":"branch done"}]]}).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir).arg("--fork").arg(&f).arg("--scenario").arg(&s2)
+        .output().expect("fork run");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    // Original untouched.
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), base_raw, "fork must not modify the original");
+    // Final transcript names the new file + parent id.
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_ne!(last["session"]["id"], base_id["id"], "fork gets a new id");
+    assert_eq!(last["session"]["parentSession"], base_id["id"], "fork records parentSession");
+    let new_file = PathBuf::from(last["session"]["file"].as_str().unwrap());
+    assert!(new_file.exists(), "fork file exists: {new_file:?}");
+    let nh: Value = serde_json::from_str(std::fs::read_to_string(&new_file).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(nh["parentSession"], base_id["id"]);
+}
+
+/// S5: --list-sessions lists agent-dir sessions as NDJSON (no sidecar).
+#[test]
+fn list_sessions_lists_agent_sessions() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-list-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent");
+    let s1 = tmp.join("s1.json");
+    std::fs::write(&s1, json!({"user_messages":["one"],"model_scripts":[[{"text":"a"}]]}).to_string()).unwrap();
+    for i in 1..=2 {
+        let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+            .arg("--agent-dir").arg(&agent_dir).arg("--scenario").arg(&s1)
+            .output().expect("run");
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir).arg("--list-sessions")
+        .output().expect("list");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2, "two sessions listed: {stdout}");
+    for v in &lines {
+        assert!(v.get("id").and_then(Value::as_str).is_some(), "entry has id: {v}");
+        assert!(v.get("file").and_then(Value::as_str).is_some(), "entry has file: {v}");
+    }
+}
