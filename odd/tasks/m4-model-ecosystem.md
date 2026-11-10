@@ -55,7 +55,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 | T3 | S3 | 406 | #23 | inline TDD | 3f2628e |
 | T4 | S4 | 402 | #24 | inline TDD (explorer for wire details) | — |
 | T5 | S5 | 403 | #25 | inline TDD | 1f20cd1 |
-| T6 | S6 | 404 | #26 | inline TDD | — |
+| T6 | S6 | 404 | #26 | inline TDD | bd62027 |
 | T7 | S7 | 405 | #27 | inline TDD (explorer for sigv4/converse) | — |
 | T8 | S8 | 408 | #28 | inline TDD | — |
 | T9 | — | — | — | matrix re-run, docs, PR | — |
@@ -133,3 +133,13 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   (auth.json or env). Mock test asserts deployment path, api-version,
   api-key header and absence of authorization. Suite: 45 in-crate + 16 e2e
   + 42 smoke.
+- L10: T6/WP-404 done (bd62027): Cloudflare Workers AI + AI Gateway =
+  OpenAiDriver at the catalog base URLs (workers-ai:
+  https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1 —
+  OpenAI-compatible; gateway chat models:
+  https://gateway.ai.cloudflare.com/v1/{acct}/{gw}/compat — unified API,
+  both verified against the pinned data files' openai-completions
+  baseUrl). CLOUDFLARE_ACCOUNT_ID (+ CLOUDFLARE_GATEWAY_ID for the
+  gateway) from env with typed errors; CLOUDFLARE_API_KEY bearer (
+  auth.json or env). No base-URL override env (upstream has none; mock
+  tests hit the driver directly). Suite: 46 in-crate + 16 e2e + 42 smoke.
