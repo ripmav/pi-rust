@@ -100,6 +100,27 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 				OpenAiDriver::new_azure(base, key, model.to_string(), deployment, api_version),
 			))))
 		}
+		"cloudflare-workers-ai" | "cloudflare-ai-gateway" => {
+			let model = model
+				.with_context(|| format!("--provider {name} requires --model <id>"))?;
+			let key = crate::auth::resolve_api_key(name, agent_dir)?;
+			let account = std::env::var("CLOUDFLARE_ACCOUNT_ID")
+				.with_context(|| format!("{name} requires CLOUDFLARE_ACCOUNT_ID"))?;
+			// Upstream catalog baseUrl placeholders, materialized from env:
+			// workers-ai -> .../ai/v1 (OpenAI-compatible), gateway chat ->
+			// .../compat (unified API), both OpenAI-completions wire.
+			let base = match name {
+				"cloudflare-workers-ai" => {
+					format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1")
+				}
+				_ => {
+					let gateway = std::env::var("CLOUDFLARE_GATEWAY_ID")
+						.context("cloudflare-ai-gateway requires CLOUDFLARE_GATEWAY_ID")?;
+					format!("https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/compat")
+				}
+			};
+			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
+		}
 		"google" => {
 			let model = model.context("--provider google requires --model <id>")?;
 			let key = crate::auth::resolve_api_key("google", agent_dir)?;
@@ -123,7 +144,7 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 		p if not_supported_v0(p).is_some() => {
 			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
 		}
-		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, openai, groq, cerebras, deepseek, together, huggingface, openrouter; cloudflare/bedrock arrive in later M4 WPs)"),
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, cloudflare-workers-ai, cloudflare-ai-gateway, openai, groq, cerebras, deepseek, together, huggingface, openrouter; bedrock arrives in a later M4 WP)"),
 	}
 }
 
@@ -142,6 +163,43 @@ impl ModelDriver for Arc<AnthropicDriver> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn build_cloudflare_requires_account_and_gateway() {
+		let agent_dir = std::env::temp_dir().join(format!("pi-rust-cf-{}", uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&agent_dir).unwrap();
+		std::fs::write(
+			agent_dir.join("auth.json"),
+			serde_json::json!({"cloudflare-workers-ai":{"type":"api_key","key":"cf-key"},
+			                   "cloudflare-ai-gateway":{"type":"api_key","key":"cf-key"}}).to_string(),
+		)
+		.unwrap();
+		// workers-ai: account required.
+		std::env::remove_var("CLOUDFLARE_ACCOUNT_ID");
+		let err = build_provider("cloudflare-workers-ai", Some("@cf/llama"), &agent_dir)
+			.unwrap_err()
+			.to_string();
+		assert!(err.contains("CLOUDFLARE_ACCOUNT_ID"), "{err}");
+		// gateway: account AND gateway id required.
+		std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acct1");
+		std::env::remove_var("CLOUDFLARE_GATEWAY_ID");
+		let err = build_provider("cloudflare-ai-gateway", Some("openai/gpt-4o"), &agent_dir)
+			.unwrap_err()
+			.to_string();
+		assert!(err.contains("CLOUDFLARE_GATEWAY_ID"), "{err}");
+		std::env::set_var("CLOUDFLARE_GATEWAY_ID", "gw1");
+		// both build (driver internals verified by mock tests).
+		match build_provider("cloudflare-workers-ai", Some("@cf/llama"), &agent_dir).unwrap().unwrap() {
+			ProviderDriver::OpenAi(_) => {}
+			_ => panic!("expected OpenAi (workers-ai)"),
+		}
+		match build_provider("cloudflare-ai-gateway", Some("openai/gpt-4o"), &agent_dir).unwrap().unwrap() {
+			ProviderDriver::OpenAi(_) => {}
+			_ => panic!("expected OpenAi (gateway)"),
+		}
+		std::env::remove_var("CLOUDFLARE_ACCOUNT_ID");
+		std::env::remove_var("CLOUDFLARE_GATEWAY_ID");
+	}
 
 	#[test]
 	fn build_google_and_vertex() {
