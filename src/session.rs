@@ -113,6 +113,13 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// ISO-8601 UTC from unix seconds (list-sessions `updated`).
+pub fn iso_from_secs(secs: u64) -> String {
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
 /// Millisecond epoch (bridge event timestamps; the session FILE uses ISO).
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -213,6 +220,40 @@ impl Session {
         let leaf_id = chain.last().and_then(|e| e.get("id").and_then(Value::as_str)).map(str::to_string);
         let inner = Inner { name, entries, messages, leaf_id, file };
         Ok(Self { path: path.to_path_buf(), id, cwd, parent_session, inner: Mutex::new(inner) })
+    }
+
+    /// Creates a fork of an existing session: a NEW file (new id) whose
+    /// header carries `parentSession` = the original id, with all original
+    /// entries copied. The original file is not touched.
+    pub fn fork(old_path: &Path, new_path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(old_path)
+            .with_context(|| format!("reading session file {}", old_path.display()))?;
+        let mut lines = raw.lines();
+        let first = lines.next().context("session file is empty")?;
+        let header: Value = serde_json::from_str(first).context("fork source has no JSON header")?;
+        if header.get("type").and_then(Value::as_str) != Some("session") {
+            bail!("{} is not a v3 session file — cannot fork", old_path.display());
+        }
+        let old_id = header.get("id").and_then(Value::as_str).context("fork source has no id")?;
+        let cwd = header.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Some(parent) = new_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(new_path)
+            .with_context(|| format!("opening fork target {}", new_path.display()))?;
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let h = json!({"type":"session","version":3,"id":new_id,"timestamp":now_iso(),
+            "cwd":cwd,"parentSession":old_id});
+        writeln!(file, "{}", h).context("writing fork header")?;
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            writeln!(file, "{line}").context("writing fork entries")?;
+        }
+        file.flush().ok();
+        drop(file);
+        Self::load(new_path)
     }
 
     pub fn append_message(&self, msg: &Value) -> String {
