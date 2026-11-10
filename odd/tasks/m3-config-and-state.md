@@ -66,3 +66,6 @@ order, errors), the WP file wins.
   settings defaultModel is used (fails on missing key instead);
   `provider/model` settings form resolves the provider. Tests: 4 new config
   unit tests; full suite 18 passed + 42 smoke.
+- L5: Slice boundary for M3 delivery: one PR `feat/m3-config-and-state` →
+  `main` (base main is only correct after PR #10 lands M2 in main; the
+  milestone slice = commits since `feat/extension-bridge`, not since main).
