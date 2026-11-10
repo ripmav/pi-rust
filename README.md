@@ -17,7 +17,7 @@ validated end-to-end; the Rust core is a minimal scripted agent behind it
 │  - agent loop, model driver│ ◄───────────────────── │  - ORIGINAL upstream extension    │
 │  - built-in tools: bash,   │  commands / responses  │    loader + ExtensionRunner,      │
 │    read, write             │  / events / dialogs    │    unmodified extensions          │
-│  - session (JSONL v0)      │                        │  - ExtensionAPI (headless slice)  │
+│  - session (upstream v3)   │                        │  - ExtensionAPI (headless slice)  │
 └────────────────────────────┘                        └───────────────────────────────────┘
 ```
 
@@ -53,19 +53,39 @@ compaction events, MCP transport, provider invocation, `ctx.ui.custom`,
 interactive REPL/TUI. Details in
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
-### Extension discovery and `~/.pi`
+### Agent dir, `~/.pi` and extension discovery
 
-The sidecar runs the original upstream loader, so discovery follows the
+The core's **agent dir** resolves like upstream `getAgentDir`:
+`--agent-dir` > env `PI_CODING_AGENT_DIR` > `~/.pi/agent`. **By default the
+core reads your real `~/.pi/agent`** (M3): `settings.json` (defaults),
+`auth.json` (credentials, see below), `sessions/` (session files) and
+`prompts/` (templates) — and the sidecar's extension discovery follows the
 upstream three-stage order: (1) `<project>/.pi/extensions/`, (2)
 `<agent-dir>/extensions/`, (3) explicit `--extension-dir` paths (deduped by
-resolved path). By default the core passes a **fresh, isolated agent dir**, so
-`~/.pi` is **not read**: your global extensions in `~/.pi/agent/extensions/`
-do not load, and nothing else in `~/.pi` (settings, models, sessions, auth)
-is touched by the core — sessions use its own v0 JSONL format, and models
-and credentials come from the CLI/env. To also load your global user
-extensions, run with `--agent-dir ~/.pi/agent`. Individual extensions can of
-course still access `~/.pi` themselves (the sidecar is a regular Node
-process).
+resolved path), so your global extensions in `~/.pi/agent/extensions/` load.
+Run with `--isolated` for a fresh temp agent dir instead (the M1 hermetic
+behavior — used by all tests). Individual extensions can of course still
+access `~/.pi` themselves (the sidecar is a regular Node process).
+
+### Sessions
+
+Session files use the **upstream JSONL v3 format** (header +
+`id`/`parentId` entry tree; `message`, `session_info`, `custom`,
+`thinking_level_change`, `model_change` entries), so pi-rust sessions open in
+pi and pi sessions load in pi-rust — proven by a test that feeds a
+pi-rust-written file to the original `SessionManager`. Default location:
+`<agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl` (upstream layout).
+- `--session-file <path>` — explicit location
+- `--resume <file|id>` — continue an existing session (same id)
+- `--fork <file|id>` — new session with `parentSession` = old id
+- `--list-sessions` — NDJSON listing (id, name, cwd, updated, entries)
+
+### Credentials (M2 + M3)
+
+Provider keys resolve in the verified upstream order: `auth.json` stored
+credential (literal or `${ENV}` reference) → ambient env var
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...) → typed error naming the env var.
+Key material never appears in logs or error text.
 
 Validated end-to-end (unmodified upstream examples, `tests/extension_bridge.rs`):
 `hello`, `with-deps` (npm deps), `permission-gate`, `claude-rules`,
@@ -94,18 +114,32 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
 
 ```
 pi-rust --extension-dir <path> (repeatable)
-        [--agent-dir <path>]          # isolated discovery dir (default: temp)
-        --scenario <scenario.json>    # one of --scenario / --prompt
-        | --prompt <text>             # one of --scenario / --prompt (provider mode)
-        [--session-file <path>]       # default: .pi-rust/sessions/<uuid>.jsonl
+        [--agent-dir <path>]          # default: PI_CODING_AGENT_DIR or ~/.pi/agent
+        [--isolated]                  # fresh temp agent dir (hermetic runs)
+        --scenario <scenario.json>    # one of --scenario / --prompt / --template
+        | --prompt <text>             # one of --scenario / --prompt / --template
+        | --template <name> [args...] # expand a prompt template into the prompt
+        [--session-file <path>]       # default: <agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl
+        [--resume <file|id>]          # continue an existing session
+        [--fork <file|id>]            # branch a new session (parentSession header)
+        [--list-sessions]             # NDJSON listing, then exit
         [--command <name> [args...]]  # repeatable; run after ready, before the runs
-        [--provider fake|openai|anthropic]  # default: fake
-        [--model <id>]                # required for real providers
+        [--provider fake|openai|anthropic]  # default: fake (or settings)
+        [--model <id>]                # default: settings defaultModel
 ```
 
-Env: `PI_RUST_SIDECAR` (sidecar entry override), `PI_RUST_NODE` (node binary).
-The sidecar is found by walking up from the cwd, then from the executable's
+Env: `PI_RUST_SIDECAR` (sidecar entry override), `PI_RUST_NODE` (node
+binary), `PI_CODING_AGENT_DIR` (agent dir override, upstream name). The
+sidecar is found by walking up from the cwd, then from the executable's
 directory.
+
+### Prompt templates (M3)
+
+`<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on
+name collisions). `--template <name> [args...]` expands the template into
+the prompt: `$1`..`$9`, `$@`/`$ARGUMENTS`, `${N:-default}` /
+`${ARGUMENTS:-default}`, one pass (ported from upstream `prompt-templates.ts`;
+recorded v0 deviations in `roadmap/m3-config-and-state/wp-307-prompt-templates.md`).
 
 ### Scenario format
 
@@ -165,9 +199,8 @@ against local mock HTTP servers (no live APIs in CI).
   or shutdown failure · `3` degraded (sidecar crashed mid-run; built-ins kept
   working, no respawn — protocol: degraded is terminal).
 
-The session file is pi-rust's own minimal v0 JSONL format
-(user/assistant/tool_result + extension custom entries) — **not** upstream
-session-file compatible (a later milestone).
+The session file is in the **upstream JSONL v3 format** (see "Sessions"
+above) — pi-rust sessions open in pi and vice versa.
 
 ## Repository layout
 

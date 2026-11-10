@@ -64,12 +64,18 @@ pub async fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
+    let mut isolated = false;
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
+    let mut list_sessions = false;
+    let mut resume_ref: Option<String> = None;
+    let mut fork_ref: Option<String> = None;
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
-    let mut provider_name = String::from("fake");
+    let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut template_name: Option<String> = None;
+    let mut template_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let val = |args: &Vec<String>, i: &mut usize| -> Result<String> {
@@ -79,11 +85,23 @@ pub async fn run() -> Result<i32> {
         match args[i].as_str() {
             "--extension-dir" => ext_dirs.push(val(&args, &mut i)?),
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
+            "--isolated" => isolated = true,
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
-            "--provider" => provider_name = val(&args, &mut i)?,
+            "--list-sessions" => list_sessions = true,
+            "--resume" => resume_ref = Some(val(&args, &mut i)?),
+            "--fork" => fork_ref = Some(val(&args, &mut i)?),
+            "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            "--template" => {
+                template_name = Some(val(&args, &mut i)?);
+                // Template args: positional tokens until the next flag.
+                while i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 1;
+                    template_args.push(args[i].clone());
+                }
+            }
             "--command" => {
                 let name = val(&args, &mut i)?;
                 // Variadic args: consume until the next `--` flag (or end).
@@ -94,34 +112,102 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> [--session-file <p>] [--provider fake|openai|anthropic] [--model <id>] [--prompt <text>]"),
+            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider fake|openai|anthropic] [--model <id>]"),
         }
         i += 1;
     }
     let cwd = std::env::current_dir().context("cwd")?;
+
+    // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
+    // (upstream getAgentDir). --isolated forces a fresh temp dir (the M1
+    // hermetic behavior, now opt-in).
+    let agent_dir = if isolated {
+        std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4()))
+    } else {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        crate::config::resolve_agent_dir(agent_dir.as_deref(), std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(), &home)
+    };
+    std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+
+    // --scenario/--prompt/--template are mutually exclusive (original flags).
+    if scenario_path.is_some() && (prompt.is_some() || template_name.is_some())
+        || prompt.is_some() && template_name.is_some()
+    {
+        bail!("--scenario, --prompt and --template are mutually exclusive");
+    }
+    // --template expands to the prompt (S7); discovery reads
+    // <agentDir>/prompts + .pi/prompts.
+    if let Some(name) = &template_name {
+        let text = crate::templates::apply(&agent_dir, &cwd, name, &template_args.join(" "))?;
+        prompt = Some(text);
+    }
+
     let runs = match (&scenario_path, &prompt) {
-        (Some(_), Some(_)) => bail!("--scenario and --prompt are mutually exclusive"),
         (Some(p), None) => {
             let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
         }
+        (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
         (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
-        (None, None) => bail!("--scenario <file> or --prompt <text> is required"),
+        (None, None) => {
+            if list_sessions {
+                Vec::new() // --list-sessions needs no scenario
+            } else {
+                bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
+            }
+        }
     };
-    // S3: provider credentials come from env only; the fake driver needs none.
-    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref())?;
-    let fake_mode = provider.is_none();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
     // project directory (the child inherits the core's cwd); the agent dir
     // is discovery-only.
-    let agent_dir = agent_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4())));
-    std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+    // M3/WP-301: agent settings from the agent dir (global file only — the
+    // project `cwd/.pi/settings.json` merge needs a trust model, out of
+    // scope for the headless core). Flags beat settings; settings beat the
+    // fake-driver default.
+    if list_sessions {
+        list_sessions_json(&agent_dir)?;
+        return Ok(0);
+    }
 
-    // v0 session file: --session-file or .pi-rust/sessions/<uuid>.jsonl.
-    let session_file = session_file.unwrap_or_else(|| PathBuf::from(".pi-rust").join("sessions").join(format!("{}.jsonl", uuid::Uuid::new_v4())));
-    let session = Arc::new(Session::open(session_file)?);
+    let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
+    let (provider_name, model_id) =
+        crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
+    // S3: provider credentials come from env only; the fake driver needs none.
+    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
+    let fake_mode = provider.is_none();
+
+    // Session file: --resume/--fork continue an existing session;
+    // --session-file points at one; else the upstream layout under the
+    // agent dir (`<agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl`).
+    if resume_ref.is_some() && fork_ref.is_some() {
+        anyhow::bail!("--resume and --fork are mutually exclusive");
+    }
+    let (session_file, existing, fork_from) = match (&resume_ref, &fork_ref) {
+        (Some(r), _) => (resolve_session_ref(&agent_dir, r)?, true, None),
+        (None, Some(r)) => {
+            let old = resolve_session_ref(&agent_dir, r)?;
+            let dir = old.parent().context("forked session file has no parent dir")?;
+            let ts = crate::session::now_iso().replace(":", "-");
+            (dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4())), false, Some(old))
+        }
+        _ => {
+            let sf = session_file.unwrap_or_else(|| {
+                let dir = agent_dir.join("sessions").join(crate::session::encode_cwd(&cwd.to_string_lossy()));
+                std::fs::create_dir_all(&dir).ok();
+                let ts = crate::session::now_iso().replace(":", "-");
+                dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4()))
+            });
+            let exists = sf.exists();
+            (sf, exists, None)
+        },
+    };
+    let session = Arc::new(match fork_from {
+        Some(old) => Session::fork(&old, &session_file).context("forking session")?,
+        _ if existing => Session::load(&session_file).context("resuming session")?,
+        _ => Session::create(session_file.clone(), &cwd.to_string_lossy()).context("creating session file")?,
+    });
 
     let sidecar = find_sidecar(&cwd)?;
     let node = std::env::var("PI_RUST_NODE").unwrap_or_else(|_| "node".into());
@@ -164,7 +250,7 @@ pub async fn run() -> Result<i32> {
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
-        model: Arc::default(),
+        model: Arc::new(Mutex::new((Value::Null, agent_config.default_thinking_level.clone()))),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
         provider,
@@ -249,4 +335,88 @@ pub async fn run() -> Result<i32> {
     // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
     // (sidecar crashed mid-run — protocol: degraded is terminal, no respawn).
     Ok(if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 })
+}
+
+/// `--list-sessions`: one NDJSON line per session file under
+/// `<agentDir>/sessions/` (recursive): {file, id, cwd, name, updated, entries}.
+fn list_sessions_json(agent_dir: &Path) -> Result<()> {
+    let root = agent_dir.join("sessions");
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    collect_session_files(&root, &mut files);
+    files.sort_by(|a, b| b.cmp(a)); // most recently modified first
+    for f in &files {
+        let Ok(raw) = std::fs::read_to_string(f) else { continue };
+        let Some(first) = raw.lines().next() else { continue };
+        let Ok(h) = serde_json::from_str::<Value>(first) else { continue };
+        if h.get("type").and_then(Value::as_str) != Some("session") {
+            continue;
+        }
+        let mut name: Option<String> = None;
+        let mut entries = 0usize;
+        for line in raw.lines().skip(1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            entries += 1;
+            if let Ok(e) = serde_json::from_str::<Value>(line) {
+                if e.get("type").and_then(Value::as_str) == Some("session_info") {
+                    name = e.get("name").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+        }
+        let updated = std::fs::metadata(f)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| crate::session::iso_from_secs(d.as_secs()));
+        println!("{}", json!({
+            "file": f.to_string_lossy(),
+            "id": h.get("id"),
+            "cwd": h.get("cwd"),
+            "name": name,
+            "parentSession": h.get("parentSession"),
+            "updated": updated,
+            "entries": entries,
+        }));
+    }
+    Ok(())
+}
+
+fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_session_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p);
+        }
+    }
+}
+
+/// Resolves a `--resume`/`--fork` reference: an existing file path wins;
+/// otherwise it is matched against session ids under the agent dir.
+fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
+    let p = PathBuf::from(ref_);
+    if p.exists() {
+        return Ok(p);
+    }
+    let root = agent_dir.join("sessions");
+    let mut files = Vec::new();
+    collect_session_files(&root, &mut files);
+    for f in &files {
+        let Ok(raw) = std::fs::read_to_string(f) else { continue };
+        let Some(first) = raw.lines().next() else { continue };
+        if let Ok(h) = serde_json::from_str::<Value>(first) {
+            if h.get("type").and_then(Value::as_str) == Some("session")
+                && h.get("id").and_then(Value::as_str) == Some(ref_)
+            {
+                return Ok(f.clone());
+            }
+        }
+    }
+    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", root.display())
 }
