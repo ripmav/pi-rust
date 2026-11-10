@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod client;
+mod config;
 mod model;
 mod session;
 mod provider;
