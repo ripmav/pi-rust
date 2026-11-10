@@ -508,6 +508,93 @@ fn provider_e2e_prompt_via_mock_openai() {
     assert!(dump.contains("Hello from mock"), "transcript: {dump}");
 }
 
+/// WP-407: provider run with --print-usage emits a cumulative usage event
+/// (cost from the bundled registry for a real model id) and writes a usage
+/// entry into the session file.
+#[test]
+fn provider_e2e_print_usage_and_session_entry() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-m4-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":"ok"}}]}).to_string();
+    let c2 = json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}).to_string();
+    let sse = format!("data: {c1}\ndata: {c2}\ndata: [DONE]\n");
+    let mut body = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+    for line in sse.split_inclusive('\n') {
+        if line.trim().is_empty() { continue; }
+        let b = line.as_bytes();
+        body.push_str(&format!("{:x}\r\n", b.len()));
+        body.push_str(line);
+        body.push_str("\r\n");
+    }
+    body.push_str("0\r\n\r\n");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut buf = vec![0u8; 65536];
+        let mut n = 0usize;
+        loop {
+            match s.read(&mut buf[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => {
+                    n += k;
+                    if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                }
+            }
+        }
+        use std::io::Write;
+        let _ = s.write_all(body.as_bytes());
+    });
+
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("OPENAI_API_KEY", "e2e-key")
+        .env("OPENAI_BASE_URL", &base)
+        .arg("--provider").arg("openai")
+        .arg("--model").arg("gpt-4o-mini")
+        .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(&session_file)
+        .arg("--print-usage")
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    let _ = server.join();
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("stdout line not JSON: {l}: {e}")))
+        .collect();
+    let usage = lines
+        .iter()
+        .find(|l| l["kind"] == "usage")
+        .expect("no usage event with --print-usage");
+    assert_eq!(usage["input"], 100);
+    assert_eq!(usage["output"], 50);
+    // gpt-4o-mini registry cost: 0.15/1M in, 0.6/1M out -> 100*0.15 + 50*0.6 per 1M
+    let expected = 100f64 / 1e6 * 0.15 + 50f64 / 1e6 * 0.6;
+    assert!(
+        (usage["costUsd"].as_f64().unwrap() - expected).abs() < 1e-12,
+        "costUsd: {}", usage["costUsd"]
+    );
+    assert_eq!(lines.last().unwrap()["kind"], "transcript");
+
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let entry: Value = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|e| e.get("type").and_then(Value::as_str) == Some("usage"))
+        .expect("no usage entry in session file");
+    assert_eq!(entry["usage"]["input"], 100);
+    assert_eq!(entry["usage"]["output"], 50);
+}
+
 /// S4 cross-compatibility: a session file written by pi-rust must be loaded
 /// by the ORIGINAL upstream SessionManager (read-only: open + read API).
 #[test]

@@ -160,6 +160,7 @@ impl AnthropicDriver {
 			partial: String,
 		}
 		let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
+		let mut usage = crate::model::Usage::default();
 		let mut buf = String::new();
 		let mut event = String::new();
 		let mut stream = resp.bytes_stream();
@@ -206,7 +207,17 @@ impl AnthropicDriver {
 							_ => {}
 						}
 					}
-					_ => {} // message_start/stop, content_block_stop, message_delta
+					"message_start" => {
+						if let Some(u) = v.pointer("/message/usage") {
+							usage.input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+							usage.cache_read = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+							usage.cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+						}
+						}
+						"message_delta" => {
+							usage.output = v.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
+						}
+						_ => {} // message_stop, content_block_stop
 				}
 			}
 		}
@@ -231,7 +242,11 @@ impl AnthropicDriver {
 				_ => {}
 			}
 		}
-		Ok(AssistantTurn { text: if text.is_empty() { None } else { Some(text) }, tool_calls })
+		Ok(AssistantTurn {
+		text: if text.is_empty() { None } else { Some(text) },
+		tool_calls,
+		usage,
+	})
 	}
 }
 
@@ -245,6 +260,25 @@ impl ModelDriver for AnthropicDriver {
 mod tests {
 	use super::*;
 	use crate::provider::mock;
+
+	#[tokio::test]
+	async fn captures_usage_from_start_and_delta() {
+		let (tx, _rx) = tokio::sync::mpsc::channel(1);
+		let sse = concat!(
+			"event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":42,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":2}}}\n\n",
+			"event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+			"event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n",
+			"event: content_block_stop\ndata: {\"index\":0}\n\n",
+			"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n",
+		);
+		let base = mock::start_mock(mock::sse_response(sse), tx).await;
+		let d = AnthropicDriver::new(base, "k".into(), "m".into());
+		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		assert_eq!(turn.usage.input, 42);
+		assert_eq!(turn.usage.output, 9);
+		assert_eq!(turn.usage.cache_read, 5);
+		assert_eq!(turn.usage.cache_write, 2);
+	}
 
 	#[tokio::test]
 	async fn maps_request_headers_and_shape() {

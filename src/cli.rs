@@ -68,6 +68,7 @@ pub async fn run() -> Result<i32> {
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
     let mut list_sessions = false;
+    let mut print_usage = false;
     let mut resume_ref: Option<String> = None;
     let mut fork_ref: Option<String> = None;
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
@@ -89,6 +90,7 @@ pub async fn run() -> Result<i32> {
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
             "--list-sessions" => list_sessions = true,
+            "--print-usage" => print_usage = true,
             "--resume" => resume_ref = Some(val(&args, &mut i)?),
             "--fork" => fork_ref = Some(val(&args, &mut i)?),
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
@@ -177,6 +179,11 @@ pub async fn run() -> Result<i32> {
     // S3: provider credentials come from env only; the fake driver needs none.
     let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
     let fake_mode = provider.is_none();
+    let initial_model = if fake_mode {
+        json!({"id":"fake","provider":"fake"})
+    } else {
+        json!({"id":model_id,"provider":provider_name})
+    };
 
     // Session file: --resume/--fork continue an existing session;
     // --session-file points at one; else the upstream layout under the
@@ -250,10 +257,12 @@ pub async fn run() -> Result<i32> {
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
-        model: Arc::new(Mutex::new((Value::Null, agent_config.default_thinking_level.clone()))),
+        model: Arc::new(Mutex::new((initial_model, agent_config.default_thinking_level.clone()))),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
         provider,
+        usage_total: Arc::default(),
+        cost_total: Arc::default(),
     });
     tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
@@ -330,6 +339,12 @@ pub async fn run() -> Result<i32> {
     }
 
     // Final event: the full session (acked: written+flushed before exit).
+    if print_usage {
+        let u = ctx.usage_total.lock().unwrap().clone();
+        let cost = *ctx.cost_total.lock().unwrap();
+        log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
+            "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
+    }
     log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
 
     // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
