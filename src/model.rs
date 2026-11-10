@@ -18,6 +18,35 @@ pub struct ToolCallSpec {
 pub struct AssistantTurn {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallSpec>,
+    /// Token usage reported by the provider (zero for the fake driver).
+    pub usage: Usage,
+}
+
+/// Token usage for one model response (provider-reported).
+#[derive(Clone, Copy, Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl Usage {
+    pub fn add(&mut self, o: &Usage) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_read += o.cache_read;
+        self.cache_write += o.cache_write;
+    }
+
+    /// Cost in USD from per-million-token registry prices (unknown model → 0).
+    pub fn cost_usd(&self, cost: Option<&crate::registry::Cost>) -> f64 {
+        let Some(c) = cost else { return 0.0 };
+        self.input as f64 / 1e6 * c.input
+            + self.output as f64 / 1e6 * c.output
+            + self.cache_read as f64 / 1e6 * c.cache_read
+            + self.cache_write as f64 / 1e6 * c.cache_write
+    }
 }
 
 /// Model driver: produces the next assistant turn for the conversation so far.
@@ -54,15 +83,15 @@ impl FakeDriver {
                 cur.push(ToolCallSpec { id: format!("tc_{seq}"), name: name.to_string(), input });
             } else if let Some(text) = s.get("text").and_then(Value::as_str) {
                 if !cur.is_empty() {
-                    turns.push(AssistantTurn { text: None, tool_calls: std::mem::take(&mut cur) });
+                    turns.push(AssistantTurn { text: None, tool_calls: std::mem::take(&mut cur), usage: Usage::default() });
                 }
-                turns.push(AssistantTurn { text: Some(text.to_string()), tool_calls: Vec::new() });
+                turns.push(AssistantTurn { text: Some(text.to_string()), tool_calls: Vec::new(), usage: Usage::default() });
             } else {
                 bail!("model_script step must be {{\"text\": \"...\"}} or {{\"tool_call\": {{\"name\", \"input\"}}}}");
             }
         }
         if !cur.is_empty() {
-            turns.push(AssistantTurn { text: None, tool_calls: cur });
+            turns.push(AssistantTurn { text: None, tool_calls: cur, usage: Usage::default() });
         }
         Ok(Self { turns: Mutex::new(VecDeque::from(turns)), echo: false })
     }
@@ -88,7 +117,7 @@ impl ModelDriver for FakeDriver {
             if self.echo {
                 let last_user = convo.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
                 let text = last_user.map(crate::session::extract_text).unwrap_or_default();
-                return Ok(AssistantTurn { text: Some(format!("echo: {text}")), tool_calls: Vec::new() });
+                return Ok(AssistantTurn { text: Some(format!("echo: {text}")), tool_calls: Vec::new(), usage: Usage::default() });
             }
             anyhow::bail!("model script exhausted before the run could finish")
         })

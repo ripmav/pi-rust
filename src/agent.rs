@@ -17,6 +17,8 @@ pub struct QueuedUser {
     pub text: String,
     pub source: &'static str,
     pub steps: Vec<Value>,
+    /// (mime, base64) `--image` attachments (S8).
+    pub images: Vec<(String, String)>,
 }
 
 pub enum Item {
@@ -81,7 +83,13 @@ pub struct Core {
     pub msg_tx: mpsc::UnboundedSender<Item>,
     pub done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Live provider driver (None = scripted fake driver per scenario run).
-    pub provider: Option<ProviderDriver>,
+    /// Mutex: runtime setModel (WP-406) swaps it between turns.
+    pub provider: Arc<Mutex<Option<ProviderDriver>>>,
+    /// Agent dir for runtime credential re-resolution (WP-406).
+    pub agent_dir: Arc<std::path::PathBuf>,
+    /// Cumulative token usage / cost for --print-usage (WP-407).
+    pub usage_total: Arc<Mutex<crate::model::Usage>>,
+    pub cost_total: Arc<Mutex<f64>>,
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -147,21 +155,44 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
                 eprintln!("[core] extension user_message: {text}");
                 // Steer for v0 = append to the same queue (drained in order).
-                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new() }));
+                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
             }
             "set_model_request" => {
                 let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                 let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
                 let provider = ev.get("provider").and_then(Value::as_str).map(str::to_string);
-                let prev = ctx.model.lock().unwrap().0.clone();
-                let model = json!({"id":model_id,"provider":provider}); // v0: core tracks id/provider only
-                ctx.model.lock().unwrap().0 = model.clone();
-                if let (Some(p), Some(m)) = (&provider, &model_id) {
-                    ctx.session.set_model(p, m);
-                }
-                ctx.client.send(json!({"id":id,"type":"response","command":"set_model_request","success":true,"data":{"ok":model_id.is_some()}}));
-                if subscribed(&ctx, "model_select") {
-                    ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                // WP-406: validate first (catalog + driver build), only then
+                // swap; declines leave the active model untouched. IMPORTANT:
+                // no `return` here — a return would exit event_task, not just
+                // this arm, and kill the sidecar->core event pump.
+                let reply = |success: bool, data: Value| {
+                    let mut line = json!({"id":id,"type":"response","command":"set_model_request","success":success});
+                    if success { line["data"] = data; } else { line["error"] = data; }
+                    ctx.client.send(line);
+                };
+                match (provider, model_id) {
+                    (Some(p), Some(m)) => {
+                        if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                            reply(false, json!(format!("unknown model {p}/{m}")));
+                        } else {
+                            match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
+                                Ok(Some(drv)) => {
+                                    let prev = ctx.model.lock().unwrap().0.clone();
+                                    let model = json!({"id":m,"provider":p});
+                                    ctx.model.lock().unwrap().0 = model.clone();
+                                    ctx.session.set_model(&p, &m);
+                                    *ctx.provider.lock().unwrap() = Some(drv);
+                                    reply(true, json!({"ok":true}));
+                                    if subscribed(&ctx, "model_select") {
+                                        ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                    }
+                                }
+                                Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                            }
+                        }
+                    }
+                    _ => reply(false, json!("setModel requires provider and modelId")),
                 }
             }
             "set_thinking_level_request" => {
@@ -339,6 +370,7 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
                 index += 1;
                 ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
                 if let Err(msg) = run_agent(&ctx, &u).await {
+                    eprintln!("[core] agent run failed: {msg}");
                     *ctx.fail.lock().unwrap() = Some(msg);
                     break; // remaining queued items are dropped (v0)
                 }
@@ -354,15 +386,17 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
 /// `agent_start` → turns (`context_with_system` → model output events → tool
 /// calls → `turn_end`) → `agent_end`.
 async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
-    let driver: Box<dyn ModelDriver> = match ctx.provider.as_ref() {
-        Some(ProviderDriver::OpenAi(d)) => Box::new(d.clone()),
-        Some(ProviderDriver::Anthropic(d)) => Box::new(d.clone()),
+    // The fake driver is stateful (script queue) and built once per run; live
+    // provider drivers are re-read per turn so a runtime setModel (WP-406)
+    // applies to the next turn.
+    let fake_driver: Option<Box<dyn ModelDriver>> = match ctx.provider.lock().unwrap().as_ref() {
+        Some(_) => None,
         None => {
             if u.steps.is_empty() && u.source == "cli" {
                 // Prompt mode with the fake driver: deterministic echo turn.
-                Box::new(FakeDriver::echo_mode())
+                Some(Box::new(FakeDriver::echo_mode()))
             } else {
-                Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?)
+                Some(Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?))
             }
         }
     };
@@ -386,7 +420,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         }
     }
 
-    let user_msg = json!({"role":"user","content":[{"type":"text","text":text}],"timestamp":crate::session::now_iso()});
+    let mut user_content: Vec<Value> = vec![json!({"type":"text","text":text})];
+    for (mime, data) in &u.images {
+        user_content.push(json!({"type":"image","mimeType":mime,"data":data}));
+    }
+    let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
 
     // `before_agent_start`: prepend returned custom messages; a returned
@@ -434,7 +472,34 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             }
         }
 
-        let turn = driver.complete(&convo).await.map_err(|e| e.to_string())?;
+        let turn = match fake_driver.as_ref() {
+            Some(d) => d.complete(&convo).await,
+            None => {
+                let drv = ctx.provider.lock().unwrap().clone();
+                match drv.as_ref() {
+                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::Google(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo).await,
+                    None => unreachable!("fake_driver is None only while a provider exists"),
+                }
+            }
+        }
+        .map_err(|e| e.to_string())?;
+
+        // Usage accounting (WP-407): per-turn session entry + cumulative
+        // total; cost from the bundled registry (unknown model → 0).
+        if turn.usage != crate::model::Usage::default() {
+            let active = ctx.model.lock().unwrap().0.clone();
+            let p = active.get("provider").and_then(Value::as_str).unwrap_or("fake").to_string();
+            let m = active.get("id").and_then(Value::as_str).unwrap_or("fake").to_string();
+            let cost = turn
+                .usage
+                .cost_usd(crate::registry::ModelRegistry::bundled().resolve(&p, &m).map(|x| &x.cost));
+            ctx.session.set_usage(&turn.usage, cost);
+            ctx.usage_total.lock().unwrap().add(&turn.usage);
+            *ctx.cost_total.lock().unwrap() += cost;
+        }
         if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
         ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
 
@@ -507,7 +572,8 @@ fn assistant_message(turn: &AssistantTurn) -> Value {
         content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"input":tc.input}));
     }
     json!({"role":"assistant","content":content,"api":"fake","provider":"fake","model":"fake",
-        "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+        "usage":{"input":turn.usage.input,"output":turn.usage.output,
+                 "cacheRead":turn.usage.cache_read,"cacheWrite":turn.usage.cache_write},
         "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":crate::session::now_iso()})
 }
 
