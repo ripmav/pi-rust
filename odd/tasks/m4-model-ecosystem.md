@@ -52,7 +52,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 |----|------|----|-------|-------|--------|
 | T1 | S1 | 401 | #21 | inline TDD | cc54ae9 |
 | T2 | S2 | 407 | #22 | inline TDD | 96ea486 |
-| T3 | S3 | 406 | #23 | inline TDD | — |
+| T3 | S3 | 406 | #23 | inline TDD | 3f2628e |
 | T4 | S4 | 402 | #24 | inline TDD (explorer for wire details) | — |
 | T5 | S5 | 403 | #25 | inline TDD | — |
 | T6 | S6 | 404 | #26 | inline TDD | — |
@@ -91,3 +91,16 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   cumulative `usage` event before the final transcript. e2e: mock gpt-4o-mini
   run verifies event + session entry + exact registry cost (4.5e-5 USD).
   Suite: 39 in-crate + 15 e2e + 42 smoke.
+- L6: T3/WP-406 done (3f2628e): driver selection moved per turn (live
+  drivers re-read each turn; stateful fake driver stays per-run);
+  set_model_request validates via bundled catalog, re-resolves credentials
+  (WP-303) and only then swaps `Core.provider` (Mutex); declines leave model
+  + driver + session untouched. BUGFIX found by e2e: `return decline(...)`
+  inside the event_task match arm returned from the whole event_task,
+  killing the sidecar->core event pump on every decline (silent second
+  request drop, decision hangs); the arm now falls through. e2e
+  (deterministic via the awaited `before_agent_start` decision event): run 1
+  on groq, switch confirmed during run 2, run 2 on openai; exactly one
+  model_change entry; declined id never recorded. Suite: 39+16+42.
+  NOTE: F&F `agent_start` handlers must not be relied on for request/response
+  work (core does not await them — matches upstream semantics).
