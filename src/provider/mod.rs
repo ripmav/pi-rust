@@ -58,6 +58,48 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 				.unwrap_or_else(|_| compat_family_base(p).unwrap().to_string());
 			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
 		}
+		"azure" | "azure-openai" => {
+			let name = "azure";
+			let model = model.context("--provider azure requires --model <id>")?;
+			let key = crate::auth::resolve_api_key(name, agent_dir)?;
+			// base: AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME ->
+			// https://{resource}.openai.azure.com/openai/v1 (upstream
+			// azure-openai-config.ts: azure hosts get /openai/v1 as base path).
+			let base = match (
+				std::env::var("AZURE_OPENAI_BASE_URL").ok().filter(|b| !b.trim().is_empty()),
+				std::env::var("AZURE_OPENAI_RESOURCE_NAME").ok().filter(|b| !b.trim().is_empty()),
+			) {
+				(Some(b), _) => b.trim().trim_end_matches('/').to_string(),
+				(None, Some(resource)) => format!("https://{resource}.openai.azure.com/openai/v1"),
+				(None, None) => {
+					anyhow::bail!("azure requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")
+				}
+			};
+			// deployment: AZURE_OPENAI_DEPLOYMENT_NAME_MAP (model=deployment, comma
+			// separated) or the catalog model id.
+			let deployment = std::env::var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP")
+				.ok()
+				.and_then(|map| {
+					map.split(',')
+						.filter_map(|e| {
+							let (id, dep) = e.trim().split_once('=')?;
+							if id.trim() == model {
+								Some(dep.trim().to_string())
+							} else {
+								None
+							}
+						})
+						.next()
+				})
+				.unwrap_or_else(|| model.to_string());
+			let api_version = std::env::var("AZURE_OPENAI_API_VERSION")
+				.ok()
+				.filter(|v| !v.trim().is_empty())
+				.unwrap_or_else(|| "v1".into());
+			Ok(Some(ProviderDriver::OpenAi(Arc::new(
+				OpenAiDriver::new_azure(base, key, model.to_string(), deployment, api_version),
+			))))
+		}
 		"google" => {
 			let model = model.context("--provider google requires --model <id>")?;
 			let key = crate::auth::resolve_api_key("google", agent_dir)?;
@@ -81,7 +123,7 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 		p if not_supported_v0(p).is_some() => {
 			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
 		}
-		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, openai, groq, cerebras, deepseek, together, huggingface, openrouter; azure/cloudflare/bedrock arrive in later M4 WPs)"),
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, openai, groq, cerebras, deepseek, together, huggingface, openrouter; cloudflare/bedrock arrive in later M4 WPs)"),
 	}
 }
 
