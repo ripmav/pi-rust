@@ -19,6 +19,7 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
 		"anthropic" => "ANTHROPIC_API_KEY",
 		"google" | "google-vertex" => "GEMINI_API_KEY",
 		"azure" | "azure-openai" => "AZURE_OPENAI_API_KEY",
+		"cloudflare-workers-ai" | "cloudflare-ai-gateway" => "CLOUDFLARE_API_KEY",
 		"groq" => "GROQ_API_KEY",
 		"xai" => "XAI_API_KEY",
 		"openrouter" => "OPENROUTER_API_KEY",
