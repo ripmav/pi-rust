@@ -57,7 +57,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 | T5 | S5 | 403 | #25 | inline TDD | 1f20cd1 |
 | T6 | S6 | 404 | #26 | inline TDD | bd62027 |
 | T7 | S7 | 405 | #27 | inline TDD (explorer for sigv4/converse) | — |
-| T8 | S8 | 408 | #28 | inline TDD | — |
+| T8 | S8 | 408 | #28 | inline TDD | 41b0461 |
 | T9 | — | — | — | matrix re-run, docs, PR | — |
 
 ## Log
@@ -162,3 +162,20 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   `start_mock_bytes` (event-stream framing breaks UTF-8 String
   transport at totals >= 128 — caught in test). Suite: 51 in-crate +
   16 e2e + 42 smoke.
+- L12: T8/WP-408 done (41b0461): `--image <path>` (repeatable) on
+  prompt/template runs. Magic-byte MIME detection (png/jpeg/gif/webp —
+  the upstream `@file` image set), own minimal base64 encoder (no new
+  deps), attachment rides QueuedUser into the prompt user message as
+  pi-ai `{type:"image",mimeType,data}` blocks (session file keeps them).
+  Drivers: OpenAI wire -> `image_url` data-URL parts (text part kept),
+  Anthropic -> `source:{type:base64,media_type,data}` blocks. Capability
+  gate: registry `input` must contain "image" (text-only models like
+  openai/gpt-4 -> typed error naming the input list); fake driver and
+  non-openai-wire providers (google/bedrock/vertex) -> typed v0
+  rejection; --image + --scenario -> typed rejection. File errors
+  typed (cannot read / not a supported format). Upstream note: original
+  pi ships images via `@file` args; S8 deliberately adds the explicit
+  --image flag. Tests: mime/b64/typed-error units, both driver mapping
+  units, 3 e2e (data URL in the wire request + session image block,
+  text-only model rejection, file errors). Suite: 56 in-crate + 19 e2e
+  + 42 smoke.

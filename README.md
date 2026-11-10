@@ -119,6 +119,7 @@ pi-rust --extension-dir <path> (repeatable)
         --scenario <scenario.json>    # one of --scenario / --prompt / --template
         | --prompt <text>             # one of --scenario / --prompt / --template
         | --template <name> [args...] # expand a prompt template into the prompt
+        [--image <path>...]           # attach images to the prompt (png/jpeg/gif/webp)
         [--session-file <path>]       # default: <agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl
         [--resume <file|id>]          # continue an existing session
         [--fork <file|id>]            # branch a new session (parentSession header)
