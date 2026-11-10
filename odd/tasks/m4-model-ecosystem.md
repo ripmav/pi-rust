@@ -119,3 +119,6 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   image tool-result parts (WP-408), thinkingConfig. Tests: mapping, tools,
   stream assembly (text+functionCall+usage), non-2xx, build variants.
   Suite: 44 in-crate + 16 e2e + 42 smoke.
+- L8: Delivery strategy recorded (slice 1120 lines / 9 commits): ONE
+  milestone PR (M2/M3 precedent, PR #4/#10/#20) — the work-unit commits
+  keep the PR reviewable per slice. No forced mid-branch PRs.

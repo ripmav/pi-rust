@@ -15,12 +15,21 @@ pub struct OpenAiDriver {
 	base_url: String,
 	api_key: String,
 	model: String,
+	/// Azure variant: deployment path + `api-version` query param and the
+	/// `api-key` header instead of bearer (upstream azure-openai-config.ts).
+	azure: Option<(String, String)>,
 	client: reqwest::Client,
 }
 
 impl OpenAiDriver {
 	pub fn new(base_url: String, api_key: String, model: String) -> Self {
-		Self { base_url, api_key, model, client: reqwest::Client::new() }
+		Self { base_url, api_key, model, azure: None, client: reqwest::Client::new() }
+	}
+
+	/// `deployment` replaces the model in the URL path (the body keeps the
+	/// catalog model id, per upstream `withDeploymentName`).
+	pub fn new_azure(base_url: String, api_key: String, model: String, deployment: String, api_version: String) -> Self {
+		Self { base_url, api_key, model, azure: Some((deployment, api_version)), client: reqwest::Client::new() }
 	}
 
 	fn text_of(v: Option<&Value>) -> String {
@@ -116,12 +125,25 @@ impl OpenAiDriver {
 		if !tools.is_empty() {
 			body["tools"] = json!(tools);
 		}
-		let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-		let resp = self
-			.client
-			.post(&url)
-			.bearer_auth(&self.api_key)
-			.json(&body)
+		let (url, use_azure_key) = match &self.azure {
+			Some((dep, ver)) => (
+				format!(
+					"{}/deployments/{}/chat/completions?api-version={}",
+					self.base_url.trim_end_matches('/'),
+					dep,
+					ver
+				),
+				true,
+			),
+			None => (format!("{}/chat/completions", self.base_url.trim_end_matches('/')), false),
+		};
+		let mut req = self.client.post(&url).json(&body);
+		if use_azure_key {
+			req = req.header("api-key", &self.api_key);
+		} else {
+			req = req.bearer_auth(&self.api_key);
+		}
+		let resp = req
 			.send()
 			.await
 			.with_context(|| format!("openai request failed: {url}"))?;
@@ -258,5 +280,32 @@ mod tests {
 		let err = d.complete(&mock::test_convo()).await.unwrap_err().to_string();
 		assert!(err.contains("500"), "{err}");
 		assert!(err.contains("boom"), "{err}");
+	}
+
+	#[tokio::test]
+	async fn azure_uses_deployment_path_api_version_and_api_key_header() {
+		let sse = concat!(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n",
+			"\n",
+			"data: [DONE]\n",
+			"\n",
+		);
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let base = mock::start_mock(mock::sse_response(sse), tx).await;
+		let d = OpenAiDriver::new_azure(
+			format!("{base}/openai/v1"),
+			"az-key".into(),
+			"gpt-4o".into(),
+			"dep-gpt".into(),
+			"2024-10-21".into(),
+		);
+		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		assert_eq!(turn.text.as_deref(), Some("ok"));
+		let recorded = rx.recv().await.unwrap();
+		let first_line = recorded.lines().next().unwrap_or_default().to_string();
+		assert!(first_line.contains("/openai/v1/deployments/dep-gpt/chat/completions?api-version=2024-10-21"), "{}", first_line);
+		let lower = recorded.to_lowercase();
+		assert!(lower.contains("api-key: az-key"), "{recorded}");
+		assert!(!lower.contains("authorization"), "azure must not send bearer: {recorded}");
 	}
 }
