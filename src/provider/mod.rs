@@ -22,24 +22,43 @@ pub enum ProviderDriver {
 	Anthropic(Arc<AnthropicDriver>),
 }
 
+impl ProviderDriver {
+	/// Forwards `complete` to the wrapped driver (same pattern the agent
+	/// loop uses; convenient for tests and future runtime switching).
+	pub fn complete<'a>(
+		&'a self,
+		convo: &'a [Value],
+	) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		match self {
+			ProviderDriver::OpenAi(d) => d.complete(convo),
+			ProviderDriver::Anthropic(d) => d.complete(convo),
+		}
+	}
+}
+
 /// Builds the driver from CLI values + resolved credentials (WP-303 order:
 /// stored `auth.json` credential, then ambient env var).
 pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Path) -> Result<Option<ProviderDriver>> {
 	match name {
 		"fake" => Ok(None),
-		"openai" => {
-			let model = model.context("--provider openai requires --model <id>")?;
-			let key = crate::auth::resolve_api_key("openai", agent_dir)?;
-			let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
-			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
-		}
 		"anthropic" => {
 			let model = model.context("--provider anthropic requires --model <id>")?;
 			let key = crate::auth::resolve_api_key("anthropic", agent_dir)?;
 			let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
 			Ok(Some(ProviderDriver::Anthropic(Arc::new(AnthropicDriver::new(base, key, model.to_string())))))
 		}
-		other => anyhow::bail!("--provider must be fake|openai|anthropic (got {other})"),
+		p if compat_family_base(p).is_some() => {
+			let model = model.with_context(|| format!("--provider {p} requires --model <id>"))?;
+			let key = crate::auth::resolve_api_key(p, agent_dir)?;
+			let env_name = format!("{p}_BASE_URL").to_uppercase();
+			let base = std::env::var(env_name.as_str())
+				.unwrap_or_else(|_| compat_family_base(p).unwrap().to_string());
+			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
+		}
+		p if not_supported_v0(p).is_some() => {
+			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
+		}
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, openai, groq, cerebras, deepseek, together, huggingface, openrouter; google/azure/cloudflare/bedrock arrive in later M4 WPs)"),
 	}
 }
 
@@ -166,5 +185,92 @@ pub(crate) mod mock {
 			serde_json::json!({"role":"assistant","content":[{"type":"text","text":"calling"},{"type":"toolCall","id":"tc_9","name":"bash","arguments":{"command":"ls"}}]}),
 			serde_json::json!({"role":"toolResult","toolCallId":"tc_9","toolName":"bash","content":[{"type":"text","text":"file.txt"}],"isError":false}),
 		]
+	}
+}
+
+/// OpenAI-compatible (chat/completions) family table, verified against
+/// upstream `packages/ai/src/providers/*.ts` (085c84e): provider id →
+/// default base URL. These all use `openAICompletionsApi()` upstream.
+pub fn compat_family_base(provider: &str) -> Option<&'static str> {
+	Some(match provider {
+		"openai" => "https://api.openai.com/v1",
+		"groq" => "https://api.groq.com/openai/v1",
+		"cerebras" => "https://api.cerebras.ai/v1",
+		"deepseek" => "https://api.deepseek.com",
+		"together" => "https://api.together.ai/v1",
+		"huggingface" => "https://router.huggingface.co/v1",
+		"openrouter" => "https://openrouter.ai/api/v1",
+		_ => return None,
+	})
+}
+
+/// Providers whose upstream wire API is NOT chat/completions: typed v0
+/// rejection (name + wire API), not a silent wrong-family call.
+pub fn not_supported_v0(provider: &str) -> Option<&'static str> {
+	Some(match provider {
+		"xai" => "responses",
+		"minimax" | "minimax-cn" => "anthropic-messages",
+		"mistral" => "conversations",
+		"fireworks" => "custom",
+		"openai-codex" => "codex-backend",
+		"meta" => "custom",
+		"baseten" => "custom",
+		"github-copilot" => "copilot",
+		_ => return None,
+	})
+}
+
+#[cfg(test)]
+mod family_tests {
+	use super::*;
+
+	#[test]
+	fn compat_table_matches_upstream_defaults() {
+		assert_eq!(compat_family_base("groq"), Some("https://api.groq.com/openai/v1"));
+		assert_eq!(compat_family_base("cerebras"), Some("https://api.cerebras.ai/v1"));
+		assert_eq!(compat_family_base("deepseek"), Some("https://api.deepseek.com"), "deepseek base has no /v1 (upstream)");
+		assert_eq!(compat_family_base("together"), Some("https://api.together.ai/v1"));
+		assert_eq!(compat_family_base("huggingface"), Some("https://router.huggingface.co/v1"));
+		assert_eq!(compat_family_base("openrouter"), Some("https://openrouter.ai/api/v1"));
+		assert_eq!(compat_family_base("openai"), Some("https://api.openai.com/v1"));
+		assert_eq!(compat_family_base("xai"), None);
+	}
+
+	#[test]
+	fn non_completions_families_are_typed_rejections() {
+		assert_eq!(not_supported_v0("xai"), Some("responses"));
+		assert_eq!(not_supported_v0("minimax"), Some("anthropic-messages"));
+		assert_eq!(not_supported_v0("mistral"), Some("conversations"));
+		assert_eq!(not_supported_v0("nope"), None);
+	}
+
+	/// One shared mock per family (sequential: env is process global).
+	/// Per-family credential via temp agent-dir auth.json, base URL via the
+	/// family's BASE_URL override env.
+	#[tokio::test]
+	async fn every_compat_family_reaches_mock_completions() {
+		let agent_dir = std::env::temp_dir().join(format!("pi-rust-fam-{}", uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&agent_dir).unwrap();
+		let families = ["groq", "cerebras", "deepseek", "together", "huggingface", "openrouter"];
+		for p in families {
+			let (tx, _rx) = tokio::sync::mpsc::channel(1);
+			let sse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"fam-ok\"}}]}\ndata: [DONE]\n";
+			let base = mock::start_mock(mock::sse_response(sse), tx).await;
+			let env_name = format!("{p}_BASE_URL").to_uppercase();
+			std::fs::write(
+				agent_dir.join("auth.json"),
+				serde_json::json!({p: {"type": "api_key", "key": format!("key-{p}")}}).to_string(),
+			)
+			.unwrap();
+			std::env::set_var(env_name.as_str(), &base);
+			let drv = build_provider(p, Some("any-model"), &agent_dir)
+				.unwrap_or_else(|e| panic!("{p}: {e}"))
+				.expect("driver built");
+			let turn = drv
+				.complete(&[serde_json::json!({"role":"user","content":"hi"})])
+				.await
+				.unwrap_or_else(|e| panic!("{p} complete: {e}"));
+			assert_eq!(turn.text.as_deref(), Some("fam-ok"), "{p}");
+		}
 	}
 }
