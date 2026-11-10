@@ -58,7 +58,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 | T6 | S6 | 404 | #26 | inline TDD | bd62027 |
 | T7 | S7 | 405 | #27 | inline TDD (explorer for sigv4/converse) | — |
 | T8 | S8 | 408 | #28 | inline TDD | 41b0461 |
-| T9 | — | — | — | matrix re-run, docs, PR | 9463b53 + PR |
+| T9 | — | — | — | matrix re-run, docs, PR | 9463b53 + PR #29 |
 
 ## Log
 
@@ -187,3 +187,5 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   (wires, credential envs, auth.json precedence, v0 rejections,
   --image/--print-usage/setModel). Final suite: 56 in-crate + 19 e2e +
   42 smoke green. Branch: 17 work-unit commits (~2300 authored lines).
+- L14: PR #29 opened (base main, head feat/m4-model-ecosystem, label
+  type:feature, no CI configured — reported in the PR body).
