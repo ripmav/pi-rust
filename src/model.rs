@@ -33,6 +33,7 @@ pub trait ModelDriver: Send + Sync {
 
 pub struct FakeDriver {
     turns: Mutex<VecDeque<AssistantTurn>>,
+    echo: bool,
 }
 
 impl FakeDriver {
@@ -63,21 +64,33 @@ impl FakeDriver {
         if !cur.is_empty() {
             turns.push(AssistantTurn { text: None, tool_calls: cur });
         }
-        Ok(Self { turns: Mutex::new(VecDeque::from(turns)) })
+        Ok(Self { turns: Mutex::new(VecDeque::from(turns)), echo: false })
+    }
+}
+
+impl FakeDriver {
+    /// Prompt-mode driver: no script; answers the last user message with a
+    /// deterministic `echo: <text>` turn, then reports exhaustion.
+    pub fn echo_mode() -> Self {
+        Self { turns: Mutex::new(VecDeque::new()), echo: true }
     }
 }
 
 impl ModelDriver for FakeDriver {
     fn complete<'a>(
         &'a self,
-        _convo: &'a [Value],
+        convo: &'a [Value],
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
         Box::pin(async move {
-            self.turns
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("model script exhausted before the run could finish"))
+            if let Some(t) = self.turns.lock().unwrap().pop_front() {
+                return Ok(t);
+            }
+            if self.echo {
+                let last_user = convo.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
+                let text = last_user.map(crate::session::extract_text).unwrap_or_default();
+                return Ok(AssistantTurn { text: Some(format!("echo: {text}")), tool_calls: Vec::new() });
+            }
+            anyhow::bail!("model script exhausted before the run could finish")
         })
     }
 }
