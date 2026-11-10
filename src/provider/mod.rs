@@ -22,19 +22,20 @@ pub enum ProviderDriver {
 	Anthropic(Arc<AnthropicDriver>),
 }
 
-/// Builds the driver from CLI values + env vars (S3: keys only from env).
-pub fn build_provider(name: &str, model: Option<&str>) -> Result<Option<ProviderDriver>> {
+/// Builds the driver from CLI values + resolved credentials (WP-303 order:
+/// stored `auth.json` credential, then ambient env var).
+pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Path) -> Result<Option<ProviderDriver>> {
 	match name {
 		"fake" => Ok(None),
 		"openai" => {
 			let model = model.context("--provider openai requires --model <id>")?;
-			let key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is not set")?;
+			let key = crate::auth::resolve_api_key("openai", agent_dir)?;
 			let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
 			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
 		}
 		"anthropic" => {
 			let model = model.context("--provider anthropic requires --model <id>")?;
-			let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
+			let key = crate::auth::resolve_api_key("anthropic", agent_dir)?;
 			let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
 			Ok(Some(ProviderDriver::Anthropic(Arc::new(AnthropicDriver::new(base, key, model.to_string())))))
 		}
@@ -59,23 +60,25 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn build_provider_requires_env_keys() {
+	fn build_provider_requires_credentials() {
+		let agent_dir = std::env::temp_dir().join(format!("pi-rust-bp-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&agent_dir).unwrap();
 		let _ = std::env::remove_var("OPENAI_API_KEY");
 		let _ = std::env::remove_var("ANTHROPIC_API_KEY");
-		let err = build_provider("openai", Some("m")).unwrap_err().to_string();
+		let err = build_provider("openai", Some("m"), &agent_dir).unwrap_err().to_string();
 		assert!(err.contains("OPENAI_API_KEY"), "{err}");
-		let err = build_provider("anthropic", Some("m")).unwrap_err().to_string();
+		let err = build_provider("anthropic", Some("m"), &agent_dir).unwrap_err().to_string();
 		assert!(err.contains("ANTHROPIC_API_KEY"), "{err}");
-		let err = build_provider("openai", None).unwrap_err().to_string();
+		let err = build_provider("openai", None, &agent_dir).unwrap_err().to_string();
 		assert!(err.contains("--model"), "{err}");
-		assert!(build_provider("bogus", Some("m")).is_err());
+		assert!(build_provider("bogus", Some("m"), &agent_dir).is_err());
 		std::env::set_var("OPENAI_API_KEY", "test-key");
-		match build_provider("openai", Some("m")).unwrap().unwrap() {
+		match build_provider("openai", Some("m"), &agent_dir).unwrap().unwrap() {
 			ProviderDriver::OpenAi(_) => {}
 			_ => panic!("expected OpenAi"),
 		}
 		std::env::set_var("ANTHROPIC_API_KEY", "test-key");
-		match build_provider("anthropic", Some("m")).unwrap().unwrap() {
+		match build_provider("anthropic", Some("m"), &agent_dir).unwrap().unwrap() {
 			ProviderDriver::Anthropic(_) => {}
 			_ => panic!("expected Anthropic"),
 		}
