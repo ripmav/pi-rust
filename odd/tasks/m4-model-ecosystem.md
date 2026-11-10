@@ -51,7 +51,7 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
 | ID | Spec | WP | Issue | Route | Commit |
 |----|------|----|-------|-------|--------|
 | T1 | S1 | 401 | #21 | inline TDD | cc54ae9 |
-| T2 | S2 | 407 | #22 | inline TDD | — |
+| T2 | S2 | 407 | #22 | inline TDD | 96ea486 |
 | T3 | S3 | 406 | #23 | inline TDD | — |
 | T4 | S4 | 402 | #24 | inline TDD (explorer for wire details) | — |
 | T5 | S5 | 403 | #25 | inline TDD | — |
@@ -82,3 +82,12 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   env `<PROVIDER>_BASE_URL`, key via WP-303); `ProviderDriver::complete`
   forward. Tests: table, rejections, per-family mock harness on the M2
   tokio mock. Suite: 38 in-crate + 14 e2e + 42 smoke.
+- L5: T2/WP-407 done (96ea486): `Usage` in model.rs (input/output/cacheRead/
+  cacheWrite + cost_usd from registry Cost per 1M); openai driver captures
+  usage from the final chunk (request sends `stream_options.include_usage`),
+  anthropic from `message_start` (input/cache) + `message_delta` (output);
+  `Session::set_usage` writes upstream-shaped usage entries; agent loop
+  records per turn + cumulative Core totals; `--print-usage` emits a
+  cumulative `usage` event before the final transcript. e2e: mock gpt-4o-mini
+  run verifies event + session entry + exact registry cost (4.5e-5 USD).
+  Suite: 39 in-crate + 15 e2e + 42 smoke.
