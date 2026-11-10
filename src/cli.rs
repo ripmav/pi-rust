@@ -67,7 +67,7 @@ pub async fn run() -> Result<i32> {
     let mut scenario_path: Option<PathBuf> = None;
     let mut session_file: Option<PathBuf> = None;
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
-    let mut provider_name = String::from("fake");
+    let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut i = 0;
@@ -81,7 +81,7 @@ pub async fn run() -> Result<i32> {
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
             "--scenario" => scenario_path = Some(PathBuf::from(val(&args, &mut i)?)),
             "--session-file" => session_file = Some(PathBuf::from(val(&args, &mut i)?)),
-            "--provider" => provider_name = val(&args, &mut i)?,
+            "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
             "--command" => {
@@ -108,9 +108,6 @@ pub async fn run() -> Result<i32> {
         (None, Some(text)) => vec![RunSpec { text: text.clone(), steps: vec![] }],
         (None, None) => bail!("--scenario <file> or --prompt <text> is required"),
     };
-    // S3: provider credentials come from env only; the fake driver needs none.
-    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref())?;
-    let fake_mode = provider.is_none();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
@@ -118,6 +115,17 @@ pub async fn run() -> Result<i32> {
     // is discovery-only.
     let agent_dir = agent_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+
+    // M3/WP-301: agent settings from the agent dir (global file only — the
+    // project `cwd/.pi/settings.json` merge needs a trust model, out of
+    // scope for the headless core). Flags beat settings; settings beat the
+    // fake-driver default.
+    let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
+    let (provider_name, model_id) =
+        crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
+    // S3: provider credentials come from env only; the fake driver needs none.
+    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref())?;
+    let fake_mode = provider.is_none();
 
     // v0 session file: --session-file or .pi-rust/sessions/<uuid>.jsonl.
     let session_file = session_file.unwrap_or_else(|| PathBuf::from(".pi-rust").join("sessions").join(format!("{}.jsonl", uuid::Uuid::new_v4())));
@@ -164,7 +172,7 @@ pub async fn run() -> Result<i32> {
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
-        model: Arc::default(),
+        model: Arc::new(Mutex::new((Value::Null, agent_config.default_thinking_level.clone()))),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
         provider,
