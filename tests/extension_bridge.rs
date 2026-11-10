@@ -488,6 +488,7 @@ fn provider_e2e_prompt_via_mock_openai() {
         .arg("--provider").arg("openai")
         .arg("--model").arg("mock-model")
         .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(tmp.join("agent"))
         .arg("--session-file").arg(&session_file)
         .output()
         .expect("running pi-rust");
@@ -673,4 +674,39 @@ fn list_sessions_lists_agent_sessions() {
         assert!(v.get("id").and_then(Value::as_str).is_some(), "entry has id: {v}");
         assert!(v.get("file").and_then(Value::as_str).is_some(), "entry has file: {v}");
     }
+}
+
+/// S6: default agent dir honors PI_CODING_AGENT_DIR (upstream env var);
+/// --isolated forces a temp dir instead.
+#[test]
+fn agent_dir_default_env_and_isolated() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-agentdir-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let env_agent = tmp.join("env-agent");
+    let s1 = tmp.join("s1.json");
+    std::fs::write(&s1, json!({"user_messages":["a"],"model_scripts":[[{"text":"x"}]]}).to_string()).unwrap();
+    let set_var = |c: &mut std::process::Command| {
+        c.env("PI_CODING_AGENT_DIR", &env_agent);
+    };
+
+    // 1) env var default: no --agent-dir, PI_CODING_AGENT_DIR set.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+    set_var(&mut cmd);
+    let out = cmd.arg("--scenario").arg(&s1).output().expect("run with env agent dir");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    let file = last["session"]["file"].as_str().unwrap().to_string();
+    assert!(file.starts_with(env_agent.to_string_lossy().as_ref()), "session under env agent dir: {file}");
+
+    // 2) --isolated: session file NOT under the env agent dir.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+    set_var(&mut cmd);
+    let out = cmd.arg("--isolated").arg("--scenario").arg(&s1).output().expect("run isolated");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    let file = last["session"]["file"].as_str().unwrap().to_string();
+    assert!(!file.starts_with(env_agent.to_string_lossy().as_ref()), "isolated run must not use the env agent dir: {file}");
+    assert!(file.starts_with(std::env::temp_dir().to_string_lossy().as_ref()), "isolated run uses a temp dir: {file}");
 }
