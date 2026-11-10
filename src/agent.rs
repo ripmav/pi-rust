@@ -473,6 +473,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 match drv.as_ref() {
                     Some(ProviderDriver::OpenAi(d)) => d.complete(&convo).await,
                     Some(ProviderDriver::Anthropic(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::Google(d)) => d.complete(&convo).await,
                     None => unreachable!("fake_driver is None only while a provider exists"),
                 }
             }

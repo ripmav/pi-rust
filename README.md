@@ -124,7 +124,7 @@ pi-rust --extension-dir <path> (repeatable)
         [--fork <file|id>]            # branch a new session (parentSession header)
         [--list-sessions]             # NDJSON listing, then exit
         [--command <name> [args...]]  # repeatable; run after ready, before the runs
-        [--provider <id>]                 # fake|anthropic|openai|groq|cerebras|deepseek|
+        [--provider <id>]                 # fake|anthropic|google|google-vertex|openai|groq|cerebras|deepseek|
                                                  #   together|huggingface|openrouter (default: settings/fake)
         [--model <id>]                # default: settings defaultModel
 ```
