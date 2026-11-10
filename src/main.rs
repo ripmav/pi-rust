@@ -5,6 +5,7 @@ mod client;
 mod config;
 mod model;
 mod session;
+mod templates;
 mod provider;
 mod registry;
 mod tools;

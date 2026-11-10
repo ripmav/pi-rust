@@ -357,7 +357,14 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let driver: Box<dyn ModelDriver> = match ctx.provider.as_ref() {
         Some(ProviderDriver::OpenAi(d)) => Box::new(d.clone()),
         Some(ProviderDriver::Anthropic(d)) => Box::new(d.clone()),
-        None => Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?),
+        None => {
+            if u.steps.is_empty() && u.source == "cli" {
+                // Prompt mode with the fake driver: deterministic echo turn.
+                Box::new(FakeDriver::echo_mode())
+            } else {
+                Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?)
+            }
+        }
     };
 
     // `input` decision: transforms chain; "handled" drops the input (no turn).

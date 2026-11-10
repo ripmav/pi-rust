@@ -710,3 +710,48 @@ fn agent_dir_default_env_and_isolated() {
     assert!(!file.starts_with(env_agent.to_string_lossy().as_ref()), "isolated run must not use the env agent dir: {file}");
     assert!(file.starts_with(std::env::temp_dir().to_string_lossy().as_ref()), "isolated run uses a temp dir: {file}");
 }
+
+/// S7: --template expands a discovered prompt template into the prompt
+/// ($ARGUMENTS + positional), agent-dir discovery.
+#[test]
+fn template_expands_into_prompt() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-tpl-e2e-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent = tmp.join("agent");
+    std::fs::create_dir_all(agent.join("prompts")).unwrap();
+    std::fs::write(
+        agent.join("prompts/greet.md"),
+        "Greet $1 nicely, in $ARGUMENTS style",
+    ).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent)
+        .arg("--template").arg("greet").arg("World")
+        .output()
+        .expect("run with template");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let user: Vec<Value> = lines.iter().filter(|e| e["kind"] == "user_input").cloned().collect();
+    assert_eq!(user.len(), 1, "one user message: {lines:?}");
+    assert_eq!(user[0]["text"], "Greet World nicely, in World style");
+}
+
+/// S7: unknown template is a typed error, non-zero exit.
+#[test]
+fn template_unknown_is_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-tpl-err-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&tmp)
+        .arg("--template").arg("missing")
+        .output()
+        .expect("run with unknown template");
+    assert_ne!(out.status.code(), Some(0), "unknown template must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("missing"), "{stderr}");
+}
