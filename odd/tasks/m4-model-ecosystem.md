@@ -143,3 +143,22 @@ Status: in progress · Branch: `feat/m4-model-ecosystem` · Base: `main` (M3 in)
   gateway) from env with typed errors; CLOUDFLARE_API_KEY bearer (
   auth.json or env). No base-URL override env (upstream has none; mock
   tests hit the driver directly). Suite: 46 in-crate + 16 e2e + 42 smoke.
+- L11: T7/WP-405 done (a329fad): `provider::bedrock::BedrockDriver` —
+  manual SigV4 (sha2+hmac RustCrypto, no AWS SDK per S7): canonical
+  request with spec-required trailing header newline, service
+  `bedrock`, session-token variant; two reference vectors computed
+  independently (Python hmac/sha256) pin the implementation. Wire:
+  POST /model/{id}/converse-stream with Converse messages (toolUse /
+  toolResult{status}), systemInstruction via `system`, tools as
+  toolSpec/inputSchema.json. AWS event-stream framing parsed by hand
+  (prelude 16 = total4+len4+crc8, headers name/type/value, message CRC
+  8, JSON payload; CRCs not verified in v0 — recorded as shortcut).
+  Events: messageStart (role check), contentBlockStart/Delta
+  (text + toolUse id/name/input-fragment accumulation), messageStop,
+  metadata usage (input/output/cacheRead), exception events -> typed
+  error. Env credentials only (AWS_REGION default us-east-1,
+  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN);
+  AWS_PROFILE -> typed v0 rejection. Mock got a byte-exact
+  `start_mock_bytes` (event-stream framing breaks UTF-8 String
+  transport at totals >= 128 — caught in test). Suite: 51 in-crate +
+  16 e2e + 42 smoke.
