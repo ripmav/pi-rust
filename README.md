@@ -165,29 +165,59 @@ Unknown tool names abort the run (exit 2) — that is a test assertion signal.
 
 ### Real model providers
 
-`--provider openai` speaks the OpenAI-compatible `chat/completions` endpoint
-(streaming SSE, tool calls by `index`), `--provider anthropic` speaks the
-native `messages` endpoint (`content_block_*` events, `tool_use` blocks).
-Credentials come **only** from environment variables; nothing reads keys from
-config files:
+Every provider below speaks its **native upstream wire** (mirrored from the
+pinned upstream `packages/ai` at `085c84e`), streams over HTTP, and is tested
+against local mock servers (no live APIs). The conversation sent is the full
+transcript (system prompt incl. extension additions, user/assistant/tool
+results), so extensions with tools work unchanged against real models.
 
-| Provider  | Key env | Base URL env | Default base URL |
-|-----------|---------|--------------|------------------|
-| openai    | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` |
-| anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
+| Provider | Wire | Credential env | Extra env |
+|---|---|---|---|
+| `anthropic` | `messages` SSE (`content_block_*`, `tool_use`) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `openai` | `chat/completions` SSE | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `groq` `cerebras` `deepseek` `together` `huggingface` `openrouter` | `chat/completions` SSE (upstream defaults per family) | `<PROVIDER>_API_KEY` | `<PROVIDER>_BASE_URL` |
+| `google` | `generateContent` SSE (text + `functionCall`) | `GEMINI_API_KEY` | `GOOGLE_BASE_URL` |
+| `google-vertex` | `generateContent` SSE (API key auth) | `GEMINI_API_KEY` | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` |
+| `azure` | `chat/completions?api-version`, `api-key` header | `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` |
+| `cloudflare-workers-ai` | `chat/completions` at `.../accounts/<acct>/ai/v1` | `CLOUDFLARE_API_KEY` | `CLOUDFLARE_ACCOUNT_ID` |
+| `cloudflare-ai-gateway` | `chat/completions` at `.../<acct>/<gw>/compat` | `CLOUDFLARE_API_KEY` | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
+| `amazon-bedrock` | `converse-stream` (manual SigV4, AWS event-stream) | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `AWS_REGION` (default `us-east-1`), `AWS_SESSION_TOKEN`; `AWS_PROFILE` is a typed v0 rejection |
+
+Default base URLs come from the upstream catalog (e.g. openai
+`https://api.openai.com/v1`, google
+`https://generativelanguage.googleapis.com/v1beta`).
+
+Credentials resolve **stored first**: `<agentDir>/auth.json`
+(`{"<provider>":{"type":"api_key","key":"... | ${ENV_VAR}"}}`) beats ambient
+env vars (M3/WP-303, matching upstream "a stored credential owns the
+provider"). Non-`api_key` credential kinds (oauth, command refs) are typed
+rejections in v0.
+
+Not supported in v0 (typed error naming the upstream wire API): `xai`
+(OpenAI Responses), `minimax` (Anthropic Messages endpoint variant),
+`mistral` (conversations API), `fireworks` (custom API), `openai-codex`
+(ChatGPT backend).
+
+Extras:
+
+- `--image <path>` (repeatable) attaches png/jpeg/gif/webp images to the
+  prompt; the model must declare image input in the bundled registry.
+  OpenAI-compatible wires send `image_url` data-URL parts, Anthropic sends
+  base64 image sources.
+- `--print-usage` emits a cumulative `usage` event (input/output tokens,
+  `costUsd` from the bundled registry) before the transcript; per-turn usage
+  entries land in the session file.
+- Extensions can switch models at runtime with `ctx.setModel`
+  (`set_model_request` → provider + credential re-resolution →
+  `model_change` session entry).
 
 ```sh
 OPENAI_API_KEY=... cargo run -- --provider openai --model gpt-4o --prompt "hello"
 ANTHROPIC_API_KEY=... cargo run -- --provider anthropic --model claude-sonnet-4-20250514 --prompt "hello"
 ```
 
-The conversation sent to the provider is the full transcript
-(system prompt incl. extension additions, user/assistant/tool results), and
-extension tool results flow back as `tool` / `tool_result` messages — so
-extensions with tools work unchanged against real models. `max_tokens` is
-fixed at 4096 in v0. The bridge protocol, sidecar, and scenario mode are
-unaffected (providers are core-side only). Provider behavior is tested
-against local mock HTTP servers (no live APIs in CI).
+The bridge protocol, sidecar, and scenario mode are unaffected (providers are
+core-side only).
 
 ### Output contract
 
