@@ -36,7 +36,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 | T3 | S4 | 503 | #36 | subagent writer + parent verify | `a41d7c2`+docs, PR 3 |
 | T4 | S5 | 504 | #37 | writer tests + parent inline impl | `d9f07c1`+docs, PR 4 |
 | T5 | S6 | 505 | #38 | parent inline (small WP) | `e2b91d3`+docs, PR 5 |
-| T6 | S7 | 506 | — | subagent writer + parent verify | — |
+| T6 | S7 | 506 | #39 | parent inline (small WP) | `f0a2c51`+docs, PR 6 |
 
 ## Log
 
@@ -45,7 +45,19 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 - L3: M4 delivered (PR #29 merged as 1fca5ce); dependency repairs #31/#32/#33
   merged; main green (3feff03), suite 56 in-crate + 19 e2e + 42 smoke.
 - L4: Execution order by dependency: 501 → 502 → 503 → 504 → 505 → 506.
-- L5 (T5/WP-505): headless permission defaults delivered inline (small WP,
+- L5 (T6/WP-506): tool registry parity delivered inline (small WP). Golden
+  schemas generated from the upstream dist at the pinned commit (4 files in
+  tests/fixtures/tool-schemas/); built-in schemas() now byte-equal (JSON
+  value equality, golden-diff test); read/write descriptions and the
+  offset/limit types (number, matching upstream TypeBox) corrected. Merge
+  follows upstream _refreshToolRegistry: extension tools shadow built-ins by
+  name (shadowed entry keeps its position, new ext tools append) — pure
+  function tools::merge_with_extensions (unit test) used by the model tool
+  set, selectedTools, and run_tool dispatch (extension first). Shadowing
+  e2e: fixture shadow-read.ts registers `read`, execution reaches the
+  extension (result_summary "shadow-read:x"). Suite: 141 in-crate + 20 e2e
+  + 42 smoke green. M5 complete: 6 WPs, 6 PRs in stack #42.
+- L6 (T5/WP-505): headless permission defaults delivered inline (small WP,
   no writer trigger). Core now advertises `ui: []` (headless); the sidecar
   wires the dialog UI context only for clients that advertise UI methods,
   otherwise keeps the upstream noOp UI context (hasUI=false). Unmodified

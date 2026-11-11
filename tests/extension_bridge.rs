@@ -1254,3 +1254,45 @@ fn provider_e2e_image_file_errors_typed() {
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr.contains("not a supported image format"), "{stderr}");
 }
+
+/// WP-506: an extension tool named `read` shadows the built-in read — execution
+/// reaches the extension (upstream registry precedence), pinned by the fixture's
+/// result text. Test-only fixture: tests/fixtures/shadow-read.ts.
+#[test]
+fn extension_tool_shadows_builtin() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp506-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({
+        "user_messages": ["read x"],
+        "model_scripts": [[
+            { "tool_call": { "name": "read", "input": { "path": "x" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/shadow-read.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let execs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "tool_execution").collect();
+    assert_eq!(execs.len(), 1, "expected one tool execution\n{stdout}");
+    assert_eq!(execs[0]["name"], "read");
+    assert_eq!(execs[0]["blocked"], json!(false));
+    // The fixture's execute() ran, not the built-in read (which would error on
+    // the missing file `x`).
+    assert_eq!(execs[0]["result_summary"], "shadow-read:x");
+}

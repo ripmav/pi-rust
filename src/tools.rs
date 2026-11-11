@@ -12,14 +12,32 @@ use crate::edit_diff;
 pub fn schemas() -> Vec<Value> {
     vec![
         json!({"name":"bash","description":"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"]}}),
-        json!({"name":"read","description":"Read a text file, optionally a line range (1-based)","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}),
-        json!({"name":"write","description":"Write content to a file, creating parent directories","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}),
-        json!({"name":"edit","description":"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}}}}},"required":["path","edits"]}}),
+        json!({"name":"read","description":"Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to read (relative or absolute)"},"offset":{"type":"number","description":"Line number to start reading from (1-indexed)"},"limit":{"type":"number","description":"Maximum number of lines to read"}},"required":["path"]}}),
+        json!({"name":"write","description":"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to write (relative or absolute)"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"]}}),
+        json!({"name":"edit","description":"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}}),
     ]
 }
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(name, "bash" | "read" | "write" | "edit")
+}
+
+/// Upstream registry precedence (agent-session _refreshToolRegistry): extension
+/// tools override built-ins with the same name (shadowing) — a shadowed
+/// built-in keeps its position, new extension tools append after it.
+pub fn merge_with_extensions(builtins: Vec<Value>, ext: Vec<Value>) -> Vec<Value> {
+    let mut defs = builtins;
+    for e in ext {
+        let Some(name) = e.get("name").and_then(Value::as_str) else {
+            defs.push(e);
+            continue;
+        };
+        match defs.iter().position(|d| d.get("name").and_then(Value::as_str) == Some(name)) {
+            Some(i) => defs[i] = e,
+            None => defs.push(e),
+        }
+    }
+    defs
 }
 
 pub struct ExecResult {
@@ -1569,6 +1587,38 @@ mod tests {
 		assert!(!r.is_error);
 		assert_eq!(text(&r), format!("Successfully wrote to {}", p.display()));
 		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	// WP-506: the built-in schemas must equal the upstream-generated schemas
+	// (golden files from the pinned upstream, tests/fixtures/tool-schemas/).
+	#[test]
+	fn builtin_schemas_match_upstream_goldens() {
+		for name in ["bash", "read", "write", "edit"] {
+			let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/tool-schemas/{name}.json"));
+			let golden: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+			let actual = schemas()
+				.into_iter()
+				.find(|s| s["name"] == name)
+				.unwrap_or_else(|| panic!("built-in {name} missing from schemas()"));
+			assert_eq!(actual, golden, "built-in {name} schema diverges from upstream");
+		}
+	}
+
+	// WP-506: upstream registry precedence — extension tools shadow built-ins by
+	// name (shadowed entry keeps its position), new extension tools append.
+	#[test]
+	fn merge_with_extensions_shadowing() {
+		let ext = vec![
+			json!({"name":"read","description":"shadow","parameters":{"type":"object","properties":{},"required":[]}}),
+			json!({"name":"custom","description":"extra","parameters":{"type":"object","properties":{},"required":[]}}),
+		];
+		let merged = merge_with_extensions(schemas(), ext);
+		let names: Vec<&str> = merged.iter().filter_map(|t| t["name"].as_str()).collect();
+		assert_eq!(names, vec!["bash", "read", "write", "edit", "custom"], "shadowed read keeps its position, custom appends");
+		assert_eq!(merged[1]["description"], "shadow", "extension tool shadows the built-in read");
+		// Unchanged built-ins stay intact.
+		let plain = merge_with_extensions(schemas(), vec![]);
+		assert_eq!(plain, schemas());
 	}
 }
 
