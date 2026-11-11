@@ -137,7 +137,31 @@ impl TuiApp {
             }
             Some("model_output") => {
                 let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                // WP-603: streamed deltas already built this message — the
+                // final event must not duplicate it (non-streaming drivers
+                // emit no deltas and push the full text here).
+                if self
+                    .transcript
+                    .last()
+                    .is_some_and(|m| m.role == "assistant" && m.text == text)
+                {
+                    self.scroll = 0;
+                    return;
+                }
                 self.transcript.push(Msg { role: "assistant", text });
+                self.scroll = 0;
+            }
+            Some("model_delta") => {
+                // WP-603: append the chunk to the in-flight assistant
+                // message (new message if the turn has not started one).
+                let text = ev.get("text").and_then(Value::as_str).unwrap_or_default();
+                match self.transcript.last_mut() {
+                    Some(m) if m.role == "assistant" => m.text.push_str(text),
+                    _ => self.transcript.push(Msg {
+                        role: "assistant",
+                        text: text.to_string(),
+                    }),
+                }
                 self.scroll = 0;
             }
             Some("tool_execution") => {
@@ -445,6 +469,65 @@ mod tests {
 
         app.handle_key(ctrl_d());
         assert!(app.exit);
+    }
+
+    #[test]
+    fn model_delta_appends_to_assistant_message() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.apply_event(&json!({"kind":"user_input","text":"hi"}));
+        app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":"Hel"}));
+        app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":"lo"}));
+        let screen = app.render_string();
+        assert_eq!(app.transcript.len(), 2, "one user + one streaming assistant msg");
+        assert!(app.transcript[1].role == "assistant" && app.transcript[1].text == "Hello",
+            "{:?}", app.transcript);
+        assert!(screen.contains("Hello"), "{screen}");
+    }
+
+    #[test]
+    fn model_output_after_stream_does_not_duplicate() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.apply_event(&json!({"kind":"model_delta","text":"echo: hi"}));
+        app.apply_event(&json!({"kind":"model_output","text":"echo: hi"}));
+        assert_eq!(app.transcript.len(), 1, "streamed text is not repeated: {:?}", app.transcript);
+        // Non-streaming driver (no deltas before): the full text is pushed.
+        let mut app2 = TuiApp::new("m", "/w", "s");
+        app2.apply_event(&json!({"kind":"model_output","text":"echo: hi"}));
+        assert_eq!(app2.transcript.len(), 1);
+        assert_eq!(app2.transcript[0].text, "echo: hi");
+    }
+
+    #[test]
+    fn first_token_visible_under_100ms() {
+        // In-process pipeline: broadcast delta -> TUI apply -> render.
+        // (The PTY/e2e path adds no extra hops; WP-603 acceptance < 100ms.)
+        let mut app = TuiApp::new("m", "/w", "s");
+        let t0 = std::time::Instant::now();
+        app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":"first"}));
+        let screen = app.render_string();
+        let elapsed = t0.elapsed();
+        assert!(screen.contains("first"), "{screen}");
+        assert!(elapsed < std::time::Duration::from_millis(100),
+            "first token render took {elapsed:?}");
+    }
+
+    #[test]
+    fn hundred_token_stream_frame_budget() {
+        // 100 deltas, worst case: one full render per token (coalescing only
+        // helps). The 100-token stream must stay far inside a 60fps frame
+        // budget total.
+        let mut app = TuiApp::new("m", "/w", "s");
+        let t0 = std::time::Instant::now();
+        for i in 0..100 {
+            app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":format!("tok{i} ")}));
+            let _ = app.render_string();
+        }
+        let total = t0.elapsed();
+        let screen = app.render_string();
+        assert!(screen.contains("tok0"), "first token kept: {screen}");
+        assert!(screen.contains("tok99"), "last token present: {screen}");
+        assert!(total < std::time::Duration::from_secs(1),
+            "100-token stream rendered in {total:?}");
     }
 
     #[test]

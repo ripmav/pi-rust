@@ -96,8 +96,17 @@ where
                     None => break,
                 },
                 ev = events.recv() => match ev {
-                    Ok(v) => {
-                        app.apply_event(&v);
+                    // WP-603: drain the burst before drawing — a stream of
+                    // token deltas becomes one render, not one per token.
+                    Ok(first) => {
+                        let mut v = first;
+                        loop {
+                            app.apply_event(&v);
+                            match events.try_recv() {
+                                Ok(more) => v = more,
+                                Err(_) => break,
+                            }
+                        }
                         dirty = true;
                     }
                     // Receiver lagged: drop and continue (events are display-only).

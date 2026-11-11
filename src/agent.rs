@@ -39,7 +39,7 @@ impl EventLog {
     /// --scenario/--prompt/--list-sessions runs); the TUI renders in-process
     /// instead and passes `false`.
     pub fn start(headless: bool) -> Self {
-        let (sub, _) = tokio::sync::broadcast::channel(1024);
+        let (sub, _) = tokio::sync::broadcast::channel(8192); // 8192: streaming bursts (WP-603)
         let tx = if headless {
             let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
             tokio::spawn(async move {
@@ -63,6 +63,12 @@ impl EventLog {
     /// Subscribe to the in-process event stream (TUI).
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
         self.sub.subscribe()
+    }
+
+    /// TUI-only event (in-process broadcast only — never on the headless
+    /// NDJSON stdout, so the machine output contract stays unchanged).
+    pub fn emit_tui(&self, v: Value) {
+        let _ = self.sub.send(v);
     }
 
     pub fn emit(&self, v: Value) {
@@ -382,6 +388,15 @@ async fn finalize_tool_result(ctx: &Core, call_id: &str, name: &str, input: &Val
     (result, terminate)
 }
 
+/// WP-603: the per-turn streaming callback — each text chunk becomes a
+/// TUI-only `model_delta` event (never on the headless NDJSON stdout).
+fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32) -> Box<dyn FnMut(&str) + Send + 'c> {
+    Box::new(move |chunk: &str| {
+        ctx.log
+            .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":chunk}));
+    })
+}
+
 pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>) {
     let mut index = 0u32;
     loop {
@@ -495,15 +510,17 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             }
         }
 
+        // WP-603: streamed text chunks become TUI-only `model_delta` events
+        // (the headless NDJSON contract keeps its single `model_output`).
         let turn = match fake_driver.as_ref() {
-            Some(d) => d.complete(&convo).await,
+            Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
             None => {
                 let drv = ctx.provider.lock().unwrap().clone();
                 match drv.as_ref() {
-                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Google(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
                     None => unreachable!("fake_driver is None only while a provider exists"),
                 }
             }

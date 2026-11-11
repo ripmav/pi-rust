@@ -54,9 +54,13 @@ impl Usage {
 /// agent-loop seam (fake driver in scenarios/tests, real providers otherwise).
 pub trait ModelDriver: Send + Sync {
     /// `Err` = the run cannot finish (script exhausted or provider failure).
+    /// `on_delta` is called per streamed text chunk (TUI display; headless
+    /// runs pass a no-op). Drivers that do not stream call it once with the
+    /// full text.
     fn complete<'a>(
         &'a self,
         convo: &'a [Value],
+        on_delta: Box<dyn FnMut(&str) + Send + 'a>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>>;
 }
 
@@ -109,15 +113,21 @@ impl ModelDriver for FakeDriver {
     fn complete<'a>(
         &'a self,
         convo: &'a [Value],
+        mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(t) = self.turns.lock().unwrap().pop_front() {
+                if let Some(text) = &t.text {
+                    on_delta(text); // single delta: the fake does not stream
+                }
                 return Ok(t);
             }
             if self.echo {
                 let last_user = convo.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
                 let text = last_user.map(crate::session::extract_text).unwrap_or_default();
-                return Ok(AssistantTurn { text: Some(format!("echo: {text}")), tool_calls: Vec::new(), usage: Usage::default() });
+                let reply = format!("echo: {text}");
+                on_delta(&reply);
+                return Ok(AssistantTurn { text: Some(reply), tool_calls: Vec::new(), usage: Usage::default() });
             }
             anyhow::bail!("model script exhausted before the run could finish")
         })

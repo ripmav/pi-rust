@@ -32,12 +32,13 @@ impl ProviderDriver {
 	pub fn complete<'a>(
 		&'a self,
 		convo: &'a [Value],
+		on_delta: Box<dyn FnMut(&str) + Send + 'a>,
 	) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		match self {
-			ProviderDriver::OpenAi(d) => d.complete(convo),
-			ProviderDriver::Anthropic(d) => d.complete(convo),
-			ProviderDriver::Google(d) => d.complete(convo),
-			ProviderDriver::Bedrock(d) => d.complete(convo),
+			ProviderDriver::OpenAi(d) => d.complete(convo, on_delta),
+			ProviderDriver::Anthropic(d) => d.complete(convo, on_delta),
+			ProviderDriver::Google(d) => d.complete(convo, on_delta),
+			ProviderDriver::Bedrock(d) => d.complete(convo, on_delta),
 		}
 	}
 }
@@ -171,14 +172,14 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 }
 
 impl ModelDriver for Arc<OpenAiDriver> {
-	fn complete<'a>(&'a self, convo: &'a [Value]) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
-		self.as_ref().complete(convo)
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		self.as_ref().complete(convo, on_delta)
 	}
 }
 
 impl ModelDriver for Arc<AnthropicDriver> {
-	fn complete<'a>(&'a self, convo: &'a [Value]) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
-		self.as_ref().complete(convo)
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		self.as_ref().complete(convo, on_delta)
 	}
 }
 
@@ -453,7 +454,10 @@ mod family_tests {
 				.unwrap_or_else(|e| panic!("{p}: {e}"))
 				.expect("driver built");
 			let turn = drv
-				.complete(&[serde_json::json!({"role":"user","content":"hi"})])
+				.complete(
+					&[serde_json::json!({"role":"user","content":"hi"})],
+					Box::new(|_: &str| {}),
+				)
 				.await
 				.unwrap_or_else(|e| panic!("{p} complete: {e}"));
 			assert_eq!(turn.text.as_deref(), Some("fam-ok"), "{p}");
