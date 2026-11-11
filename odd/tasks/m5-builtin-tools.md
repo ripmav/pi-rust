@@ -34,7 +34,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 | T1 | S2 | 501 | #34 | subagent writer + parent verify | `f46d1f9`+docs, PR 1 |
 | T2 | S3 | 502 | #35 | subagent writer + parent verify | `7e0f614`, PR 2 |
 | T3 | S4 | 503 | #36 | subagent writer + parent verify | `a41d7c2`+docs, PR 3 |
-| T4 | S5 | 504 | — | subagent writer + parent verify | — |
+| T4 | S5 | 504 | #37 | writer tests + parent inline impl | `d9f07c1`+docs, PR 4 |
 | T5 | S6 | 505 | — | subagent writer + parent verify | — |
 | T6 | S7 | 506 | — | subagent writer + parent verify | — |
 
@@ -45,7 +45,20 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 - L3: M4 delivered (PR #29 merged as 1fca5ce); dependency repairs #31/#32/#33
   merged; main green (3feff03), suite 56 in-crate + 19 e2e + 42 smoke.
 - L4: Execution order by dependency: 501 → 502 → 503 → 504 → 505 → 506.
-- L5 (T3/WP-503): subagent delivered edit-tool parity (43 table/unit tests,
+- L5 (T4/WP-504): bash hardening delivered. Writer produced the 14 contract
+  tests (RED) then stalled twice on the implementation (harness stall, 4 min
+  "generating tool arguments" — incident); parent finished the implementation
+  inline against the pinned test contract + upstream code. 10MB tail
+  truncation with rolling 50KB+1 window (bounded memory), pi-bash-*.log full
+  output, timeout kill with upstream validation strings, 128+signal exit
+  codes, merged stdout/stderr accumulator (biased stdout-first pump mirrors
+  libuv handle order). Three test expectations corrected against upstream
+  evidence: exit status keeps the trailing-newline + appendStatus doubling
+  (session fixture shows three newlines), the 10MB single-line command
+  needed 20971520 input bytes (yes x pairs), interleaving order made
+  deterministic with sleeps (race otherwise, upstream included). Suite:
+  139 in-crate + 19 e2e + 42 smoke green.
+- L6 (T3/WP-503): subagent delivered edit-tool parity (43 table/unit tests,
   RED→GREEN, suite 125 in-crate + 19 e2e green). New src/edit_diff.rs (LCS-DP
   diff port, documented shortcut: Myers beyond ~5k lines); exact upstream
   error/result strings pinned (unique/ambiguous/overlap/empty/no-op,

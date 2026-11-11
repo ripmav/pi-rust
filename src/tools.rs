@@ -1,13 +1,17 @@
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitStatus, Stdio};
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 
 use crate::edit_diff;
 
 /// v0 built-in tools: `bash`, `read`, `write`, `edit`.
 pub fn schemas() -> Vec<Value> {
     vec![
-        json!({"name":"bash","description":"Run a shell command (bash -c) and return its output","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Command to run"}},"required":["command"]}}),
+        json!({"name":"bash","description":"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"]}}),
         json!({"name":"read","description":"Read a text file, optionally a line range (1-based)","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}),
         json!({"name":"write","description":"Write content to a file, creating parent directories","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}),
         json!({"name":"edit","description":"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}}}}},"required":["path","edits"]}}),
@@ -47,25 +51,265 @@ pub async fn execute(name: &str, input: &Value) -> ExecResult {
     }
 }
 
+/// Upstream `bash` limits (truncate.ts): keep the LAST 2000 lines / 50KB (whichever is hit
+/// first) — bash output is tail-truncated, unlike `read` which is head-truncated.
+const BASH_MAX_LINES: usize = 2000;
+const BASH_MAX_BYTES: usize = 50 * 1024;
+
+/// The tail truncation result in the exact upstream `TruncationResult` shape (tail variant).
+struct TailTruncation {
+	content: String,
+	truncated_by: &'static str,
+	total_lines: usize,
+	total_bytes: u64,
+	output_lines: usize,
+	output_bytes: usize,
+	last_line_partial: bool,
+	last_line_bytes: u64,
+	full_output_path: PathBuf,
+}
+
+impl TailTruncation {
+	fn to_json(&self) -> Value {
+		json!({
+			"content": self.content,
+			"truncated": true,
+			"truncatedBy": self.truncated_by,
+			"totalLines": self.total_lines,
+			"totalBytes": self.total_bytes,
+			"outputLines": self.output_lines,
+			"outputBytes": self.output_bytes,
+			"lastLinePartial": self.last_line_partial,
+			"firstLineExceedsLimit": false,
+			"maxLines": BASH_MAX_LINES,
+			"maxBytes": BASH_MAX_BYTES,
+		})
+	}
+}
+
+/// Rolling capture of the combined stdout/stderr stream. Mirrors every chunk to a
+/// `pi-bash-*.log` temp file and keeps only the last 50KB+1 bytes in memory: the display
+/// can only ever reference the last 50KB of the content (the +1 keeps the last 50KB of an
+/// oversized final line even when the content ends with a newline), so memory stays
+/// bounded no matter how much the command prints.
+struct BashCapture {
+	tail: Vec<u8>,
+	/// The window cut landed mid-line, so the tail's first line is a fragment whose true
+	/// size cannot fit in any remainder (window arithmetic), and the upstream backward
+	/// loop breaks on it.
+	front_partial: bool,
+	total_bytes: u64,
+	newlines: u64,
+	last_line_bytes: u64,
+	ends_with_nl: bool,
+	path: PathBuf,
+	file: Option<std::fs::File>,
+}
+
+impl BashCapture {
+	fn new() -> Self {
+		let path = std::env::temp_dir().join(format!("pi-bash-{}.log", uuid::Uuid::new_v4()));
+		let file = std::fs::File::create(&path).ok();
+		Self { tail: Vec::new(), front_partial: false, total_bytes: 0, newlines: 0, last_line_bytes: 0, ends_with_nl: false, path, file }
+	}
+
+	fn feed(&mut self, chunk: &[u8]) {
+		if chunk.is_empty() {
+			return;
+		}
+		self.total_bytes += chunk.len() as u64;
+		if let Some(last) = chunk.iter().rposition(|b| *b == b'\n') {
+			self.last_line_bytes = (chunk.len() - last - 1) as u64;
+		} else {
+			self.last_line_bytes += chunk.len() as u64;
+		}
+		self.newlines += chunk.iter().filter(|b| **b == b'\n').count() as u64;
+		self.ends_with_nl = chunk.last() == Some(&b'\n');
+		// shortcut: blocking write per chunk keeps the pump simple; bash output is usually
+		// small and the 10MB test streams 8KB chunks.
+		if let Some(f) = &mut self.file {
+			let _ = f.write_all(chunk);
+		}
+		self.tail.extend(chunk);
+		let limit = BASH_MAX_BYTES + 1;
+		if self.tail.len() > limit {
+			let cut = self.tail.len() - limit;
+			self.front_partial = self.tail[cut - 1] != b'\n';
+			self.tail.drain(0..cut);
+		}
+	}
+
+	/// Finalize: drop the temp file when nothing was truncated, otherwise build the
+	/// tail truncation result (upstream `truncateTail` over the rolling window).
+	fn finish(mut self) -> (String, Option<TailTruncation>) {
+		let total_lines = if self.total_bytes == 0 {
+			0
+		} else {
+			(self.newlines + u64::from(!self.ends_with_nl)) as usize
+		};
+		let raw = std::mem::take(&mut self.tail);
+		let content = String::from_utf8_lossy(&raw).into_owned();
+		if total_lines <= BASH_MAX_LINES && self.total_bytes <= BASH_MAX_BYTES as u64 {
+			drop(self.file);
+			let _ = std::fs::remove_file(&self.path);
+			return (content, None);
+		}
+		let mut t = truncate_tail_capture(&raw, self.front_partial, total_lines, self.total_bytes, self.last_line_bytes);
+		t.full_output_path = self.path.clone();
+		(t.content.clone(), Some(t))
+	}
+}
+
+/// Upstream `truncateTail` mirrored: work backwards from the end, add complete lines while
+/// they fit in 50KB, stop at 2000 lines; an oversized final line takes its last 50KB as a
+/// partial first line. Runs over the rolling window (last 50KB+1 bytes), which provably
+/// contains every line the display can reference.
+fn truncate_tail_capture(raw: &[u8], front_partial: bool, total_lines: usize, total_bytes: u64, last_line_bytes: u64) -> TailTruncation {
+	let max_bytes = BASH_MAX_BYTES;
+	let mut truncated_by = "lines";
+	let mut last_line_partial = false;
+	let (out, output_lines, output_bytes) = if last_line_bytes as usize > max_bytes {
+		// Edge case: the final line alone exceeds the byte limit — show the end of the line.
+		let line = if raw.last() == Some(&b'\n') { &raw[..raw.len() - 1] } else { raw };
+		let mut start = line.len().saturating_sub(max_bytes);
+		// Land on a UTF-8 character boundary (upstream truncateStringToBytesFromEnd).
+		while start < line.len() && (line[start] & 0xc0) == 0x80 {
+			start += 1;
+		}
+		let s = String::from_utf8_lossy(&line[start..]).into_owned();
+		let len = s.len();
+		truncated_by = "bytes";
+		last_line_partial = true;
+		(s, 1, len)
+	} else {
+		let text = String::from_utf8_lossy(raw);
+		let mut lines: Vec<&str> = text.split('\n').collect();
+		if text.ends_with('\n') {
+			lines.pop();
+		}
+		let mut arr: Vec<&str> = Vec::new();
+		let mut bytes = 0usize;
+		for idx in (0..lines.len()).rev() {
+			if arr.len() >= BASH_MAX_LINES {
+				break;
+			}
+			if idx == 0 && front_partial {
+				truncated_by = "bytes";
+				break;
+			}
+			let line = lines[idx];
+			let lb = line.len() + if arr.is_empty() { 0 } else { 1 };
+			if bytes + lb > max_bytes {
+				truncated_by = "bytes";
+				break;
+			}
+			arr.insert(0, line);
+			bytes += lb;
+		}
+		if arr.len() >= BASH_MAX_LINES && bytes <= max_bytes {
+			truncated_by = "lines";
+		}
+		let joined = arr.join("\n");
+		let len = joined.len();
+		(joined, arr.len(), len)
+	};
+	TailTruncation { content: out, truncated_by, total_lines, total_bytes, output_lines, output_bytes, last_line_partial, last_line_bytes, full_output_path: PathBuf::new() }
+}
+
+/// Read both pipes until EOF, feeding chunks to the capture in arrival order (upstream
+/// merges both streams into one accumulator — no `[stderr]` block). `biased` mirrors
+/// libuv's handle order: when both pipes are ready at once, stdout is drained first.
+async fn pump_child(child: &mut Child, capture: &mut BashCapture) -> Option<ExitStatus> {
+	let mut stdout = child.stdout.take();
+	let mut stderr = child.stderr.take();
+	let mut sbuf = [0u8; 8192];
+	let mut ebuf = [0u8; 8192];
+	let mut s_done = stdout.is_none();
+	let mut e_done = stderr.is_none();
+	while !s_done || !e_done {
+		tokio::select! {
+			biased;
+			r = stdout.as_mut().unwrap().read(&mut sbuf), if !s_done => match r {
+				Ok(0) | Err(_) => s_done = true,
+				Ok(n) => capture.feed(&sbuf[..n]),
+			},
+			r = stderr.as_mut().unwrap().read(&mut ebuf), if !e_done => match r {
+				Ok(0) | Err(_) => e_done = true,
+				Ok(n) => capture.feed(&ebuf[..n]),
+			},
+		}
+	}
+	child.wait().await.ok()
+}
+
 async fn bash(input: &Value) -> ExecResult {
-    let Some(command) = input.get("command").and_then(Value::as_str) else {
-        return ExecResult::err("bash: missing string field `command`".into());
-    };
-    let Ok(out) = Command::new("bash").arg("-c").arg(command).output().await else {
-        return ExecResult::err("bash: failed to start".into());
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let mut text = stdout.into_owned();
-    if !stderr.trim().is_empty() {
-        text.push_str(&format!("\n[stderr]\n{stderr}"));
-    }
-    if out.status.success() {
-        ExecResult { content: json!([{"type":"text","text":text}]), details: json!({"exitCode":0}), is_error: false, terminate: false }
-    } else {
-        let code = out.status.code().unwrap_or(-1);
-        ExecResult { content: json!([{"type":"text","text":format!("exit {code}\n{text}")}]), details: json!({"exitCode":code}), is_error: true, terminate: false }
-    }
+	let Some(command) = input.get("command").and_then(Value::as_str) else {
+		return ExecResult::err("bash: missing string field `command`".into());
+	};
+	// Upstream `resolveTimeoutMs`: finite positive seconds, max 2^31-1 ms
+	// (JS prints the maximum as 2147483.647).
+	let timeout = match input.get("timeout") {
+		None => None,
+		Some(v) => {
+			let t = match v.as_f64() {
+				Some(t) if t.is_finite() && t > 0.0 => t,
+				_ => return ExecResult::err("Invalid timeout: must be a finite number of seconds".into()),
+			};
+			if t * 1000.0 > 2_147_483_647.0 {
+				return ExecResult::err("Invalid timeout: maximum is 2147483.647 seconds".into());
+			}
+			Some((t, std::time::Duration::from_secs_f64(t)))
+		}
+	};
+	let Ok(mut child) = Command::new("bash").arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() else {
+		return ExecResult::err("bash: failed to start".into());
+	};
+	let mut capture = BashCapture::new();
+	let (status, timed_out) = match timeout {
+		None => (pump_child(&mut child, &mut capture).await, false),
+		Some((_, dur)) => match tokio::time::timeout(dur, pump_child(&mut child, &mut capture)).await {
+			Ok(s) => (s, false),
+			Err(_) => {
+				let _ = child.start_kill();
+				let _ = child.wait().await;
+				(None, true)
+			}
+		}
+	};
+	let (content, trunc) = capture.finish();
+	// Upstream: the "(no output)" placeholder is only applied on non-error paths
+	// (formatOutput's default emptyText); error paths pass "".
+	let mut text = if content.is_empty() && !timed_out { "(no output)".to_string() } else { content };
+	let mut details = json!({});
+	if let Some(t) = &trunc {
+		let start_line = t.total_lines - t.output_lines + 1;
+		let end_line = t.total_lines;
+		if t.last_line_partial {
+			text.push_str(&format!("\n\n[Showing last {} of line {end_line} (line is {}). Full output: {}]", format_size(t.output_bytes), format_size(t.last_line_bytes as usize), t.full_output_path.display()));
+		} else if t.truncated_by == "lines" {
+			text.push_str(&format!("\n\n[Showing lines {start_line}-{end_line} of {end_line}. Full output: {}]", t.full_output_path.display()));
+		} else {
+			text.push_str(&format!("\n\n[Showing lines {start_line}-{end_line} of {end_line} ({} limit). Full output: {}]", format_size(BASH_MAX_BYTES), t.full_output_path.display()));
+		}
+		details = json!({"truncation": t.to_json(), "fullOutputPath": t.full_output_path.to_string_lossy().into_owned()});
+	}
+	if timed_out {
+		let secs = timeout.map(|(t, _)| t.to_string()).unwrap_or_default();
+		let status = format!("Command timed out after {secs} seconds");
+		let full = if text.is_empty() { status } else { format!("{text}\n\n{status}") };
+		return ExecResult { content: json!([{"type":"text","text":full}]), details, is_error: true, terminate: false };
+	}
+	let code = match status {
+		Some(s) if s.success() => 0,
+		Some(s) => s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0) as i32),
+		None => 1,
+	};
+	if code == 0 {
+		ExecResult { content: json!([{"type":"text","text":text}]), details, is_error: false, terminate: false }
+	} else {
+		let full = format!("{text}\n\nCommand exited with code {code}");
+		ExecResult { content: json!([{"type":"text","text":full}]), details, is_error: true, terminate: false }
+	}
 }
 
 /// Upstream read-tool caps (truncate.ts): 2000 lines or 50KB, whichever is hit first.
@@ -384,6 +628,10 @@ mod tests {
 
 	async fn edit_tool(input: Value) -> ExecResult {
 		execute("edit", &input).await
+	}
+
+	async fn bash_tool(input: Value) -> ExecResult {
+		execute("bash", &input).await
 	}
 
 	fn text(r: &ExecResult) -> String {
@@ -1107,6 +1355,203 @@ mod tests {
 		let r = edit_tool(json!({"edits": [{"oldText": "a", "newText": "b"}]})).await;
 		assert!(r.is_error);
 		assert_eq!(text(&r), "edit: missing string field `path`");
+	}
+
+	// ---- WP-504: bash tool, mirroring the pinned upstream behavior (bash.ts @ 085c84e) ----
+
+	/// The `fullOutputPath` details entry (truncated output only).
+	fn full_output_path(r: &ExecResult) -> Option<PathBuf> {
+		r.details.get("fullOutputPath").and_then(Value::as_str).map(PathBuf::from)
+	}
+
+	/// VmRSS in kB (Linux only; the memory-bounded check skips elsewhere).
+	fn vm_rss_kb() -> Option<u64> {
+		#[cfg(target_os = "linux")]
+		{
+			let status = std::fs::read_to_string("/proc/self/status").ok()?;
+			status.lines()
+				.find_map(|l| l.strip_prefix("VmRSS:"))
+				.and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			None
+		}
+	}
+
+	#[tokio::test]
+	async fn bash_success_exact_upstream_output() {
+		let r = bash_tool(json!({"command": "echo hi"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), "hi\n");
+		assert_eq!(r.details, json!({}));
+	}
+
+	#[tokio::test]
+	async fn bash_no_output_placeholder() {
+		let r = bash_tool(json!({"command": "true"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), "(no output)");
+		assert_eq!(r.details, json!({}));
+	}
+
+	#[tokio::test]
+	async fn bash_stdout_stderr_interleaved_by_arrival() {
+		// Sleeps make the arrival order deterministic (each write is consumed before the
+		// next one): the contract under test is one merged accumulator in arrival order,
+		// without a `[stderr]` block.
+		let r = bash_tool(json!({"command": "printf 'a\n'; sleep 0.2; printf 'x\n' >&2; sleep 0.2; printf 'b\n'"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), "a\nx\nb\n");
+		assert_eq!(r.details, json!({}));
+	}
+
+	#[tokio::test]
+	async fn bash_nonzero_exit_with_stderr_golden() {
+		let r = bash_tool(json!({"command": "echo out; echo err >&2; exit 3"})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "out\nerr\n\n\nCommand exited with code 3");
+		assert_eq!(r.details, json!({}));
+	}
+
+	#[tokio::test]
+	async fn bash_signal_killed_exit_137_golden() {
+		let r = bash_tool(json!({"command": "kill -9 $$"})).await;
+		assert!(r.is_error);
+		// Upstream resolves a signal death to 128 + the signal number.
+		assert_eq!(text(&r), "(no output)\n\nCommand exited with code 137");
+	}
+
+	#[tokio::test]
+	async fn bash_timeout_kills_sleep_fast() {
+		let started = std::time::Instant::now();
+		let r = bash_tool(json!({"command": "sleep 5", "timeout": 1})).await;
+		let elapsed = started.elapsed();
+		assert!(r.is_error);
+		assert_eq!(text(&r), "Command timed out after 1 seconds");
+		assert!(elapsed >= std::time::Duration::from_secs(1), "killed before the deadline: {elapsed:?}");
+		assert!(elapsed < std::time::Duration::from_secs(4), "timeout kill not fast: {elapsed:?}");
+	}
+
+	#[tokio::test]
+	async fn bash_timeout_reports_output_so_far() {
+		let r = bash_tool(json!({"command": "echo started; sleep 30", "timeout": 1})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "started\n\n\nCommand timed out after 1 seconds");
+	}
+
+	#[tokio::test]
+	async fn bash_timeout_invalid_values_upstream_error() {
+		for timeout in [json!(0), json!(-5), json!("5")] {
+			let r = bash_tool(json!({"command": "echo x", "timeout": timeout})).await;
+			assert!(r.is_error, "timeout {timeout}");
+			assert_eq!(text(&r), "Invalid timeout: must be a finite number of seconds", "timeout {timeout}");
+		}
+	}
+
+	#[tokio::test]
+	async fn bash_timeout_invalid_max_upstream_error() {
+		let r = bash_tool(json!({"command": "echo x", "timeout": 2147484})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "Invalid timeout: maximum is 2147483.647 seconds");
+	}
+
+	#[tokio::test]
+	async fn bash_truncation_10mb_lines_golden() {
+		let rss_before = vm_rss_kb();
+		let r = bash_tool(json!({"command": "yes x | head -n 5242880"})).await;
+		let rss_after = vm_rss_kb();
+		assert!(!r.is_error);
+		// 5242880 "x" lines = exactly 10MB: the tail keeps the last 2000 lines.
+		let body: String = (0..2000).map(|_| "x").collect::<Vec<_>>().join("\n");
+		let full = full_output_path(&r).expect("fullOutputPath when truncated");
+		let expected = format!("{body}\n\n[Showing lines 5240881-5242880 of 5242880. Full output: {}]", full.display());
+		assert_eq!(text(&r), expected);
+		let t = &r.details["truncation"];
+		assert_eq!(t["content"], json!(body));
+		assert_eq!(t["truncated"], json!(true));
+		assert_eq!(t["truncatedBy"], json!("lines"));
+		assert_eq!(t["totalLines"], json!(5242880));
+		assert_eq!(t["totalBytes"], json!(10485760));
+		assert_eq!(t["outputLines"], json!(2000));
+		assert_eq!(t["outputBytes"], json!(3999));
+		assert_eq!(t["lastLinePartial"], json!(false));
+		assert_eq!(t["firstLineExceedsLimit"], json!(false));
+		assert_eq!(t["maxLines"], json!(2000));
+		assert_eq!(t["maxBytes"], json!(51200));
+		assert_eq!(r.details["fullOutputPath"], json!(full.to_string_lossy()));
+		// The complete output went to the temp file, not into the result.
+		let file_name = full.file_name().unwrap().to_string_lossy().into_owned();
+		assert!(file_name.starts_with("pi-bash-") && file_name.ends_with(".log"), "{file_name}");
+		assert_eq!(std::fs::metadata(&full).unwrap().len(), 10485760);
+		std::fs::remove_file(&full).unwrap();
+		// Memory bounded: the capture holds a rolling tail, not the 10MB.
+		if let (Some(before), Some(after)) = (rss_before, rss_after) {
+			assert!(
+				after.saturating_sub(before) < 15_000,
+				"RSS grew {before} -> {after} kB; the bash capture must stay bounded"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn bash_truncation_10mb_single_line_golden() {
+		let r = bash_tool(json!({"command": "yes x | head -c 20971520 | tr -d '\n'"})).await;
+		assert!(!r.is_error);
+		// One 10MB line: the tail keeps its last 50KB (partial first line).
+		let body = "x".repeat(51200);
+		let full = full_output_path(&r).expect("fullOutputPath when truncated");
+		let expected = format!("{body}\n\n[Showing last 50.0KB of line 1 (line is 10.0MB). Full output: {}]", full.display());
+		assert_eq!(text(&r), expected);
+		let t = &r.details["truncation"];
+		assert_eq!(t["content"], json!(body));
+		assert_eq!(t["truncatedBy"], json!("bytes"));
+		assert_eq!(t["totalLines"], json!(1));
+		assert_eq!(t["totalBytes"], json!(10485760));
+		assert_eq!(t["outputLines"], json!(1));
+		assert_eq!(t["outputBytes"], json!(51200));
+		assert_eq!(t["lastLinePartial"], json!(true));
+		assert_eq!(std::fs::metadata(&full).unwrap().len(), 10485760);
+		std::fs::remove_file(&full).unwrap();
+	}
+
+	#[tokio::test]
+	async fn bash_truncation_bytes_limit_clause_golden() {
+		let r = bash_tool(json!({"command": "yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -n 3000"})).await;
+		assert!(!r.is_error);
+		// 3000 lines of 40 'a' (123000 bytes): the byte cap breaks the tail first.
+		let body: String = (0..1248).map(|_| "a".repeat(40)).collect::<Vec<_>>().join("\n");
+		let full = full_output_path(&r).expect("fullOutputPath when truncated");
+		let expected = format!("{body}\n\n[Showing lines 1753-3000 of 3000 (50.0KB limit). Full output: {}]", full.display());
+		assert_eq!(text(&r), expected);
+		let t = &r.details["truncation"];
+		assert_eq!(t["truncatedBy"], json!("bytes"));
+		assert_eq!(t["totalLines"], json!(3000));
+		assert_eq!(t["totalBytes"], json!(123000));
+		assert_eq!(t["outputLines"], json!(1248));
+		assert_eq!(t["outputBytes"], json!(51167));
+		std::fs::remove_file(&full).unwrap();
+	}
+
+	#[tokio::test]
+	async fn bash_schema_upstream_description_and_timeout_param() {
+		let bash = schemas().into_iter().find(|s| s["name"] == "bash").unwrap();
+		assert_eq!(
+			bash["description"],
+			"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
+		);
+		assert_eq!(bash["parameters"]["properties"]["command"]["description"], "Shell command to execute");
+		assert_eq!(bash["parameters"]["properties"]["timeout"]["type"], "number");
+		assert_eq!(bash["parameters"]["properties"]["timeout"]["description"], "Timeout in seconds (optional, no default timeout)");
+		assert_eq!(bash["parameters"]["required"], json!(["command"]));
+	}
+
+	#[tokio::test]
+	async fn bash_missing_command_preserved_v0_error() {
+		// PRESERVE: the field-validation message predates WP-504 and must not change.
+		let r = bash_tool(json!({})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "bash: missing string field `command`");
 	}
 
 	#[tokio::test]
