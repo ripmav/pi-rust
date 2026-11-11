@@ -1,6 +1,7 @@
 mod agent;
 mod auth;
 mod cli;
+mod edit_diff;
 mod client;
 mod config;
 mod corelog;
