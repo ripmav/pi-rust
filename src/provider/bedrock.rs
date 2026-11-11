@@ -5,7 +5,7 @@
 use crate::model::{AssistantTurn, ModelDriver, ToolCallSpec, Usage};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
