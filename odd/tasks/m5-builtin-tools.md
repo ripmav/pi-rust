@@ -36,7 +36,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 | T3 | S4 | 503 | #36 | subagent writer + parent verify | `a41d7c2`+docs, PR 3 |
 | T4 | S5 | 504 | #37 | writer tests + parent inline impl | `d9f07c1`+docs, PR 4 |
 | T5 | S6 | 505 | #38 | parent inline (small WP) | `e2b91d3`+docs, PR 5 |
-| T6 | S7 | 506 | #39 | parent inline (small WP) | `f0a2c51`+docs, PR 6 |
+| T6 | S7 | 506 | #39 | parent inline (small WP) | `5cb2203`+docs, PR 6 |
 
 ## Log
 
