@@ -7,10 +7,11 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Wrap, Widget};
 use ratatui::buffer::Buffer;
 use serde_json::Value;
 
+pub mod markdown;
 pub mod terminal;
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyModifiers};
@@ -192,7 +193,9 @@ impl TuiApp {
             ])
             .split(area);
 
-        // Transcript: role-marked, wrapped, scrolled from the bottom.
+        // Transcript: role-marked, word-wrapped, scrolled from the bottom.
+        // user/assistant messages render as markdown (WP-602); tool/system
+        // lines stay plain.
         let mut lines: Vec<Line> = Vec::new();
         for m in &self.transcript {
             let (prefix, style): (&str, Style) = match m.role {
@@ -201,11 +204,19 @@ impl TuiApp {
                 "tool" => ("⚙ ", Style::default().add_modifier(Modifier::DIM)),
                 _ => ("· ", Style::default().add_modifier(Modifier::DIM)),
             };
-            for (i, seg) in m.text.split('\n').enumerate() {
-                lines.push(Line::from(vec![
-                    if i == 0 { Span::styled(prefix, style.clone()) } else { Span::raw("") },
-                    Span::styled(seg.to_string(), style.clone()),
-                ]));
+            let body: Vec<Line> = if matches!(m.role, "user" | "assistant") {
+                markdown::md_lines(&m.text)
+            } else {
+                m.text.split('\n').map(markdown::plain_line).collect()
+            };
+            for (i, bl) in body.into_iter().enumerate() {
+                if i == 0 && !prefix.is_empty() {
+                    let mut spans = vec![Span::styled(prefix, style.clone())];
+                    spans.extend(bl.spans);
+                    lines.push(Line::from(spans));
+                } else {
+                    lines.push(bl);
+                }
             }
         }
         if self.pending && lines.last().and_then(|l| l.spans.last()).map(|s| s.content.as_ref().is_empty()).unwrap_or(true) {
@@ -214,7 +225,9 @@ impl TuiApp {
         let total = lines.len();
         let start = total.saturating_sub(transcript_h).saturating_sub(self.scroll);
         let visible: Vec<Line> = lines[start..total.min(start + transcript_h)].to_vec();
-        Paragraph::new(visible).render(chunks[0], buf);
+        Paragraph::new(visible)
+            .wrap(Wrap { trim: true })
+            .render(chunks[0], buf);
 
         // Input line.
         if input_h > 0 {
@@ -432,6 +445,41 @@ mod tests {
 
         app.handle_key(ctrl_d());
         assert!(app.exit);
+    }
+
+    #[test]
+    fn markdown_renders_in_pane() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.apply_event(&json!({"kind":"model_output","text":"# Plan\n- do `x` **now**\n```sh\necho hi\n```"}));
+        let screen = app.render_string();
+        assert!(screen.contains("1 Plan"), "heading in pane: {screen}");
+        assert!(screen.contains("- do `x` now"), "list+inline in pane: {screen}");
+        assert!(screen.contains("sh"), "code label in pane: {screen}");
+        assert!(screen.contains("echo hi"), "code line in pane: {screen}");
+    }
+
+    #[test]
+    fn long_code_block_scrolls_within_pane() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.size = (20, 6); // tiny pane: 3 transcript rows
+        let code: String = (0..40).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+        app.apply_event(&json!({"kind":"model_output","text":format!("```\n{code}\n```")}));
+        let screen = app.render_string();
+        assert!(!screen.contains("line-0"), "oldest code scrolled away: {screen}");
+        assert!(screen.contains("line-39"), "newest code pinned: {screen}");
+        assert!(!screen.contains("line-20"), "middle scrolled away: {screen}");
+    }
+
+    #[test]
+    fn long_assistant_line_wraps() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.size = (20, 6);
+        app.apply_event(&json!({"kind":"model_output","text":"aaaa bbbb cccc dddd eeee"}));
+        let screen = app.render_string();
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows.iter().any(|r| r.contains("aaaa bbbb")), "first wrap row: {screen}");
+        assert!(rows.iter().any(|r| r.contains("cccc")), "wrapped continuation: {screen}");
+        assert!(rows.iter().all(|r| r.chars().count() <= 20), "no row overflows width: {screen}");
     }
 
     #[test]
