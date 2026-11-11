@@ -346,6 +346,9 @@ pub async fn run() -> Result<i32> {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    // WP-604: blocking ui dialog requests for the TUI (headless: unused,
+    // the default-answers path handles them in the event task).
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
     let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
@@ -375,6 +378,8 @@ pub async fn run() -> Result<i32> {
         agent_dir: Arc::new(agent_dir.clone()),
         usage_total: Arc::default(),
         cost_total: Arc::default(),
+        tui: tui_mode,
+        ui_tx,
     });
     tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
@@ -398,8 +403,30 @@ pub async fn run() -> Result<i32> {
 
     // --command: run each registered extension command after ready, before the
     // scenario. Unknown command or handler error logs ok:false + error and
-    // continues (does not abort the run).
-    for (name, cargs) in &commands {
+    // continues (does not abort the run). TUI mode runs them on a task after
+    // the TUI loop is up: a command that opens a dialog would otherwise
+    // block its own response (the dialog is answered in the TUI).
+    if tui_mode {
+        let c_client = client.clone();
+        let c_log = log.clone();
+        let c_commands = commands.clone();
+        tokio::spawn(async move {
+            for (name, cargs) in &c_commands {
+                let resp = c_client.request("command", json!({"name":name,"args":cargs})).await;
+                let (ok, error) = match resp {
+                    Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
+                    Decision::Response(r) => (false, r.get("error").and_then(Value::as_str).map(str::to_string)),
+                    Decision::Unavailable => (false, Some("command unanswered: bridge not running".into())),
+                };
+                let mut line = json!({"kind":"command","name":name,"ok":ok});
+                if let Some(e) = error {
+                    line["error"] = json!(e);
+                }
+                c_log.emit(line);
+            }
+        });
+    } else {
+        for (name, cargs) in &commands {
         let resp = client.request("command", json!({"name":name,"args":cargs})).await;
         let (ok, error) = match resp {
             Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
@@ -411,6 +438,7 @@ pub async fn run() -> Result<i32> {
             line["error"] = json!(e);
         }
         log.emit(line);
+        }
     }
 
     // Interactive mode: the TUI owns input and lifetime; the agent loop runs
@@ -424,9 +452,12 @@ pub async fn run() -> Result<i32> {
         );
         let submit_tx = msg_tx.clone();
         let end_tx = msg_tx.clone();
+        let dialog_client = client.clone();
+        let dialog_log = log.clone();
         let result = crate::tui::terminal::run(
             &mut app,
             log.subscribe(),
+            ui_rx,
             move |text| {
                 let _ = submit_tx.send(Item::User(QueuedUser {
                     text: text.to_string(),
@@ -434,6 +465,21 @@ pub async fn run() -> Result<i32> {
                     steps: vec![],
                     images: vec![],
                 }));
+            },
+            move |outcome| match outcome {
+                // WP-604: the answer flows back over the unchanged bridge
+                // protocol; the event log records the round trip.
+                crate::tui::dialog::DialogOutcome::Answered { id, method, title, message, response } => {
+                    dialog_client.send(response.clone());
+                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":response}));
+                }
+                // Timeout: the sidecar already resolved with its upstream
+                // default — the TUI only stops showing the dialog.
+                crate::tui::dialog::DialogOutcome::TimedOut { id, method, title, message } => {
+                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":Value::Null,"timedOut":true}));
+                }
             },
             move || {
                 let _ = end_tx.send(Item::End);
