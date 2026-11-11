@@ -146,6 +146,19 @@ sidecar's stderr and the core's own diagnostic lines go to
 `<agentDir>/tui-stderr.log` so they cannot corrupt the screen. The headless
 NDJSON-on-stdout contract is unchanged for scenario/prompt runs.
 
+#### Extension dialogs in the TUI (M6, WP-604)
+
+When an extension asks the human for input (`ctx.ui.select`, `ctx.ui.confirm`,
+`ctx.ui.input`, `ctx.ui.editor`), the TUI renders the dialog over the
+transcript and the answer flows back over the unchanged bridge protocol
+(`extension_ui_response`). Key handling: select — `↑`/`↓` + Enter, Esc
+cancels; confirm — `y`/`n` (Enter = yes, Esc cancels); input/editor —
+type + Enter, Esc cancels. Timeouts keep the sidecar-side semantics
+(upstream defaults: select/input/editor → undefined, confirm → false).
+Fire-and-forget UI methods render too: `notify` becomes a transcript line,
+`setStatus`/`setTitle` show in the status bar, `set_editor_text` fills the
+input. Headless/no-TTY runs keep answering with the upstream defaults.
+
 ### Prompt templates (M3)
 
 `<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on
