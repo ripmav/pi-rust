@@ -53,7 +53,7 @@ instruction 2026-11-11).
 | T2 | S3 | 602 | #48 | inline (TDD) | feat(tui) on feat/wp-602-markdown-rendering; PR #58 (stack #59) |
 | T3 | S4 | 603 | #49 | inline (TDD) | feat(tui) on feat/wp-603-streaming-display; PR #60 (stack #59) |
 | T4 | S5 | 604 | #50 | inline (TDD) | dce93b3/b7a850e/ec37517 on feat/wp-604-human-dialogs; PR #61 (stack #59) |
-| T5 | S6 | 605 | — | subagent or inline | — |
+| T5 | S6 | 605 | #51 | inline (TDD) | bf54d59/2781ec3 on feat/wp-605-editor-pane; PR #62 (stack #59) |
 | T6 | S7 | 606 | — | subagent or inline | — |
 | T7 | S8 | 607 | — | subagent or inline | — |
 | T8 | S9 | 608 | — | subagent or inline | — |
@@ -97,3 +97,15 @@ instruction 2026-11-11).
   the args string. PTY e2e asserts the full roundtrip (confirm/select/
   input) + clean exit. Suite: 98 in-crate + 19 e2e + 2 PTY; smoke 42/42.
   No CI on the repo — local suite, reported honestly.
+
+- L8: WP-605 delivered: T5 done, PR #62 (base feat/wp-604-human-dialogs,
+  label type:feature, closes #51), stack #59 = [57, 58, 60, 61, 62]. Editor
+  pane: (line, col) caret, bracketed paste (adapter enables paste mode),
+  up/down history with draft restore, word-wise editing on upstream
+  default bindings (ctrl+w/alt+Backspace, alt+d, ctrl+u/k), Enter submit,
+  shift+Enter/ctrl+j newline. The `editor` dialog reuses the pane
+  (prefill in, Enter answers, Esc cancels; sidecar timeout authoritative).
+  v0 shortcuts: up/down is history (no vertical caret movement); no
+  undo/yank/selection (WP-606+ territory). Paste tail-join off-by-one
+  fixed (inserted indices are l+1..l+len, last = l+len). Suite: 106
+  in-crate + 19 e2e + 2 PTY; smoke 42/42.
