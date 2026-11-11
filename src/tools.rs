@@ -2,17 +2,20 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-/// v0 built-in tools: `bash`, `read`, `write` (no `edit` in v0).
+use crate::edit_diff;
+
+/// v0 built-in tools: `bash`, `read`, `write`, `edit`.
 pub fn schemas() -> Vec<Value> {
     vec![
         json!({"name":"bash","description":"Run a shell command (bash -c) and return its output","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Command to run"}},"required":["command"]}}),
         json!({"name":"read","description":"Read a text file, optionally a line range (1-based)","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}),
         json!({"name":"write","description":"Write content to a file, creating parent directories","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}),
+        json!({"name":"edit","description":"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}}}}},"required":["path","edits"]}}),
     ]
 }
 
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "bash" | "read" | "write")
+    matches!(name, "bash" | "read" | "write" | "edit")
 }
 
 pub struct ExecResult {
@@ -39,6 +42,7 @@ pub async fn execute(name: &str, input: &Value) -> ExecResult {
         "bash" => bash(input).await,
         "read" => read(input),
         "write" => write(input),
+        "edit" => edit(input),
         _ => ExecResult::err(format!("unknown built-in tool: {name}")),
     }
 }
@@ -376,6 +380,10 @@ mod tests {
 
 	async fn write_tool(input: Value) -> ExecResult {
 		execute("write", &input).await
+	}
+
+	async fn edit_tool(input: Value) -> ExecResult {
+		execute("edit", &input).await
 	}
 
 	fn text(r: &ExecResult) -> String {
@@ -752,6 +760,371 @@ mod tests {
 		assert!(!p.exists());
 		std::fs::remove_dir_all(&dir).unwrap();
 	}
+
+	// ---- WP-503: edit tool, mirroring the pinned upstream behavior table ----
+
+	#[tokio::test]
+	async fn edit_unique_single_exact_result_and_file() {
+		let dir = tmpdir();
+		let p = dir.join("edit-test.txt");
+		std::fs::write(&p, "Hello, world!").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": [{"oldText": "world", "newText": "testing"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully replaced 1 block(s) in {path}."));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "Hello, testing!");
+		// Upstream EditToolDetails: {diff, patch, firstChangedLine}.
+		let diff = r.details["diff"].as_str().expect("details.diff is a string");
+		assert!(diff.contains("testing"));
+		let patch = r.details["patch"].as_str().expect("details.patch is a string");
+		assert!(patch.contains("--- ") && patch.contains("+++ ") && patch.contains("@@"));
+		assert!(patch.contains("-Hello, world!") && patch.contains("+Hello, testing!"));
+		assert_eq!(r.details["firstChangedLine"], json!(1));
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_no_match_exact_error_file_unchanged() {
+		let dir = tmpdir();
+		let p = dir.join("edit-test.txt");
+		std::fs::write(&p, "Hello, world!").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": [{"oldText": "nonexistent", "newText": "testing"}]})).await;
+		assert!(r.is_error);
+		assert_eq!(
+			text(&r),
+			format!("Could not find the exact text in {path}. The old text must match exactly including all whitespace and newlines.")
+		);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "Hello, world!");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_missing_file_enoent_wrapped() {
+		let dir = tmpdir();
+		let p = dir.join("missing.txt");
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": [{"oldText": "hello", "newText": "world"}]})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), format!("Could not edit file: {path}. Error code: ENOENT."));
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_ambiguous_single_exact_error() {
+		let dir = tmpdir();
+		let p = dir.join("edit-test.txt");
+		std::fs::write(&p, "foo foo foo").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": [{"oldText": "foo", "newText": "bar"}]})).await;
+		assert!(r.is_error);
+		assert_eq!(
+			text(&r),
+			format!("Found 3 occurrences of the text in {path}. The text must be unique. Please provide more context to make it unique.")
+		);
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_multi_disjoint_regions_one_call() {
+		let dir = tmpdir();
+		let p = dir.join("edit-multi.txt");
+		std::fs::write(&p, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({
+			"path": path,
+			"edits": [{"oldText": "alpha\n", "newText": "ALPHA\n"}, {"oldText": "gamma\n", "newText": "GAMMA\n"}]
+		})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully replaced 2 block(s) in {path}."));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "ALPHA\nbeta\nGAMMA\ndelta\n");
+		let diff = r.details["diff"].as_str().unwrap();
+		assert!(diff.contains("ALPHA") && diff.contains("GAMMA"));
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_multi_matched_against_original_not_incremental() {
+		let dir = tmpdir();
+		let p = dir.join("edit-multi-original.txt");
+		std::fs::write(&p, "foo\nbar\nbaz\n").unwrap();
+		let r = edit_tool(json!({
+			"path": p.display().to_string(),
+			"edits": [{"oldText": "foo\n", "newText": "foo bar\n"}, {"oldText": "bar\n", "newText": "BAR\n"}]
+		})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "foo bar\nBAR\nbaz\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_empty_edits_exact_error() {
+		let dir = tmpdir();
+		let p = dir.join("edit-empty.txt");
+		std::fs::write(&p, "hello\nworld\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": []})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "Edit tool input is invalid. edits must contain at least one replacement.");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_overlapping_regions_exact_error_file_unchanged() {
+		let dir = tmpdir();
+		let p = dir.join("edit-overlap.txt");
+		std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({
+			"path": path,
+			"edits": [{"oldText": "one\ntwo\n", "newText": "ONE\nTWO\n"}, {"oldText": "two\nthree\n", "newText": "TWO\nTHREE\n"}]
+		})).await;
+		assert!(r.is_error);
+		assert_eq!(
+			text(&r),
+			format!("edits[0] and edits[1] overlap in {path}. Merge them into one edit or target disjoint regions.")
+		);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\nthree\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_no_partial_apply_when_one_edit_fails() {
+		let dir = tmpdir();
+		let p = dir.join("edit-no-partial.txt");
+		let original = "alpha\nbeta\ngamma\n";
+		std::fs::write(&p, original).unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({
+			"path": path,
+			"edits": [{"oldText": "alpha\n", "newText": "ALPHA\n"}, {"oldText": "missing\n", "newText": "MISSING\n"}]
+		})).await;
+		assert!(r.is_error);
+		assert_eq!(
+			text(&r),
+			format!("Could not find edits[1] in {path}. The oldText must match exactly including all whitespace and newlines.")
+		);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), original);
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_read_only_file_eacces_wrapped() {
+		let is_root = std::process::Command::new("id").arg("-u")
+			.output()
+			.ok()
+			.is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0");
+		if is_root {
+			return;
+		}
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let dir = tmpdir();
+			let p = dir.join("edit-readonly.txt");
+			std::fs::write(&p, "hello\n").unwrap();
+			std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+			let path = p.display().to_string();
+			let r = edit_tool(json!({"path": path, "edits": [{"oldText": "hello", "newText": "world"}]})).await;
+			assert!(r.is_error);
+			assert_eq!(text(&r), format!("Could not edit file: {path}. Error code: EACCES."));
+			assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\n");
+			std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+			std::fs::remove_dir_all(&dir).unwrap();
+		}
+	}
+
+	#[tokio::test]
+	async fn edit_crlf_line_endings_preserved() {
+		let dir = tmpdir();
+		let p = dir.join("crlf-preserve.txt");
+		std::fs::write(&p, "first\r\nsecond\r\nthird\r\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "second\n", "newText": "REPLACED\n"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "first\r\nREPLACED\r\nthird\r\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_lf_line_endings_preserved() {
+		let dir = tmpdir();
+		let p = dir.join("lf-preserve.txt");
+		std::fs::write(&p, "first\nsecond\nthird\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "second\n", "newText": "REPLACED\n"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "first\nREPLACED\nthird\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_duplicate_across_crlf_lf_variants() {
+		let dir = tmpdir();
+		let p = dir.join("mixed-endings.txt");
+		std::fs::write(&p, "hello\r\nworld\r\n---\r\nhello\nworld\n").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": [{"oldText": "hello\nworld\n", "newText": "replaced\n"}]})).await;
+		assert!(r.is_error);
+		assert_eq!(
+			text(&r),
+			format!("Found 2 occurrences of the text in {path}. The text must be unique. Please provide more context to make it unique.")
+		);
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_bom_preserved() {
+		let dir = tmpdir();
+		let p = dir.join("bom-test.txt");
+		std::fs::write(&p, "\u{FEFF}first\r\nsecond\r\nthird\r\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "second\n", "newText": "REPLACED\n"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "\u{FEFF}first\r\nREPLACED\r\nthird\r\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_bom_and_crlf_in_multi_edit_mode() {
+		let dir = tmpdir();
+		let p = dir.join("bom-crlf-multi.txt");
+		std::fs::write(&p, "\u{FEFF}first\r\nsecond\r\nthird\r\nfourth\r\n").unwrap();
+		let r = edit_tool(json!({
+			"path": p.display().to_string(),
+			"edits": [{"oldText": "second\n", "newText": "SECOND\n"}, {"oldText": "fourth\n", "newText": "FOURTH\n"}]
+		})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "\u{FEFF}first\r\nSECOND\r\nthird\r\nFOURTH\r\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_inserted_lines_get_crlf_in_crlf_file() {
+		let dir = tmpdir();
+		let p = dir.join("crlf-bytes.txt");
+		std::fs::write(&p, "first\r\nsecond\r\nthird").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "second\nthird", "newText": "2a\r\n2b\nthird!"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"first\r\n2a\r\n2b\r\nthird!");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_inserted_lines_get_lf_in_lf_file() {
+		let dir = tmpdir();
+		let p = dir.join("lf-bytes.txt");
+		std::fs::write(&p, "first\nsecond\nthird").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "second\nthird", "newText": "2a\r\n2b\nthird!"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"first\n2a\n2b\nthird!");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_mixed_lf_first_line_8544() {
+		let dir = tmpdir();
+		let p = dir.join("mixed-lf-first.txt");
+		std::fs::write(&p, "a\nb\r\nX = 1\r\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "X = 1", "newText": "X = 2"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"a\nb\r\nX = 2\r\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_mixed_crlf_first_line_8544() {
+		let dir = tmpdir();
+		let p = dir.join("mixed-crlf-first.txt");
+		std::fs::write(&p, "a\r\nb\nc").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "c", "newText": "C"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"a\r\nb\nC");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_lone_cr_in_untouched_line_8544() {
+		let dir = tmpdir();
+		let p = dir.join("lone-cr.txt");
+		std::fs::write(&p, "a\rb\nX = 1\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": [{"oldText": "X = 1", "newText": "X = 2"}]})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"a\rb\nX = 2\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_mixed_endings_multi_edit_inserted_lines_8544() {
+		let dir = tmpdir();
+		let p = dir.join("mixed-multi.txt");
+		std::fs::write(&p, "lf1\nlf2\ncr1\r\ncr2\r\n").unwrap();
+		let r = edit_tool(json!({
+			"path": p.display().to_string(),
+			"edits": [{"oldText": "lf1\n", "newText": "A\nB\n"}, {"oldText": "cr1\n", "newText": "C\nD\n"}]
+		})).await;
+		assert!(!r.is_error);
+		assert_eq!(std::fs::read(&p).unwrap(), b"A\nB\nlf2\nC\r\nD\r\ncr2\r\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_legacy_top_level_old_new_text() {
+		// Upstream prepareArguments: top-level oldText/newText fold into edits.
+		let dir = tmpdir();
+		let p = dir.join("legacy.txt");
+		std::fs::write(&p, "before\n").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "oldText": "before", "newText": "after"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully replaced 1 block(s) in {path}."));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "after\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_stringified_edits_parsed() {
+		let dir = tmpdir();
+		let p = dir.join("string-edits.txt");
+		std::fs::write(&p, "before\n").unwrap();
+		let path = p.display().to_string();
+		let r = edit_tool(json!({"path": path, "edits": "[{\"oldText\":\"before\",\"newText\":\"after\"}]"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully replaced 1 block(s) in {path}."));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "after\n");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_stringified_edits_invalid_json_is_invalid_input() {
+		let dir = tmpdir();
+		let p = dir.join("bad-string.txt");
+		std::fs::write(&p, "before\n").unwrap();
+		let r = edit_tool(json!({"path": p.display().to_string(), "edits": "not json"})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "Edit tool input is invalid. edits must contain at least one replacement.");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn edit_missing_path_field_house_error() {
+		let r = edit_tool(json!({"edits": [{"oldText": "a", "newText": "b"}]})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "edit: missing string field `path`");
+	}
+
+	#[tokio::test]
+	async fn preserve_tool_registration_and_write_dispatch() {
+		// PRESERVE: WP-503 adds edit to schemas()/is_builtin()/execute(); the existing
+		// entries and the write dispatch (pinned by WP-502) must be unchanged.
+		let names: Vec<String> =
+			schemas().into_iter().map(|s| s["name"].as_str().unwrap().to_string()).collect();
+		assert_eq!(names, vec!["bash", "read", "write", "edit"]);
+		assert!(is_builtin("bash") && is_builtin("read") && is_builtin("write") && is_builtin("edit"));
+		assert!(!is_builtin("nope"));
+		let dir = tmpdir();
+		let p = dir.join("preserve.txt");
+		let r = write_tool(json!({"path": p.display().to_string(), "content": "hi"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully wrote to {}", p.display()));
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
 }
 
 /// Upstream `write` (write.ts): resolve the path like the read tool, `mkdir` the parent dir
@@ -774,5 +1147,121 @@ fn write(input: &Value) -> ExecResult {
 	match std::fs::write(&abs, content) {
 		Ok(()) => ExecResult::text(format!("Successfully wrote to {path}")),
 		Err(e) => ExecResult::err(node_fs_error(&e, "open", &abs)),
+	}
+}
+
+/// Upstream `prepareEditArguments`: some models send `edits` as a JSON string or a single
+/// edit object, or keep the legacy top-level `oldText`/`newText` pair. All fold into the
+/// `edits` array. `None` means `validateEditInput` would reject: no non-array or an
+/// empty array.
+fn prepare_edit_edits(input: &Value) -> Option<Vec<Value>> {
+	fn is_single_edit(v: &Value) -> bool {
+		v.is_object()
+			&& v.get("oldText").is_some_and(Value::is_string)
+			&& v.get("newText").is_some_and(Value::is_string)
+	}
+	let mut edits = input.get("edits").cloned().unwrap_or(Value::Null);
+	if let Some(s) = edits.as_str() {
+		if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+			if parsed.is_array() || is_single_edit(&parsed) {
+				edits = if parsed.is_array() { parsed } else { json!([parsed]) };
+			}
+		}
+	}
+	if is_single_edit(&edits) {
+		edits = json!([edits]);
+	}
+	if let (Some(old_text), Some(new_text)) = (
+		input.get("oldText").and_then(Value::as_str),
+		input.get("newText").and_then(Value::as_str),
+	) {
+		let mut arr = edits.as_array().cloned().unwrap_or_default();
+		arr.push(json!({"oldText": old_text, "newText": new_text}));
+		edits = Value::Array(arr);
+	}
+	let arr = edits.as_array()?;
+	(!arr.is_empty()).then(|| arr.clone())
+}
+
+/// Upstream `fs.access(R_OK|W_OK)` failure message: `Could not edit file: {path}. Error
+/// code: {code}.` (the raw input path; uncoded errors surface as `Error: {message}`).
+fn edit_access_error(e: &std::io::Error, path: &str) -> String {
+	use std::io::ErrorKind;
+	let message = match e.kind() {
+		ErrorKind::NotFound => "Error code: ENOENT".to_string(),
+		ErrorKind::PermissionDenied => "Error code: EACCES".to_string(),
+		ErrorKind::IsADirectory => "Error code: EISDIR".to_string(),
+		_ => format!("Error: {e}"),
+	};
+	format!("Could not edit file: {path}. {message}.")
+}
+
+/// Upstream `edit` (edit.ts): access → read → BOM strip → LF-normalize → apply edits
+/// (all against the original content) → diff before the write → splice into the original
+/// line endings → write. Result text echoes the raw input path; `details` is upstream's
+/// `EditToolDetails` {diff, patch, firstChangedLine}.
+fn edit(input: &Value) -> ExecResult {
+	let Some(path) = input.get("path").and_then(Value::as_str) else {
+		return ExecResult::err("edit: missing string field `path`".into());
+	};
+	let Some(edits_raw) = prepare_edit_edits(input) else {
+		return ExecResult::err(
+			"Edit tool input is invalid. edits must contain at least one replacement.".into(),
+		);
+	};
+	let mut edits: Vec<(String, String)> = Vec::with_capacity(edits_raw.len());
+	for (i, e) in edits_raw.iter().enumerate() {
+		let (Some(old_text), Some(new_text)) = (
+			e.get("oldText").and_then(Value::as_str),
+			e.get("newText").and_then(Value::as_str),
+		) else {
+			return ExecResult::err(format!("edit: edits[{i}] needs string fields `oldText` and `newText`"));
+		};
+		edits.push((old_text.to_string(), new_text.to_string()));
+	}
+	let abs = resolve_read_path(path);
+	// Upstream checks R_OK|W_OK before reading; the write probe below covers W_OK so a
+	// read-only file rejects with the same wrapped message before anything is read.
+	let mut file = match std::fs::File::open(&abs) {
+		Ok(f) => f,
+		Err(e) => return ExecResult::err(edit_access_error(&e, path)),
+	};
+	let mut bytes = Vec::new();
+	if let Err(e) = std::io::Read::read_to_end(&mut file, &mut bytes) {
+		return ExecResult::err(node_fs_error(&e, "read", &abs));
+	}
+	if let Err(e) = std::fs::OpenOptions::new().write(true).open(&abs) {
+		return ExecResult::err(edit_access_error(&e, path));
+	}
+	// Upstream buffer.toString("utf-8"); invalid bytes decode lossy, like the read tool.
+	let raw_content = String::from_utf8_lossy(&bytes).into_owned();
+	// Strip BOM before matching: the model will not include an invisible BOM in oldText.
+	let (bom, content) = edit_diff::split_bom(&raw_content);
+	let normalized_content = edit_diff::normalize_to_lf(content);
+	let applied = match edit_diff::apply_edits_to_normalized_content(&normalized_content, &edits, path) {
+		Ok(a) => a,
+		Err(msg) => return ExecResult::err(msg),
+	};
+	// Diff before writing, so diff computation cannot fail after the write.
+	let diff_out = edit_diff::generate_edit_diff(path, &applied.base_content, &applied.new_content);
+	// Splice into the original text, so untouched lines keep their line endings. Without any CR
+	// the original is the normalized text, and the normalized result is already final.
+	let final_content = if content == normalized_content {
+		format!("{bom}{}", applied.new_content)
+	} else {
+		format!("{bom}{}", edit_diff::apply_replacements_to_original(content, &applied.replacements))
+	};
+	if let Err(e) = std::fs::write(&abs, &final_content) {
+		return ExecResult::err(node_fs_error(&e, "open", &abs));
+	}
+	let mut details = json!({"diff": diff_out.diff, "patch": diff_out.patch});
+	if let Some(line) = diff_out.first_changed_line {
+		details["firstChangedLine"] = json!(line);
+	}
+	ExecResult {
+		content: json!([{"type":"text","text":format!("Successfully replaced {} block(s) in {path}.", edits.len())}]),
+		details,
+		is_error: false,
+		terminate: false,
 	}
 }

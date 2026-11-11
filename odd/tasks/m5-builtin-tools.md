@@ -33,7 +33,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 |----|------|----|-------|-------|-----------|
 | T1 | S2 | 501 | #34 | subagent writer + parent verify | `f46d1f9`+docs, PR 1 |
 | T2 | S3 | 502 | #35 | subagent writer + parent verify | `7e0f614`, PR 2 |
-| T3 | S4 | 503 | — | subagent writer + parent verify | — |
+| T3 | S4 | 503 | #36 | subagent writer + parent verify | `a41d7c2`+docs, PR 3 |
 | T4 | S5 | 504 | — | subagent writer + parent verify | — |
 | T5 | S6 | 505 | — | subagent writer + parent verify | — |
 | T6 | S7 | 506 | — | subagent writer + parent verify | — |
@@ -45,7 +45,15 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 - L3: M4 delivered (PR #29 merged as 1fca5ce); dependency repairs #31/#32/#33
   merged; main green (3feff03), suite 56 in-crate + 19 e2e + 42 smoke.
 - L4: Execution order by dependency: 501 → 502 → 503 → 504 → 505 → 506.
-- L5 (T2/WP-502): subagent delivered write-tool parity (7 unit tests, RED→GREEN,
+- L5 (T3/WP-503): subagent delivered edit-tool parity (43 table/unit tests,
+  RED→GREEN, suite 125 in-crate + 19 e2e green). New src/edit_diff.rs (LCS-DP
+  diff port, documented shortcut: Myers beyond ~5k lines); exact upstream
+  error/result strings pinned (unique/ambiguous/overlap/empty/no-op,
+  CRLF/BOM/lone-CR preservation). Slice boundary: the algorithm port + its
+  43 tests form one cohesive work unit (single behavior, WP-503 Size M) —
+  recorded per house delivery rule. First writer attempt stalled at 4 min;
+  relaunched with declared partial state.
+- L6 (T2/WP-502): subagent delivered write-tool parity (7 unit tests, RED→GREEN,
   suite 81 in-crate + 19 e2e green). Success string `Successfully wrote to
   <raw input path>` (upstream quirk pinned); EACCES/EISDIR/mkdir Node-shaped
   errors; file-mutation queue + abort signals skipped (sequential execution,
