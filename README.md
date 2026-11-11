@@ -165,6 +165,21 @@ input. Headless/no-TTY runs keep answering with the upstream defaults.
 The `editor` dialog reuses the editor pane itself: the prefilled text opens
 in the pane, Enter answers with the pane text, Esc cancels (WP-605).
 
+#### Keybindings (M6, WP-606)
+
+The TUI loads the upstream keybinding schema and golden defaults (the
+pinned upstream `TUI_KEYBINDINGS` + `APP_KEYBINDINGS`, 90 actions). User
+bindings live in `<agentDir>/keybindings.json` (upstream path), e.g.
+`{"tui.input.newLine": "ctrl+m"}` or `"enter"` / `["enter", "ctrl+m"]`
+(legacy flat names like `"submit"` migrate automatically). User bindings
+replace the defaults of the bound action (an empty list unbinds it); two
+user bindings on the same key are reported as a conflict (upstream
+semantics — default collisions are not). An invalid action or key is an
+error that lists the valid actions; the TUI then starts on the defaults
+and shows the error in the status bar. In v0 the wired actions are the
+editor/input/select/app core keys; picker and theme actions resolve and
+are configurable now and get wired by their feature WPs.
+
 ### Prompt templates (M3)
 
 `<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on

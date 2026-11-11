@@ -12,6 +12,7 @@ use ratatui::buffer::Buffer;
 use serde_json::{json, Value};
 
 pub mod dialog;
+pub mod keybindings;
 pub mod markdown;
 pub mod terminal;
 
@@ -49,6 +50,8 @@ pub struct TuiApp {
     /// Open `editor` dialog (WP-605): the main editor pane is reused as the
     /// dialog input; Enter answers, Esc cancels.
     pub editor_session: Option<EditorSession>,
+    /// WP-606: upstream keybinding schema + user configuration.
+    pub kb: keybindings::KeybindingManager,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
     pub scroll: usize,
     pub size: (u16, u16),
@@ -76,6 +79,16 @@ pub enum TuiAction {
 
 impl TuiApp {
     pub fn new(model: impl Into<String>, cwd: impl Into<String>, session: impl Into<String>) -> Self {
+        Self::with_kb(keybindings::KeybindingManager::default(), model, cwd, session)
+    }
+
+    /// WP-606: construct with a configured keybinding manager.
+    pub fn with_kb(
+        kb: keybindings::KeybindingManager,
+        model: impl Into<String>,
+        cwd: impl Into<String>,
+        session: impl Into<String>,
+    ) -> Self {
         Self {
             transcript: Vec::new(),
             input: String::new(),
@@ -91,6 +104,7 @@ impl TuiApp {
             status_text: None,
             dialog: None,
             editor_session: None,
+            kb,
             scroll: 0,
             size: (80, 24),
             exit: false,
@@ -554,127 +568,137 @@ impl TuiApp {
                 None
             }
             TermEvent::Key(k) => {
-                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                let alt = k.modifiers.contains(KeyModifiers::ALT);
-                if ctrl {
-                    match k.code {
-                        KeyCode::Char('c') => {
-                            if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
-                                return Some(self.close_editor_session(Self::cancel_response(&id)));
-                            }
-                            if self.input.trim().is_empty() {
-                                self.exit = true;
-                            } else {
-                                self.input.clear();
-                                self.cursor = (0, 0);
-                                self.leave_history();
-                            }
-                            return None;
-                        }
-                        KeyCode::Char('d') if self.editor_session.is_some() => {
-                            self.delete_char_forward();
-                            return None;
-                        }
-                        KeyCode::Char('d') if self.input.trim().is_empty() => {
-                            self.exit = true;
-                            return None;
-                        }
-                        KeyCode::Char('w') => {
-                            self.delete_word_backward();
-                            return None;
-                        }
-                        KeyCode::Char('u') => {
-                            self.delete_to_line_start();
-                            return None;
-                        }
-                        KeyCode::Char('k') => {
-                            self.delete_to_line_end();
-                            return None;
-                        }
-                        KeyCode::Char('j') => {
-                            self.insert_newline();
-                            return None;
-                        }
-                        _ => return None,
+                // WP-606: the keybinding manager (upstream schema + user
+                // config) drives the wired actions; first match wins.
+                let kb = &self.kb;
+                if kb.matches(&k, "tui.editor.deleteWordBackward") {
+                    self.delete_word_backward();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.deleteWordForward") {
+                    self.delete_word_forward();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.deleteToLineStart") {
+                    self.delete_to_line_start();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.deleteToLineEnd") {
+                    self.delete_to_line_end();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.cursorLeft") {
+                    self.move_cursor_left();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.cursorRight") {
+                    self.move_cursor_right();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.cursorLineStart") {
+                    self.move_cursor_home();
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.cursorLineEnd") {
+                    self.move_cursor_end();
+                    return None;
+                }
+                // User-bound history keys (unbound by default upstream; the
+                // bare up/down fallback below keeps the v0 behavior).
+                if self.editor_session.is_none() {
+                    if kb.matches(&k, "tui.editor.historyPrevious") {
+                        self.history_prev();
+                        return None;
+                    }
+                    if kb.matches(&k, "tui.editor.historyNext") {
+                        self.history_next();
+                        return None;
                     }
                 }
-                if alt {
-                    match k.code {
-                        KeyCode::Backspace => {
-                            self.delete_word_backward();
-                            return None;
-                        }
-                        KeyCode::Char('d') => {
-                            self.delete_word_forward();
-                            return None;
-                        }
-                        _ => return None,
+                // ctrl+c: app.clear (dialogs consume their keys earlier).
+                if kb.matches(&k, "app.clear") {
+                    if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
+                        return Some(self.close_editor_session(Self::cancel_response(&id)));
                     }
+                    if self.input.trim().is_empty() {
+                        self.exit = true;
+                    } else {
+                        self.input.clear();
+                        self.cursor = (0, 0);
+                        self.leave_history();
+                    }
+                    return None;
                 }
-                match k.code {
-                    KeyCode::Enter => {
-                        if k.modifiers.contains(KeyModifiers::SHIFT) {
-                            self.insert_newline();
-                            return None;
-                        }
-                        if self.editor_session.is_some() {
-                            let value = self.input.clone();
-                            let id = self.editor_session.as_ref().unwrap().id.clone();
-                            let response = json!({"type":"extension_ui_response","id":id,"value":value});
-                            return Some(self.close_editor_session(response));
-                        }
-                        let t = self.submit_text();
-                        t.map(TuiAction::Submit).inspect(|_| self.scroll = 0)
+                // ctrl+d: app.exit when the editor is empty, else
+                // deleteCharForward (inside editor sessions always).
+                if kb.matches(&k, "app.exit") && self.input.trim().is_empty() {
+                    self.exit = true;
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.deleteCharForward") {
+                    self.delete_char_forward();
+                    return None;
+                }
+                // Newline keys (default shift+enter / ctrl+j, rebindable):
+                // they win over submit for the same physical Enter.
+                if kb.matches(&k, "tui.input.newLine") {
+                    self.insert_newline();
+                    return None;
+                }
+                // Enter: in an editor session it answers the dialog, else
+                // it submits.
+                if k.code == KeyCode::Enter {
+                    if self.editor_session.is_some() {
+                        let value = self.input.clone();
+                        let id = self.editor_session.as_ref().unwrap().id.clone();
+                        let response = json!({"type":"extension_ui_response","id":id,"value":value});
+                        return Some(self.close_editor_session(response));
                     }
-                    KeyCode::Esc => {
-                        if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
+                    if kb.matches(&k, "tui.input.submit") {
+                        if let Some(t) = self.submit_text() {
+                            self.scroll = 0;
+                            return Some(TuiAction::Submit(t));
+                        }
+                    }
+                    return None;
+                }
+                // Esc: tui.select.cancel includes escape — closes an editor
+                // session; no running turn exists to interrupt in v0.
+                if k.code == KeyCode::Esc {
+                    if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
+                        if kb.matches(&k, "tui.select.cancel") {
                             return Some(self.close_editor_session(Self::cancel_response(&id)));
                         }
-                        None
                     }
-                    KeyCode::Backspace => {
-                        self.backspace_at();
-                        None
-                    }
-                    KeyCode::Delete => {
-                        self.delete_char_forward();
-                        None
-                    }
-                    KeyCode::Left => {
-                        self.move_cursor_left();
-                        None
-                    }
-                    KeyCode::Right => {
-                        self.move_cursor_right();
-                        None
-                    }
-                    KeyCode::Home => {
-                        self.move_cursor_home();
-                        None
-                    }
-                    KeyCode::End => {
-                        self.move_cursor_end();
-                        None
-                    }
-                    KeyCode::Up => {
-                        if self.editor_session.is_some() {
-                            return None;
-                        }
+                    return None;
+                }
+                if kb.matches(&k, "tui.editor.deleteCharBackward") {
+                    self.backspace_at();
+                    return None;
+                }
+                // v0 fallback (upstream leaves history unbound by default):
+                // bare up/down walk the history, or scroll the transcript.
+                match k.code {
+                    KeyCode::Up
+                        if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
+                    {
                         if !self.history_prev() {
                             self.scroll += 1;
                         }
                         None
                     }
-                    KeyCode::Down => {
-                        if self.editor_session.is_some() {
-                            return None;
-                        }
+                    KeyCode::Down
+                        if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
+                    {
                         if !self.history_next() {
                             self.scroll = self.scroll.saturating_sub(1);
                         }
                         None
                     }
-                    KeyCode::Char(c) => {
+                    KeyCode::Char(c)
+                        if !k.modifiers.contains(KeyModifiers::CONTROL)
+                            && !k.modifiers.contains(KeyModifiers::ALT) =>
+                    {
                         self.insert_char_at(c);
                         self.scroll = 0;
                         None
@@ -947,6 +971,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn key(c: char) -> TermEvent {
         TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
@@ -1101,6 +1126,32 @@ mod tests {
             dialog::DialogOutcome::Answered { response, .. } => assert_eq!(response["cancelled"], json!(true)),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn wp606_rebind_changes_tui_behavior() {
+        let user: keybindings::KeybindingsConfig = BTreeMap::from([
+            ("tui.input.newLine".to_string(), vec!["ctrl+m".to_string()]),
+        ]);
+        let kb = keybindings::KeybindingManager::new(&user).unwrap();
+        let mut app = TuiApp::with_kb(kb, "m", "cwd", "s");
+        type_str(&mut app, "hi");
+        // The rebind: ctrl+m now inserts a newline.
+        app.handle_key(key_code(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert!(app.input.contains('\n'), "{:?}", app.input);
+        // The old default no longer binds: shift+enter is now inert (the
+        // user override replaced the default key set).
+        let action = app.handle_key(key_code(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(action.is_none(), "{action:?}");
+        type_str(&mut app, "there");
+        let action = app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(is_submit(action.clone(), "hi\nthere"), "{action:?}");
+        assert_eq!(app.input, "");
+        // Unbound actions (default empty) stay inert.
+        let mut app = TuiApp::new("m", "cwd", "s");
+        type_str(&mut app, "x");
+        app.handle_key(key_code(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(app.input, "x", "ctrl+up is previousPrompt, not history, in v0");
     }
 
     fn is_submit(action: Option<TuiAction>, text: &str) -> bool {
