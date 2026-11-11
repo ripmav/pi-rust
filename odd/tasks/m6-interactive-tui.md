@@ -54,7 +54,7 @@ instruction 2026-11-11).
 | T3 | S4 | 603 | #49 | inline (TDD) | feat(tui) on feat/wp-603-streaming-display; PR #60 (stack #59) |
 | T4 | S5 | 604 | #50 | inline (TDD) | dce93b3/b7a850e/ec37517 on feat/wp-604-human-dialogs; PR #61 (stack #59) |
 | T5 | S6 | 605 | #51 | inline (TDD) | bf54d59/2781ec3 on feat/wp-605-editor-pane; PR #62 (stack #59) |
-| T6 | S7 | 606 | — | subagent or inline | — |
+| T6 | S7 | 606 | #52 | inline (TDD) | 0110479/d4488b2 on feat/wp-606-keybindings; PR #63 (stack #59) |
 | T7 | S8 | 607 | — | subagent or inline | — |
 | T8 | S9 | 608 | — | subagent or inline | — |
 | T9 | S10 | 609 | — | subagent or inline | — |
@@ -109,3 +109,16 @@ instruction 2026-11-11).
   undo/yank/selection (WP-606+ territory). Paste tail-join off-by-one
   fixed (inserted indices are l+1..l+len, last = l+len). Suite: 106
   in-crate + 19 e2e + 2 PTY; smoke 42/42.
+
+- L9: WP-606 delivered: T6 done, PR #63 (base feat/wp-605-editor-pane,
+  label type:feature, closes #52), stack #59 = [57, 58, 60, 61, 62, 63].
+  Upstream schema + golden defaults (90 actions: TUI 47 + APP 43,
+  linux/non-WSL values), keybindings.json at the agent dir (upstream
+  path) with legacy-name migration, manager semantics per upstream
+  (user replaces defaults, empty list unbinds, conflicts user-only,
+  invalid -> error listing valid actions). TUI dispatch manager-driven
+  for the wired actions. Root causes: shift is part of the exact
+  modifier state (a missing shift compare made every Enter match
+  shift+enter); newLine is a general key check (ctrl+m / ctrl+j are
+  not Enter). v0: picker/theme actions resolve but are unwired (their
+  WPs). Suite: 115 in-crate + 19 e2e + 2 PTY; smoke 42/42.
