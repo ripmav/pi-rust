@@ -30,38 +30,58 @@ type Ack = Option<tokio::sync::oneshot::Sender<()>>;
 
 #[derive(Clone)]
 pub struct EventLog {
-    tx: mpsc::UnboundedSender<(Value, Ack)>,
+    tx: Option<mpsc::UnboundedSender<(Value, Ack)>>,
+    sub: tokio::sync::broadcast::Sender<Value>,
 }
 
 impl EventLog {
-    /// Machine-readable NDJSON event log on stdout, one line per event.
-    pub fn start() -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
-            while let Some((v, ack)) = rx.recv().await {
-                let _ = out.write_all(format!("{}\n", v.to_string().trim_end()).as_bytes()).await;
-                let _ = out.flush().await;
-                if let Some(a) = ack {
-                    let _ = a.send(());
+    /// `headless` = NDJSON on stdout (the core output contract for
+    /// --scenario/--prompt/--list-sessions runs); the TUI renders in-process
+    /// instead and passes `false`.
+    pub fn start(headless: bool) -> Self {
+        let (sub, _) = tokio::sync::broadcast::channel(1024);
+        let tx = if headless {
+            let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
+                while let Some((v, ack)) = rx.recv().await {
+                    let _ = out.write_all(format!("{}\n", v.to_string().trim_end()).as_bytes()).await;
+                    let _ = out.flush().await;
+                    if let Some(a) = ack {
+                        let _ = a.send(());
+                    }
                 }
-            }
-        });
-        Self { tx }
+            });
+            Some(tx)
+        } else {
+            None
+        };
+        Self { tx, sub }
+    }
+
+    /// Subscribe to the in-process event stream (TUI).
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.sub.subscribe()
     }
 
     pub fn emit(&self, v: Value) {
-        let _ = self.tx.send((v, None));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send((v.clone(), None));
+        }
+        let _ = self.sub.send(v);
     }
 
-    /// Emits and waits until the line is written and flushed (the final
-    /// transcript line must reach stdout before the core exits).
+    /// Emits and (headless) waits until the line is written and flushed (the
+    /// final transcript line must reach stdout before the core exits).
     pub async fn emit_final(&self, v: Value) {
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        if self.tx.send((v, Some(ack_tx))).is_ok() {
-            let _ = ack_rx.await;
+        if let Some(tx) = &self.tx {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            if tx.send((v.clone(), Some(ack_tx))).is_ok() {
+                let _ = ack_rx.await;
+            }
         }
+        let _ = self.sub.send(v);
     }
 
     /// One line per decision event: name + request + response.
@@ -107,7 +127,7 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
     let data = match resp {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => r.get("data").cloned().unwrap_or(Value::Null),
         Decision::Response(r) => {
-            eprintln!("[core] {name} decision error: {}", r.get("error").and_then(Value::as_str).unwrap_or("?"));
+            crate::corelog::line(&format!("[core] {name} decision error: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")));
             fallback.clone()
         }
         Decision::Unavailable => fallback.clone(),
@@ -128,23 +148,25 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     .iter().filter_map(Value::as_str).map(str::to_string).collect();
                 ctx.events.lock().unwrap().extend(names.iter().cloned());
                 ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
-                eprintln!("[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
+                crate::corelog::line(&format!(
+                    "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
                     ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-                    ctx.ext_tools.lock().unwrap().len());
+                    ctx.ext_tools.lock().unwrap().len()
+                ));
                 if let Some(r) = ctx.ready.lock().unwrap().take() {
                     let _ = r.send(ev);
                 }
             }
             "extension_ui_request" => ui_default(&ctx, &ev),
             "extension_error" => {
-                eprintln!("[core] extension_error: {ev}");
+                crate::corelog::line(&format!("[core] extension_error: {ev}"));
                 ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
                     "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
             }
             "session_info_changed" => {
                 let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
                 ctx.session.set_name(name.clone());
-                eprintln!("[core] session name: {name:?}");
+                crate::corelog::line(&format!("[core] session name: {name:?}"));
             }
             "session_append_entry" => {
                 if let Some(entry) = ev.get("entry") {
@@ -153,7 +175,7 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
             }
             "user_message" => {
                 let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-                eprintln!("[core] extension user_message: {text}");
+                crate::corelog::line(&format!("[core] extension user_message: {text}"));
                 // Steer for v0 = append to the same queue (drained in order).
                 let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
             }
@@ -209,7 +231,7 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 }
             }
             "tool_call_request" => nested_tool(&ctx, &ev).await,
-            other => eprintln!("[core] ignoring unknown sidecar event: {other}"),
+            other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
         }
     }
 }
@@ -223,7 +245,7 @@ fn ui_default(ctx: &Core, ev: &Value) {
         return;
     };
     let title = ev.get("title").and_then(Value::as_str).unwrap_or_default();
-    eprintln!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)");
+    crate::corelog::line(&format!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)"));
     let resp = if method == "confirm" {
         json!({"type":"extension_ui_response","id":id,"confirmed":false})
     } else if matches!(method, "select" | "input" | "editor") {
@@ -370,7 +392,7 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
                 index += 1;
                 ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
                 if let Err(msg) = run_agent(&ctx, &u).await {
-                    eprintln!("[core] agent run failed: {msg}");
+                    crate::corelog::line(&format!("[core] agent run failed: {msg}"));
                     *ctx.fail.lock().unwrap() = Some(msg);
                     break; // remaining queued items are dropped (v0)
                 }
@@ -392,8 +414,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let fake_driver: Option<Box<dyn ModelDriver>> = match ctx.provider.lock().unwrap().as_ref() {
         Some(_) => None,
         None => {
-            if u.steps.is_empty() && u.source == "cli" {
-                // Prompt mode with the fake driver: deterministic echo turn.
+            if u.steps.is_empty() {
+                // No scripted model: deterministic echo turn (prompt runs and
+                // TUI messages alike; the fake driver is a test double).
                 Some(Box::new(FakeDriver::echo_mode()))
             } else {
                 Some(Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?))
@@ -408,7 +431,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         let data = decision_data(ctx, ctx.client.request("input", json!({"event":event.clone()})).await, "input", &event, &json!({"action":"continue"}));
         match data.get("action").and_then(Value::as_str) {
             Some("handled") => {
-                eprintln!("[core] input handled by extension; no agent turn");
+                crate::corelog::line(&format!("[core] input handled by extension; no agent turn"));
                 return Ok(());
             }
             Some("transform") => {

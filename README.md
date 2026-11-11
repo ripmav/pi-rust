@@ -135,6 +135,17 @@ binary), `PI_CODING_AGENT_DIR` (agent dir override, upstream name). The
 sidecar is found by walking up from the cwd, then from the executable's
 directory.
 
+### Interactive TUI (M6, WP-601)
+
+Run `pi-rust` without `--scenario`/`--prompt`/`--list-sessions` on a TTY to
+get the interactive terminal UI (ratatui + crossterm): a transcript pane,
+a one-line input, and a status bar (model, cwd, session). Type a message
+and press Enter to send it; `ctrl+d` (empty editor) or `ctrl+c` twice
+exits (upstream key semantics; rebindable in WP-606). In TUI mode the
+sidecar's stderr and the core's own diagnostic lines go to
+`<agentDir>/tui-stderr.log` so they cannot corrupt the screen. The headless
+NDJSON-on-stdout contract is unchanged for scenario/prompt runs.
+
 ### Prompt templates (M3)
 
 `<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on
