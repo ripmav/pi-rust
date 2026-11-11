@@ -445,11 +445,25 @@ pub async fn run() -> Result<i32> {
     // until the user quits (Item::End). Non-interactive: seed the scripted
     // runs and end immediately.
     if tui_mode {
-        let mut app = crate::tui::TuiApp::new(
+        // WP-606: upstream keybinding schema + <agentDir>/keybindings.json.
+        // An invalid file is logged (with the valid actions) and the TUI
+        // starts on the defaults with the error in the status bar.
+        let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
+            Ok(kb) => (kb, None),
+            Err(e) => {
+                crate::corelog::line(&format!("[core] keybindings: {e}"));
+                (crate::tui::keybindings::KeybindingManager::default(), Some(e))
+            }
+        };
+        let mut app = crate::tui::TuiApp::with_kb(
+            kb,
             model_label,
             cwd.display().to_string(),
             session.id.clone(),
         );
+        if let Some(e) = kb_error {
+            app.last_error = Some(format!("keybindings: {e}"));
+        }
         let submit_tx = msg_tx.clone();
         let end_tx = msg_tx.clone();
         let dialog_client = client.clone();
