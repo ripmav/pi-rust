@@ -49,7 +49,7 @@ instruction 2026-11-11).
 
 | ID | Spec | WP | Issue | Route | Commit/PR |
 |----|------|----|-------|-------|-----------|
-| T1 | S2 | 601 | — | parent (architectural) | — |
+| T1 | S2 | 601 | #47 | parent (architectural) | commits 22e14e5/e01b167/93226b8; PR (base main) |
 | T2 | S3 | 602 | — | subagent or inline | — |
 | T3 | S4 | 603 | — | subagent or inline | — |
 | T4 | S5 | 604 | — | subagent or inline | — |
@@ -72,3 +72,11 @@ instruction 2026-11-11).
   buffer snapshots) for all TUI tests; the crossterm adapter stays thin.
   This keeps the acceptance criteria (key-sequence tests, integration smoke)
   deterministic without PTY fragility.
+- L5 (WP-601 root causes, for later WPs): (1) the crossterm stdin reader
+  thread must get a stop flag — joining it without one hangs shutdown, since
+  it only notices the dropped channel on the next key event (which never
+  comes on quit); (2) core `[core]` eprintln lines and the sidecar stderr
+  must route to `<agentDir>/tui-stderr.log` in TUI mode — stderr text on the
+  pty survives ratatui's diff rendering (unchanged cells are not rewritten)
+  and corrupts the transcript rows; (3) no idle redraw tick: redraws are
+  event-driven (the pending indicator changes only on agent_start/agent_end).
