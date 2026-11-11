@@ -14,6 +14,8 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{self, Event as TermEvent};
 use crossterm::execute;
+use crossterm::event::DisableBracketedPaste;
+use crossterm::event::EnableBracketedPaste;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -68,7 +70,7 @@ where
 
     let mut backend = CrosstermBackend::new(std::io::stdout());
     terminal::enable_raw_mode().context("enabling raw mode")?;
-    execute!(backend, EnterAlternateScreen)?;
+    execute!(backend, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut term = Terminal::new(backend).context("init terminal")?;
     app.set_size(term.size().map(|s| (s.width, s.height)).unwrap_or((80, 24)).0,
                  term.size().map(|s| (s.width, s.height)).unwrap_or((80, 24)).1);
@@ -103,8 +105,11 @@ where
                         // WP-604: an open dialog owns the keys.
                         if let Some(outcome) = app.handle_dialog_key(&e) {
                             on_dialog(outcome);
-                        } else if let Some(text) = app.handle_key(e) {
-                            on_submit(&text);
+                        } else if let Some(action) = app.handle_key(e) {
+                            match action {
+                                super::TuiAction::Submit(text) => on_submit(&text),
+                                super::TuiAction::EditorClosed(outcome) => on_dialog(outcome),
+                            }
                         }
                         dirty = true;
                         if app.exit {
@@ -117,7 +122,13 @@ where
                 // WP-604: dialog request from the core.
                 req = ui.recv() => match req {
                     Some(v) => {
-                        if app.open_dialog(&v) {
+                        // WP-605: the `editor` dialog reuses the editor pane.
+                        let opened = if v.get("method").and_then(serde_json::Value::as_str) == Some("editor") {
+                            app.open_editor_session(&v)
+                        } else {
+                            app.open_dialog(&v)
+                        };
+                        if opened {
                             dirty = true;
                         }
                     }
@@ -151,7 +162,11 @@ where
     // the join returns within one poll interval instead of hanging.
     reader_stop.store(true, Ordering::Relaxed);
     let _ = term.show_cursor();
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        term.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     let _ = terminal::disable_raw_mode();
     let _ = reader.join();
     result

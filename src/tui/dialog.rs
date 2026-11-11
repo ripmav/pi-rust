@@ -41,7 +41,7 @@ pub enum Dialog {
 /// What the terminal loop reports for a closed dialog: the bridge response
 /// (answered) or a no-response timeout close (the sidecar already resolved
 /// with its default).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DialogOutcome {
     Answered {
         id: String,
