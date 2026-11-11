@@ -116,6 +116,11 @@ pub struct Core {
     /// Cumulative token usage / cost for --print-usage (WP-407).
     pub usage_total: Arc<Mutex<crate::model::Usage>>,
     pub cost_total: Arc<Mutex<f64>>,
+    /// TUI mode (WP-604): blocking ui dialogs are forwarded to the TUI
+    /// instead of answering with the upstream defaults.
+    pub tui: bool,
+    /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
+    pub ui_tx: mpsc::UnboundedSender<Value>,
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -163,7 +168,36 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     let _ = r.send(ev);
                 }
             }
-            "extension_ui_request" => ui_default(&ctx, &ev),
+            "extension_ui_request" => {
+                let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
+                if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
+                    // WP-604: the TUI renders the dialog and answers it over
+                    // the unchanged bridge protocol.
+                    if ctx.ui_tx.send(ev.clone()).is_err() {
+                        ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
+                    }
+                } else if ctx.tui {
+                    // F&F UI channel: display-only, the TUI renders it.
+                    let kind = match method {
+                        "notify" => "notify",
+                        "setStatus" => "set_status",
+                        "setTitle" => "set_title",
+                        "set_editor_text" => "set_editor_text",
+                        _ => "extension_ui_request",
+                    };
+                    ctx.log.emit(json!({"kind":kind,
+                        "id":ev.get("id").cloned().unwrap_or(Value::Null),
+                        "method":method,
+                        "title":ev.get("title").cloned().unwrap_or(Value::Null),
+                        "message":ev.get("message").cloned().unwrap_or(Value::Null),
+                        "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
+                        "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
+                        "text":ev.get("text").cloned().unwrap_or(Value::Null),
+                        "response":Value::Null}));
+                } else {
+                    ui_default(&ctx, &ev);
+                }
+            }
             "extension_error" => {
                 crate::corelog::line(&format!("[core] extension_error: {ev}"));
                 ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
@@ -242,10 +276,12 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
     }
 }
 
-/// v0 has no human UI: blocking dialogs are answered with the upstream
-/// defaults immediately (select/input/editor → cancelled, confirm → false) and
-/// logged to stderr; F&F ui requests (notify, setStatus, ...) need no reply.
-/// Every ui request is logged to the event log with its v0 default answer.
+/// Headless default-answers path: blocking dialogs are answered with the
+/// upstream defaults immediately (select/input/editor → cancelled, confirm →
+/// false) and logged; F&F ui requests (notify, setStatus, ...) need no
+/// reply. Every ui request is logged to the event log with its answer.
+/// TUI mode (WP-604) does not use this path for dialogs: the TUI renders
+/// them and answers with the user's choice.
 fn ui_default(ctx: &Core, ev: &Value) {
     let (Some(id), Some(method)) = (ev.get("id").and_then(Value::as_str), ev.get("method").and_then(Value::as_str)) else {
         return;

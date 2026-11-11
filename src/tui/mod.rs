@@ -11,6 +11,7 @@ use ratatui::widgets::{Paragraph, Wrap, Widget};
 use ratatui::buffer::Buffer;
 use serde_json::Value;
 
+pub mod dialog;
 pub mod markdown;
 pub mod terminal;
 
@@ -31,6 +32,12 @@ pub struct TuiApp {
     pub model: String,
     pub cwd: String,
     pub session: String,
+    /// Window title set by an extension (`setTitle`); shown in the status bar.
+    pub title: Option<String>,
+    /// Status text set by an extension (`setStatus`); shown in the status bar.
+    pub status_text: Option<String>,
+    /// Open dialog (WP-604); keys are routed to it until it closes.
+    pub dialog: Option<dialog::Dialog>,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
     pub scroll: usize,
     pub size: (u16, u16),
@@ -47,6 +54,9 @@ impl TuiApp {
             model: model.into(),
             cwd: cwd.into(),
             session: session.into(),
+            title: None,
+            status_text: None,
+            dialog: None,
             scroll: 0,
             size: (80, 24),
             exit: false,
@@ -60,8 +70,42 @@ impl TuiApp {
         }
     }
 
+    /// Open a dialog from a bridge `extension_ui_request` (dialog subset).
+    pub fn open_dialog(&mut self, req: &Value) -> bool {
+        match dialog::Dialog::from_request(req) {
+            Some(d) => {
+                self.dialog = Some(d);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Route one key to the open dialog. Returns the outcome when the dialog
+    /// closes; `None` while it stays open (key consumed) or no dialog is open.
+    pub fn handle_dialog_key(&mut self, ev: &TermEvent) -> Option<dialog::DialogOutcome> {
+        let d = self.dialog.as_mut()?;
+        let outcome = d.handle_key(ev)?;
+        self.dialog = None;
+        Some(outcome)
+    }
+
+    /// Close a dialog whose sidecar-side timeout has expired (no response —
+    /// the sidecar already resolved with its upstream default).
+    pub fn take_expired_dialog(&mut self, now: std::time::Instant) -> Option<dialog::DialogOutcome> {
+        let d = self.dialog.as_ref().filter(|d| d.expired(now))?;
+        let outcome = d.timed_out();
+        self.dialog = None;
+        Some(outcome)
+    }
+
     /// Handle one terminal event. Returns the submitted text on Enter.
+    /// While a dialog is open it owns the keys (the terminal loop routes
+    /// them via `handle_dialog_key` first; this guard covers direct calls).
     pub fn handle_key(&mut self, ev: TermEvent) -> Option<String> {
+        if self.dialog.is_some() {
+            return None;
+        }
         match ev {
             TermEvent::Resize(w, h) => {
                 self.set_size(w, h);
@@ -197,7 +241,28 @@ impl TuiApp {
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
-            _ => {} // decision / extension_ui_request: WP-604 dialogs.
+            // WP-604: fire-and-forget UI channel (dialogs arrive over the ui
+            // channel, not the broadcast).
+            Some("notify") => {
+                let message = ev.get("message").and_then(Value::as_str).unwrap_or_default();
+                self.transcript.push(Msg {
+                    role: "system",
+                    text: format!("ℹ {message}"),
+                });
+                self.scroll = 0;
+            }
+            Some("set_status") => {
+                self.status_text = ev.get("statusText").and_then(Value::as_str).map(str::to_string);
+            }
+            Some("set_title") => {
+                self.title = ev.get("title").and_then(Value::as_str).map(str::to_string);
+            }
+            Some("set_editor_text") => {
+                if let Some(t) = ev.get("text").and_then(Value::as_str) {
+                    self.input = t.to_string();
+                }
+            }
+            _ => {} // decision: handled by the core, not the display.
         }
     }
 
@@ -219,31 +284,44 @@ impl TuiApp {
 
         // Transcript: role-marked, word-wrapped, scrolled from the bottom.
         // user/assistant messages render as markdown (WP-602); tool/system
-        // lines stay plain.
+        // lines stay plain. While a dialog is open it occupies this area
+        // (WP-604).
         let mut lines: Vec<Line> = Vec::new();
-        for m in &self.transcript {
-            let (prefix, style): (&str, Style) = match m.role {
-                "user" => ("▸ ", Style::default().add_modifier(Modifier::BOLD)),
-                "assistant" => ("", Style::default()),
-                "tool" => ("⚙ ", Style::default().add_modifier(Modifier::DIM)),
-                _ => ("· ", Style::default().add_modifier(Modifier::DIM)),
-            };
-            let body: Vec<Line> = if matches!(m.role, "user" | "assistant") {
-                markdown::md_lines(&m.text)
-            } else {
-                m.text.split('\n').map(markdown::plain_line).collect()
-            };
-            for (i, bl) in body.into_iter().enumerate() {
-                if i == 0 && !prefix.is_empty() {
-                    let mut spans = vec![Span::styled(prefix, style.clone())];
-                    spans.extend(bl.spans);
-                    lines.push(Line::from(spans));
+        if let Some(d) = &self.dialog {
+            lines.push(Line::from(Span::raw("")));
+            lines.extend(d.render_lines());
+        } else {
+            for m in &self.transcript {
+                let (prefix, style): (&str, Style) = match m.role {
+                    "user" => ("▸ ", Style::default().add_modifier(Modifier::BOLD)),
+                    "assistant" => ("", Style::default()),
+                    "tool" => ("⚙ ", Style::default().add_modifier(Modifier::DIM)),
+                    _ => ("· ", Style::default().add_modifier(Modifier::DIM)),
+                };
+                let body: Vec<Line> = if matches!(m.role, "user" | "assistant") {
+                    markdown::md_lines(&m.text)
                 } else {
-                    lines.push(bl);
+                    m.text.split('\n').map(markdown::plain_line).collect()
+                };
+                for (i, bl) in body.into_iter().enumerate() {
+                    if i == 0 && !prefix.is_empty() {
+                        let mut spans = vec![Span::styled(prefix, style.clone())];
+                        spans.extend(bl.spans);
+                        lines.push(Line::from(spans));
+                    } else {
+                        lines.push(bl);
+                    }
                 }
             }
         }
-        if self.pending && lines.last().and_then(|l| l.spans.last()).map(|s| s.content.as_ref().is_empty()).unwrap_or(true) {
+        if self.dialog.is_none()
+            && self.pending
+            && lines
+                .last()
+                .and_then(|l| l.spans.last())
+                .map(|s| s.content.as_ref().is_empty())
+                .unwrap_or(true)
+        {
             lines.push(Line::from(Span::styled("● ", Style::default().add_modifier(Modifier::DIM))));
         }
         let total = lines.len();
@@ -272,6 +350,12 @@ impl TuiApp {
         // truncated, one row.
         if status_h > 0 {
             let mut segs: Vec<String> = vec![self.model.clone(), self.cwd.clone(), self.session.clone()];
+            if let Some(t) = &self.title {
+                segs.push(t.clone());
+            }
+            if let Some(st) = &self.status_text {
+                segs.push(st.clone());
+            }
             if self.pending {
                 segs.push("● working".into());
             }
@@ -312,12 +396,85 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::json;
 
     fn key(c: char) -> TermEvent {
         TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
+    fn key_code(code: KeyCode) -> TermEvent {
+        TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn dialog_owns_keys_until_it_closes() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        let req = json!({"id":"d1","method":"select","title":"Pick","options":["a","b"],"timeout":60000});
+        assert!(app.open_dialog(&req));
+        // Typed characters do not leak into the editor.
+        let _ = app.handle_key(key('x'));
+        assert_eq!(app.input, "");
+        // The dialog gets the keys: down + enter answers "b".
+        let _ = app.handle_dialog_key(&key_code(KeyCode::Down));
+        let Some(outcome) = app.handle_dialog_key(&key_code(KeyCode::Enter)) else {
+            panic!("expected dialog answer");
+        };
+        assert!(app.dialog.is_none(), "dialog must close after answering");
+        match outcome {
+            dialog::DialogOutcome::Answered { response, .. } => {
+                assert_eq!(response["value"], json!("b"));
+                assert_eq!(response["id"], json!("d1"));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        // After the dialog, editor keys work again.
+        let _ = app.handle_key(key('h'));
+        assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn expired_dialog_closes_without_response() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        let req = json!({"id":"d2","method":"confirm","title":"t","message":"m","timeout":1});
+        app.open_dialog(&req);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let outcome = app.take_expired_dialog(std::time::Instant::now()).expect("expired");
+        assert!(app.dialog.is_none());
+        match outcome {
+            dialog::DialogOutcome::TimedOut { id, method, .. } => {
+                assert_eq!(id, "d2");
+                assert_eq!(method, "confirm");
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ff_events_render_in_tui() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app.apply_event(&json!({"kind":"notify","message":"hello"}));
+        assert!(app.transcript.last().unwrap().text.contains("hello"));
+        app.apply_event(&json!({"kind":"set_status","statusKey":"k","statusText":"busy"}));
+        assert_eq!(app.status_text.as_deref(), Some("busy"));
+        app.apply_event(&json!({"kind":"set_title","title":"MyTitle"}));
+        assert_eq!(app.title.as_deref(), Some("MyTitle"));
+        app.apply_event(&json!({"kind":"set_editor_text","text":"preset"}));
+        assert_eq!(app.input, "preset");
+        let s = app.render_string();
+        assert!(s.contains("MyTitle"), "title in status bar:\n{s}");
+        assert!(s.contains("busy"), "status text in status bar:\n{s}");
+    }
+
+    #[test]
+    fn dialog_renders_in_transcript_area() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app.open_dialog(&json!({"id":"d3","method":"select","title":"PickOne","options":["alpha","beta"],"timeout":60000}));
+        let s = app.render_string();
+        assert!(s.contains("PickOne"), "{s}");
+        assert!(s.contains("alpha"), "{s}");
+        assert!(s.contains('▸'), "cursor marker: {s}");
+    }
+
     fn enter() -> TermEvent {
         TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
     }
