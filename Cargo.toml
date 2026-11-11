@@ -17,3 +17,5 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "v7"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 futures-util = "0.3"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
