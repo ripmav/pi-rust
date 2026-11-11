@@ -31,7 +31,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 
 | ID | Spec | WP | Issue | Route | Commit/PR |
 |----|------|----|-------|-------|-----------|
-| T1 | S2 | 501 | — | subagent writer + parent verify | — |
+| T1 | S2 | 501 | #34 | subagent writer + parent verify | `f46d1f9`+docs, PR 1 |
 | T2 | S3 | 502 | — | subagent writer + parent verify | — |
 | T3 | S4 | 503 | — | subagent writer + parent verify | — |
 | T4 | S5 | 504 | — | subagent writer + parent verify | — |
@@ -45,5 +45,12 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 - L3: M4 delivered (PR #29 merged as 1fca5ce); dependency repairs #31/#32/#33
   merged; main green (3feff03), suite 56 in-crate + 19 e2e + 42 smoke.
 - L4: Execution order by dependency: 501 → 502 → 503 → 504 → 505 → 506.
+- L5 (T1/WP-501): subagent delivered read-tool parity (18 contract tests,
+  RED→GREEN, full suite 74 in-crate + 19 e2e green). Slice boundary: the
+  read implementation + its 18 tests form one cohesive work unit (584
+  authored lines in src/tools.rs, single file) — recorded per house
+  delivery rule instead of splitting hunks of one file. Simplifications
+  pinned in code comments: whole-file buffer read (upstream's own tests
+  define the reference), M4 magic-byte image set, no resize pipeline.
   WP-505's TUI confirm path belongs to WP-604 (M6); M5 delivers the
   default-allow + extension-gate contract.
