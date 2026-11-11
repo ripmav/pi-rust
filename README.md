@@ -139,9 +139,13 @@ directory.
 
 Run `pi-rust` without `--scenario`/`--prompt`/`--list-sessions` on a TTY to
 get the interactive terminal UI (ratatui + crossterm): a transcript pane,
-a one-line input, and a status bar (model, cwd, session). Type a message
-and press Enter to send it; `ctrl+d` (empty editor) or `ctrl+c` twice
-exits (upstream key semantics; rebindable in WP-606). In TUI mode the
+a multi-line editor pane (bracketed paste, history with up/down, word-wise
+deleting, cursor movement), and a status bar (model, cwd, session, titles
+set by extensions). Type a message and press Enter to send it (shift+Enter
+or ctrl+j inserts a newline; `ctrl+w`/`alt+Backspace` delete a word
+backward, `alt+d` forward, `ctrl+u`/`ctrl+k` to line start/end — upstream
+default bindings, rebindable in WP-606). `ctrl+d` (empty editor) or
+`ctrl+c` twice exits (upstream key semantics). In TUI mode the
 sidecar's stderr and the core's own diagnostic lines go to
 `<agentDir>/tui-stderr.log` so they cannot corrupt the screen. The headless
 NDJSON-on-stdout contract is unchanged for scenario/prompt runs.
@@ -158,6 +162,8 @@ type + Enter, Esc cancels. Timeouts keep the sidecar-side semantics
 Fire-and-forget UI methods render too: `notify` becomes a transcript line,
 `setStatus`/`setTitle` show in the status bar, `set_editor_text` fills the
 input. Headless/no-TTY runs keep answering with the upstream defaults.
+The `editor` dialog reuses the editor pane itself: the prefilled text opens
+in the pane, Enter answers with the pane text, Esc cancels (WP-605).
 
 ### Prompt templates (M3)
 
