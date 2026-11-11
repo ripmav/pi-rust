@@ -50,8 +50,8 @@ instruction 2026-11-11).
 | ID | Spec | WP | Issue | Route | Commit/PR |
 |----|------|----|-------|-------|-----------|
 | T1 | S2 | 601 | #47 | parent (architectural) | commits 22e14e5/e01b167/93226b8; PR (base main) |
-| T2 | S3 | 602 | — | subagent or inline | — |
-| T3 | S4 | 603 | — | subagent or inline | — |
+| T2 | S3 | 602 | #48 | inline (TDD) | feat(tui) on feat/wp-602-markdown-rendering; PR #58 (stack #59) |
+| T3 | S4 | 603 | #49 | inline (TDD) | feat(tui) on feat/wp-603-streaming-display; PR #60 (stack #59) |
 | T4 | S5 | 604 | — | subagent or inline | — |
 | T5 | S6 | 605 | — | subagent or inline | — |
 | T6 | S7 | 606 | — | subagent or inline | — |
@@ -72,6 +72,10 @@ instruction 2026-11-11).
   buffer snapshots) for all TUI tests; the crossterm adapter stays thin.
   This keeps the acceptance criteria (key-sequence tests, integration smoke)
   deterministic without PTY fragility.
+- L6 (slice boundary): M6 delivery strategy = one GitHub PR per WP, so each
+  WP commit chain is one review slice (house-rule slice unit). The cumulative
+  since-main line count (incl. the ratatui/crossterm Cargo.lock bump in the
+  WP-601 PR) exceeds one 400-line slice by design; slices are the PRs.
 - L5 (WP-601 root causes, for later WPs): (1) the crossterm stdin reader
   thread must get a stop flag — joining it without one hangs shutdown, since
   it only notices the dropped channel on the next key event (which never
