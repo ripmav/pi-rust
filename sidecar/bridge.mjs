@@ -150,7 +150,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		extensions = loaded.extensions;
 		loaded.errors.forEach((e) => log(`extension load error ${e.path}: ${e.error}`));
 		session = createSessionView(cwd);
-		dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs, sendRequest });
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
 
 		const contextActions = {
@@ -184,7 +183,19 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		};
 		runner.bindCore(createBridgeActions({ output, sendRequest, session, state }), contextActions, providerActions);
 		runner.bindCommandContext();
-		runner.setUIContext(dialog.ui, "rpc");
+		// WP-505: dialog wiring only for clients that advertise UI methods. Headless
+		// clients (no ui methods) keep the runner's noOp UI context, so hasUI() is
+		// false and extensions take their upstream no-UI defaults (e.g.
+		// permission-gate blocks dangerous commands without a dialog). Initialize the
+		// shared theme for the noOp context: upstream only does this in TUI startup,
+		// but headless-safe extensions (plan-mode) call theme helpers inside commands,
+		// and the M1 headless-safe contract keeps them working.
+		if (capabilities.ui.length > 0) {
+			dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs, sendRequest });
+			runner.setUIContext(dialog.ui, "rpc");
+		} else {
+			ca.initTheme();
+		}
 		runner.onError((err) => output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error }));
 
 		// extension.tools -> wrapper.ts -> tool-definition-wrapper.ts (keeps TypeBox schemas)
