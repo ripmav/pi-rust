@@ -232,6 +232,8 @@ fn node_fs_error(e: &std::io::Error, op: &str, path: &Path) -> String {
 	match e.kind() {
 		ErrorKind::NotFound => format!("ENOENT: no such file or directory, {op} '{}'", path.display()),
 		ErrorKind::PermissionDenied => format!("EACCES: permission denied, {op} '{}'", path.display()),
+		// Reachable from `write` (target is a directory); read() handles its EISDIR explicitly.
+		ErrorKind::IsADirectory => format!("EISDIR: illegal operation on a directory, {op} '{}'", path.display()),
 		_ => e.to_string(),
 	}
 }
@@ -370,6 +372,10 @@ mod tests {
 
 	async fn read_tool(input: Value) -> ExecResult {
 		execute("read", &input).await
+	}
+
+	async fn write_tool(input: Value) -> ExecResult {
+		execute("write", &input).await
 	}
 
 	fn text(r: &ExecResult) -> String {
@@ -648,23 +654,125 @@ mod tests {
 		assert_eq!(text(&r), "\u{FEFF}alpha\r\nbeta\r\n");
 		std::fs::remove_dir_all(&dir).unwrap();
 	}
+
+	#[tokio::test]
+	async fn write_creates_file_exact_upstream_result() {
+		let dir = tmpdir();
+		let p = dir.join("new.txt");
+		let r = write_tool(json!({"path": p.display().to_string(), "content": "hello"})).await;
+		assert!(!r.is_error);
+		// Upstream (write.ts): `Successfully wrote to ${path}` — the raw input path, and
+		// `details: undefined` ({} here, the codebase convention for an empty details object).
+		assert_eq!(text(&r), format!("Successfully wrote to {}", p.display()));
+		assert_eq!(r.details, json!({}));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn write_overwrites_existing_file() {
+		let dir = tmpdir();
+		let p = dir.join("old.txt");
+		std::fs::write(&p, "old content").unwrap();
+		let r = write_tool(json!({"path": p.display().to_string(), "content": "new"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully wrote to {}", p.display()));
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn write_creates_nested_parent_dirs() {
+		let dir = tmpdir();
+		let p = dir.join("a").join("b").join("c").join("deep.txt");
+		let r = write_tool(json!({"path": p.display().to_string(), "content": "Nested content"})).await;
+		assert!(!r.is_error);
+		assert_eq!(text(&r), format!("Successfully wrote to {}", p.display()));
+		assert!(p.parent().unwrap().is_dir());
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "Nested content");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn write_at_prefix_stripped_input_path_echoed() {
+		let dir = tmpdir();
+		let p = dir.join("at.txt");
+		let raw = format!("@{}", p.display());
+		let r = write_tool(json!({"path": raw.clone(), "content": "x"})).await;
+		assert!(!r.is_error);
+		// The @-prefix is stripped for the filesystem op, but the result echoes the raw input.
+		assert_eq!(text(&r), format!("Successfully wrote to {raw}"));
+		assert!(p.exists());
+		assert_eq!(std::fs::read_to_string(&p).unwrap(), "x");
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn write_to_directory_eisdir_upstream_error() {
+		let dir = tmpdir();
+		let r = write_tool(json!({"path": dir.display().to_string(), "content": "x"})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), format!("EISDIR: illegal operation on a directory, open '{}'", dir.display()));
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn write_read_only_target_eacces_upstream_error() {
+		// root bypasses file permissions; nothing to assert there.
+		let is_root = std::process::Command::new("id").arg("-u")
+			.output()
+			.ok()
+			.is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0");
+		if is_root {
+			return;
+		}
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let dir = tmpdir();
+			let p = dir.join("blocked.txt");
+			std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+			let r = write_tool(json!({"path": p.display().to_string(), "content": "x"})).await;
+			assert!(r.is_error);
+			// Node's writeFile error message (op word "open"), resolved to the absolute path.
+			assert_eq!(text(&r), format!("EACCES: permission denied, open '{}'", p.display()));
+			std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+			std::fs::remove_dir_all(&dir).unwrap();
+		}
+	}
+
+	#[tokio::test]
+	async fn write_missing_fields_preserved_v0_error() {
+		// PRESERVE: the field-validation message predates WP-502 and must not change.
+		let dir = tmpdir();
+		let p = dir.join("fields.txt");
+		let r = write_tool(json!({"path": p.display().to_string()})).await;
+		assert!(r.is_error);
+		assert_eq!(text(&r), "write: needs string fields `path` and `content`");
+		assert!(!p.exists());
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
 }
 
+/// Upstream `write` (write.ts): resolve the path like the read tool, `mkdir` the parent dir
+/// (recursive), `writeFile` the content, and echo the *raw input* path in the success text.
+/// Failures surface as Node-shaped `error.message`s (op words: `mkdir` for the parent dir,
+/// `open` for the file write — Node's writeFile reports under `open`).
 fn write(input: &Value) -> ExecResult {
-    let (Some(path), Some(content)) = (
-        input.get("path").and_then(Value::as_str),
-        input.get("content").and_then(Value::as_str),
-    ) else {
-        return ExecResult::err("write: needs string fields `path` and `content`".into());
-    };
-    let p = std::path::Path::new(path);
-    if let Some(parent) = p.parent() {
-        if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
-            return ExecResult::err(format!("write {path}: cannot create parent dir"));
-        }
-    }
-    match std::fs::write(p, content) {
-        Ok(()) => ExecResult::text(format!("Wrote {} bytes to {path}", content.len())),
-        Err(_) => ExecResult::err(format!("write {path}: write failed")),
-    }
+	let (Some(path), Some(content)) = (
+		input.get("path").and_then(Value::as_str),
+		input.get("content").and_then(Value::as_str),
+	) else {
+		return ExecResult::err("write: needs string fields `path` and `content`".into());
+	};
+	let abs = resolve_read_path(path);
+	if let Some(dir) = abs.parent().filter(|d| !d.as_os_str().is_empty()) {
+		if let Err(e) = std::fs::create_dir_all(dir) {
+			return ExecResult::err(node_fs_error(&e, "mkdir", dir));
+		}
+	}
+	match std::fs::write(&abs, content) {
+		Ok(()) => ExecResult::text(format!("Successfully wrote to {path}")),
+		Err(e) => ExecResult::err(node_fs_error(&e, "open", &abs)),
+	}
 }
