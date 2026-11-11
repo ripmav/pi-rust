@@ -32,7 +32,7 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 | ID | Spec | WP | Issue | Route | Commit/PR |
 |----|------|----|-------|-------|-----------|
 | T1 | S2 | 501 | #34 | subagent writer + parent verify | `f46d1f9`+docs, PR 1 |
-| T2 | S3 | 502 | — | subagent writer + parent verify | — |
+| T2 | S3 | 502 | #35 | subagent writer + parent verify | `7e0f614`, PR 2 |
 | T3 | S4 | 503 | — | subagent writer + parent verify | — |
 | T4 | S5 | 504 | — | subagent writer + parent verify | — |
 | T5 | S6 | 505 | — | subagent writer + parent verify | — |
@@ -45,7 +45,12 @@ one PR in one GitHub stack (user instruction 2026-11-11).
 - L3: M4 delivered (PR #29 merged as 1fca5ce); dependency repairs #31/#32/#33
   merged; main green (3feff03), suite 56 in-crate + 19 e2e + 42 smoke.
 - L4: Execution order by dependency: 501 → 502 → 503 → 504 → 505 → 506.
-- L5 (T1/WP-501): subagent delivered read-tool parity (18 contract tests,
+- L5 (T2/WP-502): subagent delivered write-tool parity (7 unit tests, RED→GREEN,
+  suite 81 in-crate + 19 e2e green). Success string `Successfully wrote to
+  <raw input path>` (upstream quirk pinned); EACCES/EISDIR/mkdir Node-shaped
+  errors; file-mutation queue + abort signals skipped (sequential execution,
+  no abort plumbing in v0). Simplifications pinned in the PR.
+- L6 (T1/WP-501): subagent delivered read-tool parity (18 contract tests,
   RED→GREEN, full suite 74 in-crate + 19 e2e green). Slice boundary: the
   read implementation + its 18 tests form one cohesive work unit (584
   authored lines in src/tools.rs, single file) — recorded per house
