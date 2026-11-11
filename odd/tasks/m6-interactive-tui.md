@@ -52,7 +52,7 @@ instruction 2026-11-11).
 | T1 | S2 | 601 | #47 | parent (architectural) | commits 22e14e5/e01b167/93226b8; PR (base main) |
 | T2 | S3 | 602 | #48 | inline (TDD) | feat(tui) on feat/wp-602-markdown-rendering; PR #58 (stack #59) |
 | T3 | S4 | 603 | #49 | inline (TDD) | feat(tui) on feat/wp-603-streaming-display; PR #60 (stack #59) |
-| T4 | S5 | 604 | — | subagent or inline | — |
+| T4 | S5 | 604 | #50 | inline (TDD) | dce93b3/b7a850e/ec37517 on feat/wp-604-human-dialogs; PR #61 (stack #59) |
 | T5 | S6 | 605 | — | subagent or inline | — |
 | T6 | S7 | 606 | — | subagent or inline | — |
 | T7 | S8 | 607 | — | subagent or inline | — |
@@ -84,3 +84,16 @@ instruction 2026-11-11).
   pty survives ratatui's diff rendering (unchanged cells are not rewritten)
   and corrupts the transcript rows; (3) no idle redraw tick: redraws are
   event-driven (the pending indicator changes only on agent_start/agent_end).
+
+- L7: WP-604 delivered: T4 done, PR #61 (base feat/wp-603-streaming-display,
+  label type:feature, closes #50), stack #59 = [57, 58, 60, 61]. Dialog state
+  machine (src/tui/dialog.rs) + TUI render/key routing; TUI mode forwards
+  dialog requests instead of the default-answers path (headless unchanged);
+  F&F render (notify transcript line, setStatus/setTitle status bar,
+  set_editor_text input). Root cause: --command was awaited before the TUI
+  started, so a command opening a dialog would deadlock its own answer —
+  commands now run on a task after the TUI loop is up (TUI mode only).
+  Fixture registerCommand handler signature is (args, ctx) — first arg is
+  the args string. PTY e2e asserts the full roundtrip (confirm/select/
+  input) + clean exit. Suite: 98 in-crate + 19 e2e + 2 PTY; smoke 42/42.
+  No CI on the repo — local suite, reported honestly.
