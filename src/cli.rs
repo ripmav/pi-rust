@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -208,6 +209,8 @@ pub async fn run() -> Result<i32> {
         (None, None) => {
             if list_sessions {
                 Vec::new() // --list-sessions needs no scenario
+            } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                Vec::new() // interactive TUI (WP-601)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -238,6 +241,11 @@ pub async fn run() -> Result<i32> {
     } else {
         json!({"id":model_id,"provider":provider_name})
     };
+    let model_label = format!(
+        "{}/{}",
+        initial_model.get("provider").and_then(Value::as_str).unwrap_or("?"),
+        initial_model.get("id").and_then(Value::as_str).unwrap_or("?")
+    );
 
     // S8: --image requires an image-capable registry model (openai/anthropic
     // drivers emit the wire parts; other drivers drop images).
@@ -308,16 +316,39 @@ pub async fn run() -> Result<i32> {
     }
     sidecar_args.push("--agent-dir".into());
     sidecar_args.push(agent_dir.to_string_lossy().into());
-    eprintln!("[core] spawning sidecar: {node} {}", sidecar.display());
 
-    let log = EventLog::start();
+    // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
+    let tui_mode = scenario_path.is_none() && prompt.is_none() && !list_sessions;
+
+    // TUI mode owns the terminal: the sidecar's stderr and the core's own
+    // diagnostic lines must not corrupt the screen — both go to a log file
+    // in the agent dir.
+    // shortcut: the sink-setup error line itself stays on stderr (rare, pre-TUI).
+    let sidecar_stderr = if tui_mode {
+        let tui_log = agent_dir.join("tui-stderr.log");
+        match std::fs::File::create(&tui_log) {
+            Ok(f) => {
+                crate::corelog::set_log_file(&tui_log);
+                Stdio::from(f)
+            }
+            Err(e) => {
+                eprintln!("[core] tui stderr log: {e}");
+                Stdio::inherit()
+            }
+        }
+    } else {
+        Stdio::inherit() // sidecar logs pass through to the core's stderr
+    };
+    crate::corelog::line(&format!("[core] spawning sidecar: {node} {}", sidecar.display()));
+
+    let log = EventLog::start(!tui_mode);
     let fail: Arc<Mutex<Option<String>>> = Arc::default();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
-    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd).await?;
+    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
     let (client, events_rx) = BridgeClient::connect(child, tx, rx);
     let client = Arc::new(client);
 
@@ -354,12 +385,12 @@ pub async fn run() -> Result<i32> {
         bail!("sidecar apiVersion != 0");
     }
     for e in ready.get("errors").and_then(Value::as_array).into_iter().flatten() {
-        eprintln!("[core] extension load error: {e}");
+        crate::corelog::line(&format!("[core] extension load error: {e}"));
     }
     client.set_running();
     {
         let ev = ctx.events.lock().unwrap().clone();
-        eprintln!("[core] running: subscribed events {ev:?}");
+        crate::corelog::line(&format!("[core] running: subscribed events {ev:?}"));
         if ev.contains("session_start") {
             client.fire(json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}));
         }
@@ -382,16 +413,48 @@ pub async fn run() -> Result<i32> {
         log.emit(line);
     }
 
-    // Seed the runs: one agent run per user message. Fake mode validates each
-    // model_script up front; provider mode ignores scripts (real completions).
-    for r in &runs {
-        if fake_mode {
-            FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+    // Interactive mode: the TUI owns input and lifetime; the agent loop runs
+    // until the user quits (Item::End). Non-interactive: seed the scripted
+    // runs and end immediately.
+    if tui_mode {
+        let mut app = crate::tui::TuiApp::new(
+            model_label,
+            cwd.display().to_string(),
+            session.id.clone(),
+        );
+        let submit_tx = msg_tx.clone();
+        let end_tx = msg_tx.clone();
+        let result = crate::tui::terminal::run(
+            &mut app,
+            log.subscribe(),
+            move |text| {
+                let _ = submit_tx.send(Item::User(QueuedUser {
+                    text: text.to_string(),
+                    source: "tui",
+                    steps: vec![],
+                    images: vec![],
+                }));
+            },
+            move || {
+                let _ = end_tx.send(Item::End);
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            crate::corelog::line(&format!("[core] tui: {e}"));
         }
-        let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+    } else {
+        // Seed the runs: one agent run per user message. Fake mode validates each
+        // model_script up front; provider mode ignores scripts (real completions).
+        for r in &runs {
+            if fake_mode {
+                FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+            }
+            let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
+            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+        }
+        msg_tx.send(Item::End).unwrap();
     }
-    msg_tx.send(Item::End).unwrap();
 
     // Wait for the scenario (and any extension-injected user messages).
     let _ = done_rx.await;
@@ -411,7 +474,7 @@ pub async fn run() -> Result<i32> {
             }
             Ok(None) => unreachable!("wait_exited resolves only on exit"),
             Err(_) => {
-                eprintln!("[core] sidecar did not exit 10s after session_shutdown");
+                crate::corelog::line("[core] sidecar did not exit 10s after session_shutdown");
                 fail.lock().unwrap().get_or_insert("sidecar did not exit after session_shutdown".into());
             }
         }
