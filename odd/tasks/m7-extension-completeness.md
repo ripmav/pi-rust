@@ -24,7 +24,7 @@ S10 (WP-708 acceptance): "Table in-file: per extension — loads? (matrix run), 
 - T4 / WP-704 — Compaction (704a threshold + events, 704b summarization + rewrite, 704c session marker entries) — S6 — issue #78 — branch `feat/wp-704-compaction` — commit: afc519c
 - T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-register-shortcut` — commit: 5466a08
 - T6 / WP-706 — Extension UI chrome (status/title render + clear, matrix re-run) — S8 — issue #80 — branch `feat/wp-706-extension-ui` — commit: 8beb14c
-- T7 / WP-707 — Evaluate `ctx.ui.custom` (decision memo in WP file, no code) — S9 — issue #81 — branch `feat/wp-707-ui-custom-eval` — commit: (pending)
+- T7 / WP-707 — Evaluate `ctx.ui.custom` (decision memo in WP file, no code) — S9 — issue #81 — branch `feat/wp-707-ui-custom-eval` — commit: 4ffc696
 - T8 / WP-708 — Bundled extensions evaluation (table in WP file, no code) — S10 — issue #82 — branch `feat/wp-708-bundled-extensions` — commit: (pending)
 
 ## Log
