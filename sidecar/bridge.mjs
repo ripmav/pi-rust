@@ -22,7 +22,7 @@ const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(pa
 const { validateMcpServerConfig } = await import(path.join(path.dirname(DIST), "core", "mcp-servers.js"));
 
 const F_AND_FORGET = new Set(
-	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level".split(" "),
+	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed".split(" "),
 );
 const message = (err) => (err instanceof Error ? err.message : String(err));
 const MAX_LINE = 1024 * 1024; // v0: a single NDJSON command line never exceeds 1 MB
@@ -321,8 +321,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 2) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 2)`));
+		if (command.protocolVersion !== 3) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 3)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -577,6 +577,19 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				return response(id, type, true, {
 					...(combined.messages.length ? { messages: combined.messages } : {}),
 					...(finalPrompt !== undefined && finalPrompt !== base ? { systemPrompt: finalPrompt } : {}),
+				});
+			}
+			case "session_before_compact": {
+				// WP-704: decision — the handler may cancel or supply the
+				// compaction itself (upstream SessionBeforeCompactResult); the
+				// runner's emit returns it exactly as upstream agent-session
+				// consumes it.
+				if (!runner.hasHandlers("session_before_compact")) return response(id, type, true, null);
+				const result = await safe(runner.emit(command.event), undefined, "session_before_compact");
+				if (!result) return response(id, type, true, null);
+				return response(id, type, true, {
+					...(result.cancel ? { cancel: true } : {}),
+					...(result.compaction ? { compaction: result.compaction } : {}),
 				});
 			}
 			case "user_bash":

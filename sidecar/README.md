@@ -46,7 +46,7 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 
 ## What the sidecar does
 
-- `init` (protocolVersion 2) → loads extensions with the original loader,
+- `init` (protocolVersion 3) → loads extensions with the original loader,
   hosts the built-in mcp extension on the shared runtime, binds
   `ExtensionRunner` (actions/context actions/provider actions), registers
   `mcpConfig` servers (v2), responds `success`, emits `ready` (tools with

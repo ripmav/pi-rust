@@ -252,7 +252,7 @@ async function main() {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -523,7 +523,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -566,7 +566,7 @@ async function main() {
 		const core3 = new FakeCore(child3);
 		const init3 = await core3.request({
 			type: "init",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			capabilities: { ui: [], timeoutMs: 5000 },
 		});
 		check("gitlab-duo sidecar init", init3.success === true, init3);
@@ -602,7 +602,7 @@ async function main() {
 		const core4 = new FakeCore(child4);
 		const init4 = await core4.request({
 			type: "init",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			mcpConfig: {
 				mcpServers: {

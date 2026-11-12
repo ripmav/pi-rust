@@ -17,6 +17,8 @@ struct RunSpec {
     steps: Vec<Value>,
     /// (mime, base64) attachments for `--image` (first prompt run only).
     images: Vec<(String, String)>,
+    /// WP-704: the fake driver's compaction summary (scenario `compact_summary`).
+    compact_summary: String,
 }
 
 /// MIME detection by magic bytes (png/jpeg/gif/webp — the formats the
@@ -65,17 +67,35 @@ fn read_image_attachment(path: &Path) -> Result<(String, String)> {
 /// Scenario JSON: `user_messages: [string]` plus per-message `model_scripts`
 /// (index-aligned; omitted = empty script). Steps:
 /// `{"text":"..."}` | `{"tool_call":{"name":"...","input":{...}}}`.
-fn parse_scenario(v: &Value) -> Result<Vec<RunSpec>> {
+/// WP-704: optional top-level `compact: {window, reserve, keep}` (JSON
+/// numbers; the fake model has no catalog contextWindow, so the override
+/// drives the auto trigger) and `compact_summary` (the fake's summary text).
+/// Returns (runs, the compact override).
+fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> {
     let user_messages = v.get("user_messages").and_then(Value::as_array).context("scenario needs `user_messages: [string]`")?;
     let scripts = v.get("model_scripts").and_then(Value::as_array).cloned().unwrap_or_default();
+    let compact = match v.get("compact") {
+        None => None,
+        Some(c) => {
+            let field = |k: &str| -> Result<u64> {
+                c.get(k).and_then(Value::as_u64).with_context(|| format!("scenario compact.{k} must be a JSON number"))
+            };
+            Some((field("window")?, field("reserve")?, field("keep")?))
+        }
+    };
+    let compact_summary = v
+        .get("compact_summary")
+        .and_then(Value::as_str)
+        .unwrap_or(crate::model::DEFAULT_COMPACT_SUMMARY)
+        .to_string();
     let mut runs = Vec::new();
     for (i, m) in user_messages.iter().enumerate() {
         let text = m.as_str().with_context(|| format!("user_messages[{i}] must be a string"))?.to_string();
         let steps = scripts.get(i).and_then(Value::as_array).cloned().unwrap_or_default();
-        runs.push(RunSpec { text, steps, images: Vec::new() });
+        runs.push(RunSpec { text, steps, images: Vec::new(), compact_summary: compact_summary.clone() });
     }
     if runs.is_empty() { bail!("scenario needs at least one user message"); }
-    Ok(runs)
+    Ok((runs, compact))
 }
 
 fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
@@ -222,22 +242,23 @@ pub async fn run() -> Result<i32> {
         prompt = Some(text);
     }
 
-    let runs = match (&scenario_path, &prompt) {
+    let (runs, compact_override) = match (&scenario_path, &prompt) {
         (Some(p), None) => {
             let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
         }
         (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
-        (None, Some(text)) => vec![RunSpec {
+        (None, Some(text)) => (vec![RunSpec {
             text: text.clone(),
             steps: vec![],
             images: image_paths.iter().map(|p| read_image_attachment(p)).collect::<Result<_>>()?,
-        }],
+            compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+        }], None),
         (None, None) => {
             if list_sessions {
-                Vec::new() // --list-sessions needs no scenario
+                (Vec::new(), None) // --list-sessions needs no scenario
             } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                Vec::new() // interactive TUI (WP-601)
+                (Vec::new(), None) // interactive TUI (WP-601)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -410,7 +431,7 @@ pub async fn run() -> Result<i32> {
     } else {
         json!([])
     };
-    let mut init = json!({"protocolVersion":2,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    let mut init = json!({"protocolVersion":3,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
@@ -440,6 +461,7 @@ pub async fn run() -> Result<i32> {
         tui: tui_mode,
         ui_tx,
         tools_sync_tx,
+        compact_override,
         out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
         text_final: Arc::default(),
         json_tx: {
@@ -603,6 +625,7 @@ pub async fn run() -> Result<i32> {
                     source: "tui",
                     steps: vec![],
                     images: vec![],
+                    compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
                 }));
             },
             move |outcome| match outcome {
@@ -698,10 +721,10 @@ pub async fn run() -> Result<i32> {
         // model_script up front; provider mode ignores scripts (real completions).
         for r in &runs {
             if fake_mode {
-                FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+                FakeDriver::from_steps(&r.steps, &r.compact_summary).with_context(|| "parsing model_script")?;
             }
             let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone(), compact_summary: r.compact_summary.clone() })).unwrap();
         }
         msg_tx.send(Item::End).unwrap();
     }

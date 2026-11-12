@@ -29,13 +29,13 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 2` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
+2. Core sends `init`: `protocolVersion: 3` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
 
-   `{"id":"…","type":"init","protocolVersion":2,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
+   `{"id":"…","type":"init","protocolVersion":3,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-two `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-three `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 2, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2 |
+| core→ | `init` | `{ protocolVersion: 3, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -64,6 +64,9 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 | core→ | `context_with_system` | `ContextWithSystemEvent`, full transcript (`types.ts:916`) → `data: AgentMessage[]` | decision | `emitContext()` phase 2 |
 | core→ | `input` | `InputEvent` with `source: "rpc"` (`types.ts:1192`) → `data: InputEventResult` (`types.ts:1205`) | decision | `emitInput()` (`runner.ts:1532`) |
 | core→ | `user_bash` | `UserBashEvent` (`types.ts:1174`) → `data: UserBashEventResult \| null` (`types.ts:1487`). Sent only when the user runs a bash command | decision | `emitUserBash()` (`runner.ts:1276`) |
+| core→ | `session_before_compact` | `SessionBeforeCompactEvent` (`types.ts:806`) under `event` — `preparation` (reason, willRetry, customInstructions?), `branchEntries: AgentMessage[]` (the messages about to be summarized) → `data: null \| { cancel: true } \| { compaction: { summary, firstKeptEntryId?, tokensBefore?, usage? } }` (`SessionBeforeCompactResult`) | decision (v3) | `emit()` — the handler may cancel the compaction or supply the summary itself (upstream `agent-session.ts:2951`) |
+| core→ | `session_compact` | `SessionCompactEvent` (`types.ts:819`) — `compactionEntry` (the session entry JSON), `fromExtension`, `reason`, `willRetry` | F&F (v3) | `emit()` |
+| core→ | `session_compact_failed` | `SessionCompactFailedEvent` (`types.ts:830`) — `reason`, `errorMessage?`, `aborted`, `willRetry`, `fromExtension` | F&F (v3) | `emit()` |
 | core→ | `session_shutdown` | `SessionShutdownEvent` (`types.ts:845`) | F&F | `emitSessionShutdownEvent()` (`runner.ts:265`) |
 | core→ | `command` | `{ name, args }` → `data: <handler return value as JSON or null>` | req/resp | invokes a registered extension command (`ready.commands`); unknown name → error response |
 | core→ | `extension_tool_call` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` (`packages/agent/src/types.ts:424`) | req/resp | `AgentTool.execute` (`packages/agent/src/types.ts:478-500`) via the `extension.tools` → wrapper path |
@@ -105,7 +108,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 ## Error & lifecycle model
 
 - Every command that is not F&F gets exactly one response line matching its `id`; `success: true` carries `data?`, `success: false` carries `error: string`.
-- A handler throwing inside the sidecar does not fail the command: the sidecar emits an `extension_error` line (with `extensionPath` `"<unknown>"` when the upstream emit path carries no per-handler identity) and the decision resolves to its default (`tool_call` → no block, input unchanged; `tool_result`/`context`/`context_with_system` → unchanged; `input` → `continue`; `before_agent_start` → no additions; `user_bash` → null). Precedent: per-handler catch + `emitError` in `runner.ts`.
+- A handler throwing inside the sidecar does not fail the command: the sidecar emits an `extension_error` line (with `extensionPath` `"<unknown>"` when the upstream emit path carries no per-handler identity) and the decision resolves to its default (`tool_call` → no block, input unchanged; `tool_result`/`context`/`context_with_system` → unchanged; `input` → `continue`; `before_agent_start` → no additions; `user_bash` → null; `session_before_compact` → proceed (no cancel, no extension summary)). Precedent: per-handler catch + `emitError` in `runner.ts`.
 - **Sidecar crash (EOF or non-zero exit) is a transport error.** The core state machine:
   - `running` — handshake complete, sidecar alive.
   - `degraded` — transport error or a blocking command unanswered after the `init` timeout (`capabilities.timeoutMs`, default 30000 ms). Built-in tools and the agent loop keep working; extension tools from `ready.tools` are removed from the model's tool set (marked unavailable); pending decision events resolve to default-allow/no-op; in-flight `extension_ui_request` dialogs resolve to their upstream defaults (`confirm` → `false`, `select`/`input`/`editor` → `undefined`, per `createDialogPromise` in `rpc-mode.ts:95-137`); further core→sidecar writes are dropped and logged. v0 has no sidecar respawn: `degraded` is terminal for that instance.
@@ -120,7 +123,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":2,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
+{"id":"h1","type":"init","protocolVersion":3,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
 {"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
 ```
@@ -182,11 +185,22 @@ The sidecar hosts the **unmodified upstream built-in mcp extension** (`createMcp
 - **Timeouts**: the MCP client's per-request default (60 s) and the sidecar→core blocking-command timeout (`capabilities.timeoutMs`, default 30 s) are independent; a slow MCP tool call may outlive the core's `extension_tool_call` timeout, which degrades the bridge (Error & lifecycle model).
 - **Out of scope (WP-703+)**: OAuth sign-in (`/mcp login`, the `oauth` config fields are accepted by validation but no auth provider is wired — a 401 surfaces as the server error), dynamic client registration, the `/mcp` TUI manager, resource tools beyond registration, `toolExposure` per-tool overrides (accepted by validation, single exposure used).
 
+## Compaction (v3)
+
+Context compaction per upstream `core/compaction` (auto-trigger only, v0):
+
+- **Trigger**: at the top of each agent-loop turn, before the turn's model call, the core estimates the context size (upstream's exact heuristic: `ceil(chars/4)` per message, image blocks ≈ 4800 chars; a trailing estimate after the last assistant `usage` where present) and compacts when `contextTokens > contextWindow - reserveTokens` (defaults: reserve 16384, keep recent 20000). The context window comes from the model registry; runs without one (fake model) stay off unless the scenario supplies a `compact: { window, reserve, keep }` override. Upstream settings-file knobs (`reserveTokens`, `keepRecentTokens`, per-model overrides) are a v0 non-goal.
+- **Cut point**: the core walks back from the newest entry accumulating ≥ `keepRecentTokens` (upstream `findCutPoint`): never inside a `toolCall`/`toolResult` pair; an assistant message with tool calls keeps its results. Entries before the cut are summarized; the cut entry becomes `firstKeptEntryId`.
+- **Summary call**: the SAME active model driver, tools-less conversation = `[system SUMMARIZATION_SYSTEM_PROMPT, user "<conversation>…</conversation>" (+ "<previous-summary>…") ]` with the verbatim upstream prompts; the serialized conversation is upstream `serializeConversation` (`[User]` / `[Assistant]` / `[Assistant tool calls]: name(k=v)` / `[Tool result]` truncated at 2000 chars, thinking omitted). The call emits no `message_start`/`message_update`/`message_end`, no `model_delta`, and no `usage` session entry — the summary's usage lands in the compaction entry only. A tool call in the summary response or `stopReason: length` is a failure.
+- **Events & entry**: `session_before_compact` (decision: cancel or extension-supplied summary → `fromHook`) → summary call → `session_compact` with the new entry: `{ type: "compaction", id, parentId, timestamp, summary, firstKeptEntryId, tokensBefore, usage?, fromHook?, systemMessage? }` (upstream `CompactionEntry` shape). Failure paths emit `session_compact_failed` (typed reason) and the turn proceeds uncompacted. Headless NDJSON gains the `compaction` / `compaction_failed` line kinds.
+- **Projection**: the session transcript is compaction-aware for fresh runs and resume-from-file: a path containing a compaction entry projects to `[compactionSummary message] + entries from firstKeptEntryId to the compaction (minus system messages) + everything after` — the same projection upstream `buildContextEntries` applies, so pi-rust files with compaction entries load the way upstream loads them.
+- **v0 non-goals**: split-turn (`TURN_PREFIX`) summaries, read/modified file-lists appended to the summary, overflow-retry (compact + retry once), the manual `/compact` command, per-model settings overrides, micro-compaction variants.
+
 ## Out of scope for the v0 bridge
 
 - **TUI renderers**: message/entry renderers, tool renderers, markdown transformers, themes, `ctx.ui` beyond the dialog subset (`select`, `confirm`, `input`, `editor`, `notify`, `setStatus`, `setTitle`, `set_editor_text`) — no `onTerminalInput`, working indicators, widget factories, footer/header, autocomplete, `custom()`, editor-text readback.
 - **`registerShortcut`**: accepted by the loader, ignored by the bridge.
-- **Compaction**: `session_before_compact` / `session_compact` / `session_compact_failed`, the `compact` command, and boundary mutation (`entries`/`continue` on `turn_end`, `agent_before_settle`); `turn_end`/`message_end` are delivered without their mutation results.
+- **Compaction**: the compaction events and the session entry are in (v3, Compaction §); still out: the manual `compact` command / TUI `/compact` wiring (auto-trigger only), and boundary mutation (`entries`/`continue` on `turn_end`, `agent_before_settle`); `turn_end`/`message_end` are delivered without their mutation results.
 - **MCP**: stdio + HTTP/SSE transports, registration (config + extension), and tool execution are in (MCP §); OAuth sign-in, dynamic client registration, and the `/mcp` TUI manager are not (WP-703+).
 - **Provider invocation (v1 limitations)**: extension-registered providers are invoked by the core (WP-701) for the legacy config form (`registerProvider(name, config)` with `streamSimple`). Out of scope: the native `Provider` object form, `registerNativeProvider`, virtual models (`registerVirtualModel` is accepted and ignored), `oauth` refresh flows, `apiKey` `!command` values (typed error), `refreshModels`, and abort signals (no per-turn `AbortSignal` exists in the core loop yet).
 - Remaining upstream events not in the catalog (`project_trust`, `resources_discover`, `before_provider_request`/`before_provider_headers`/`after_provider_response`/`provider_stream_event`, `session_before_switch`/`session_before_fork`/`session_before_tree`, `ui_prompt_start`/`ui_prompt_end`, `tool_execution_*`, `agent_settled`) are not sent; extensions that need them load, but their handlers never fire.
