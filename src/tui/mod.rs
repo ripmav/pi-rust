@@ -12,6 +12,7 @@ use ratatui::buffer::Buffer;
 use serde_json::{json, Value};
 
 pub mod dialog;
+pub mod commands;
 pub mod keybindings;
 pub mod markdown;
 pub mod theme;
@@ -55,6 +56,12 @@ pub struct TuiApp {
     pub kb: keybindings::KeybindingManager,
     /// WP-607: the active theme (built-in or user theme).
     pub theme: theme::Theme,
+    /// WP-608: extension `registerCommand` commands (from the ready payload).
+    pub ext_commands: Vec<commands::Command>,
+    /// WP-608: prompt templates (WP-307 discovery).
+    pub templates: Vec<crate::templates::Template>,
+    /// WP-608: the open slash menu (matched commands + selection).
+    pub slash: Option<(Vec<commands::Command>, usize)>,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
     pub scroll: usize,
     pub size: (u16, u16),
@@ -80,6 +87,12 @@ pub enum TuiAction {
     EditorClosed(dialog::DialogOutcome),
     /// WP-607: `/theme <name>` — switch the active theme in place.
     SwitchTheme(String),
+    /// WP-608: an extension command over the bridge (M1 `command` path).
+    BridgeCommand { name: String, args: String },
+    /// WP-608: `/thinking <level>` over the bridge (WP-406 request).
+    SetThinking { level: String },
+    /// WP-608: `/model <provider/model>` over the bridge (WP-406 request).
+    SetModel { provider: String, model: String },
 }
 
 impl TuiApp {
@@ -91,6 +104,152 @@ impl TuiApp {
     pub fn with_theme(mut self, theme: theme::Theme) -> Self {
         self.theme = theme;
         self
+    }
+
+    /// WP-608: set the extension commands and prompt templates that feed
+    /// the slash menu and dispatch.
+    pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
+        self.ext_commands = ext_commands;
+        self.templates = templates;
+        self
+    }
+
+    /// WP-608: recompute the slash menu for the current input. Called on
+    /// key events (never in the render path, per the house rules).
+    fn refresh_slash(&mut self) {
+        if self.editor_session.is_some() {
+            self.slash = None;
+            return;
+        }
+        let all = commands::collect_menu(&self.templates, &self.ext_commands);
+        self.slash = commands::menu_items(&all, &self.input).map(|items| (items, 0));
+    }
+
+    /// WP-608: push one command result line to the transcript (dim system
+    /// role).
+    fn push_command_output(&mut self, text: String) {
+        self.transcript.push(Msg { role: "system", text });
+        self.scroll = 0;
+    }
+
+    /// WP-608: a command error in the status bar + core log.
+    fn set_cmd_error(&mut self, msg: &str) {
+        crate::corelog::line(&format!("[tui] {msg}"));
+        self.last_error = Some(msg.to_string());
+    }
+
+    /// WP-608: `/hotkeys` output — the wired keybindings as a markdown
+    /// table (upstream renders the same from the keybinding schema).
+    fn hotkeys_text(&self) -> String {
+        let mut out = String::from("Keybindings (v0 wired actions):\n");
+        for action in [
+            "tui.input.submit", "tui.input.newLine", "app.clear", "app.exit",
+            "tui.select.up", "tui.select.down", "tui.select.confirm", "tui.select.cancel",
+            "tui.editor.cursorUp", "tui.editor.cursorDown", "tui.editor.cursorLeft",
+            "tui.editor.cursorRight",
+        ] {
+            let keys = self.kb.get_keys(action).iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(" / ");
+            out.push_str(&format!("- {action}: {keys}\n"));
+        }
+        out
+    }
+
+    /// WP-608: dispatch a submitted `/name args`. Returns the produced
+    /// action; `None` means the command was handled locally (session
+    /// info, hotkeys, errors, /quit) and the input was cleared.
+    fn dispatch_command(&mut self, name: &str, args: &str) -> Option<TuiAction> {
+        let clear = |this: &mut Self| {
+            this.input.clear();
+            this.cursor = (0, 0);
+            this.leave_history();
+            this.scroll = 0;
+        };
+        match name {
+            "theme" => {
+                self.input.clear();
+                self.cursor = (0, 0);
+                self.leave_history();
+                self.scroll = 0;
+                return Some(TuiAction::SwitchTheme(args.to_string()));
+            }
+            "quit" => {
+                self.exit = true;
+                self.input.clear();
+                return None;
+            }
+            "session" => {
+                self.push_command_output(format!(
+                    "session: {} | model: {} | cwd: {}",
+                    self.session, self.model, self.cwd
+                ));
+                clear(self);
+                return None;
+            }
+            "hotkeys" => {
+                self.push_command_output(self.hotkeys_text());
+                clear(self);
+                return None;
+            }
+            "thinking" => {
+                if args.is_empty() {
+                    self.set_cmd_error("usage: /thinking <level>");
+                    return None;
+                }
+                self.history.push(format!("/thinking {args}"));
+                self.history_idx = None;
+                self.draft = None;
+                self.input.clear();
+                self.cursor = (0, 0);
+                self.scroll = 0;
+                return Some(TuiAction::SetThinking { level: args.to_string() });
+            }
+            "model" => {
+                if let Some((provider, model)) = args.split_once('/') {
+                    self.history.push(format!("/model {args}"));
+                    self.history_idx = None;
+                    self.draft = None;
+                    self.input.clear();
+                    self.cursor = (0, 0);
+                    self.scroll = 0;
+                    return Some(TuiAction::SetModel { provider: provider.to_string(), model: model.to_string() });
+                }
+                self.set_cmd_error("usage: /model <provider/model>");
+                return None;
+            }
+            _ => {}
+        }
+        // Prompt template (WP-307): expand and submit as a normal message.
+        if let Some(t) = self.templates.iter().find(|t| t.name == name) {
+            let expanded = crate::templates::expand(&t.content, &crate::templates::parse_args(args));
+            self.history.push(format!("/{name} {args}"));
+            self.history_idx = None;
+            self.draft = None;
+            self.input.clear();
+            self.cursor = (0, 0);
+            self.scroll = 0;
+            return Some(TuiAction::Submit(expanded));
+        }
+        // Extension command: the M1 bridge `command` path.
+        if self.ext_commands.iter().any(|c| c.name == name) {
+            self.history.push(format!("/{name} {args}"));
+            self.history_idx = None;
+            self.draft = None;
+            self.input.clear();
+            self.cursor = (0, 0);
+            self.scroll = 0;
+            return Some(TuiAction::BridgeCommand { name: name.to_string(), args: args.to_string() });
+        }
+        // Known built-in, not wired in v0 (upstream has a full
+        // implementation; v0 says so explicitly).
+        if commands::BUILTIN_SLASH_COMMANDS.iter().any(|(n, _, _)| *n == name) {
+            self.set_cmd_error(&format!("/{name} is not supported in v0"));
+            return None;
+        }
+        // Unknown command: error listing the available ones (spec).
+        let all = commands::collect_menu(&self.templates, &self.ext_commands);
+        let names: Vec<String> = all.iter().map(|c| format!("/{}", c.name)).collect();
+        self.set_cmd_error(&format!("unknown command /{name}; available: {}", names.join(" ")));
+        None
     }
 
     /// WP-606: construct with a configured keybinding manager.
@@ -117,6 +276,9 @@ impl TuiApp {
             editor_session: None,
             kb,
             theme: theme::Theme::builtin("dark").expect("built-in dark theme"),
+            ext_commands: Vec::new(),
+            templates: Vec::new(),
+            slash: None,
             scroll: 0,
             size: (80, 24),
             exit: false,
@@ -580,9 +742,58 @@ impl TuiApp {
                 None
             }
             TermEvent::Key(k) => {
-                // WP-606: the keybinding manager (upstream schema + user
-                // config) drives the wired actions; first match wins.
-                let kb = &self.kb;
+                // WP-608: recompute the slash menu after the input changes
+                // (a key event, never the render path).
+                let before = self.input.clone();
+                let action = self.process_key(k);
+                if self.input != before {
+                    self.refresh_slash();
+                }
+                action
+            }
+            _ => None,
+        }
+    }
+
+    fn process_key(&mut self, k: crossterm::event::KeyEvent) -> Option<TuiAction> {
+        {
+            // WP-606: the keybinding manager (upstream schema + user
+            // config) drives the wired actions; first match wins.
+            let kb = &self.kb;
+            // WP-608: an open slash menu owns the select keys (upstream:
+            // navigation runs before history/editor actions; escape or
+            // ctrl+c closes the menu instead of clearing/exiting).
+            if self.slash.is_some() {
+                if kb.matches(&k, "tui.select.up") {
+                    if let Some((items, sel)) = &mut self.slash {
+                        *sel = if *sel == 0 { items.len() - 1 } else { *sel - 1 };
+                    }
+                    return None;
+                }
+                if kb.matches(&k, "tui.select.down") {
+                    if let Some((items, sel)) = &mut self.slash {
+                        *sel = (*sel + 1) % items.len();
+                    }
+                    return None;
+                }
+                if kb.matches(&k, "tui.select.confirm") {
+                    if let Some((items, sel)) = &self.slash {
+                        let name = items.get(*sel).map(|c| c.name.clone());
+                        if let Some(name) = name {
+                            self.input = format!("/{name} ");
+                            self.cursor = (0, name.len() + 2);
+                            self.history_idx = None;
+                            self.draft = None;
+                            self.slash = None;
+                        }
+                    }
+                    return None;
+                }
+                if kb.matches(&k, "tui.select.cancel") {
+                    self.slash = None;
+                    return None;
+                }
+            }
                 if kb.matches(&k, "tui.editor.deleteWordBackward") {
                     self.delete_word_backward();
                     return None;
@@ -667,19 +878,11 @@ impl TuiApp {
                         return Some(self.close_editor_session(response));
                     }
                     if kb.matches(&k, "tui.input.submit") {
-                        // WP-607: the built-in /theme command switches the
-                        // active theme in place (no agent turn).
-                        let name = self
-                            .input
-                            .trim()
-                            .strip_prefix("/theme")
-                            .map(|t| t.trim().to_string());
-                        if let Some(name) = name {
-                            self.input.clear();
-                            self.cursor = (0, 0);
-                            self.leave_history();
-                            self.scroll = 0;
-                            return Some(TuiAction::SwitchTheme(name));
+                        // WP-608: dispatch /commands before a normal submit
+                        // (local builtins, templates, extension commands).
+                        let text = self.input.trim().to_string();
+                        if let Some((name, args)) = commands::parse_invocation(&text) {
+                            return self.dispatch_command(name, args);
                         }
                         if let Some(t) = self.submit_text() {
                             self.scroll = 0;
@@ -732,9 +935,7 @@ impl TuiApp {
                     _ => None,
                 }
             }
-            _ => None,
         }
-    }
 
     /// Apply one core event (the broadcast EventLog stream) to the app state.
     pub fn apply_event(&mut self, ev: &Value) {
@@ -772,6 +973,26 @@ impl TuiApp {
                     }),
                 }
                 self.scroll = 0;
+            }
+            Some("bridge_cmd_result") => {
+                // WP-608: a slash command's bridge round-trip completed.
+                let label = ev.get("label").and_then(Value::as_str).unwrap_or("/?");
+                let ok = ev.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                let text = ev.get("text").and_then(Value::as_str).unwrap_or("");
+                let line = if !ok {
+                    format!("{label}: {text}")
+                } else if text.is_empty() {
+                    format!("{label} ok")
+                } else {
+                    format!("{label} — {text}")
+                };
+                self.transcript.push(Msg { role: "system", text: line });
+                self.scroll = 0;
+                if ok {
+                    if let Some(model) = ev.get("model").and_then(Value::as_str) {
+                        self.model = model.to_string();
+                    }
+                }
             }
             Some("tool_execution") => {
                 let name = ev.get("name").and_then(Value::as_str).unwrap_or("?");
@@ -846,7 +1067,9 @@ impl TuiApp {
         // while an `editor` dialog runs in the pane).
         let input_rows = self.input.matches('\n').count() + 1;
         let editor_chrome = if self.editor_session.is_some() { 2 } else { 0 };
-        let input_h = (input_rows + editor_chrome).min(h.saturating_sub(status_h).max(1));
+        // WP-608: the slash menu (up to 8 rows) grows the input pane.
+        let menu_rows = self.slash.as_ref().map(|(items, _)| items.len().min(8)).unwrap_or(0);
+        let input_h = (input_rows + editor_chrome + menu_rows).min(h.saturating_sub(status_h).max(1));
         let transcript_h = h.saturating_sub(status_h).saturating_sub(input_h);
 
         let chunks = Layout::default()
@@ -911,14 +1134,30 @@ impl TuiApp {
         // Input: the editor pane (WP-605): multi-line, caret at the cursor,
         // prompt on the first line, title + hint rows for an editor dialog.
         if input_h > 0 {
-            let bold = Style::default().add_modifier(Modifier::BOLD);
             let accent_bold = self.theme.fg_bold("accent");
             let mut pane: Vec<Line> = Vec::new();
             if let Some(es) = &self.editor_session {
                 pane.push(Line::from(Span::styled(es.title.clone(), accent_bold.clone())));
             }
+            // WP-608: the slash menu (selected row in the accent role).
+            if let Some((items, sel)) = &self.slash {
+                for (i, c) in items.iter().take(8).enumerate() {
+                    let row = format!(
+                        " /{} {}  {}",
+                        c.name,
+                        c.argument_hint.as_deref().unwrap_or(""),
+                        c.description
+                    );
+                    let style = if i == *sel {
+                        self.theme.fg_bold("accent")
+                    } else {
+                        self.theme.fg("muted")
+                    };
+                    pane.push(Line::from(Span::styled(row, style)));
+                }
+            }
             let hint_rows = if self.editor_session.is_some() { 2 } else { 0 };
-            let visible = input_h.saturating_sub(hint_rows);
+            let visible = input_h.saturating_sub(hint_rows).saturating_sub(menu_rows);
             let text_lines: Vec<String> = self.input.split('\n').map(String::from).collect();
             for (i, line) in text_lines.iter().take(visible).enumerate() {
                 let prompt = if i == 0 { "> " } else { "  " };
@@ -1181,6 +1420,160 @@ mod tests {
         assert_eq!(app.input, "x", "ctrl+up is previousPrompt, not history, in v0");
     }
 
+    /// WP-608: the slash menu opens on "/" and shows built-ins, the
+    /// prompt template and the extension command; a prefix filters it.
+    #[test]
+    fn wp608_menu_shows_extension_and_template() {
+        use crate::templates::Template;
+        use crate::tui::commands::Command;
+        use std::path::PathBuf;
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app = app.with_commands(
+            vec![Command {
+                name: "deploy".into(),
+                description: "Deploy the app".into(),
+                argument_hint: None,
+                source: crate::tui::commands::Source::Extension,
+            }],
+            vec![Template { name: "fix".into(), content: "fix $1".into(), path: PathBuf::from("prompts/fix.md") }],
+        );
+        type_str(&mut app, "/");
+        let items = app.slash.as_ref().expect("menu open on /").0.clone();
+        let names: Vec<&str> = items.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"settings"), "builtins in menu: {names:?}");
+        assert!(names.contains(&"fix"), "template in menu: {names:?}");
+        assert!(names.contains(&"deploy"), "extension command in menu: {names:?}");
+        // The menu renders above the input pane (8 visible rows).
+        let rendered = app.render_string();
+        assert!(rendered.contains("/settings"), "menu rows rendered: {rendered:?}");
+        // A prefix filters to the matching commands — the extension row is
+        // then visible (no truncation).
+        type_str(&mut app, "de");
+        let items = app.slash.as_ref().expect("menu still open").0.clone();
+        assert_eq!(items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["deploy"]);
+        assert!(app.render_string().contains("/deploy"), "extension row rendered");
+    }
+
+    /// WP-608: the select keys navigate the menu; Enter completes the name
+    /// into the editor (one more Enter would submit).
+    #[test]
+    fn wp608_menu_navigate_and_complete() {
+        use crate::tui::commands::Command;
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app = app.with_commands(
+            vec![Command {
+                name: "deploy".into(),
+                description: "d".into(),
+                argument_hint: None,
+                source: crate::tui::commands::Source::Extension,
+            }],
+            vec![],
+        );
+        type_str(&mut app, "/de");
+        assert_eq!(app.slash.as_ref().unwrap().1, 0);
+        let down = TermEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_key(down);
+        // One item: wraps back to 0 (menu stays open).
+        assert_eq!(app.slash.as_ref().unwrap().1, 0);
+        app.handle_key(enter());
+        assert_eq!(app.input, "/deploy ");
+        assert!(app.slash.is_none(), "menu closed after completion");
+        // Escape closes the menu without touching the input.
+        app.input.clear();
+        app.cursor = (0, 0);
+        type_str(&mut app, "/se");
+        assert!(app.slash.is_some());
+        app.handle_key(TermEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        assert!(app.slash.is_none());
+        assert_eq!(app.input, "/se");
+    }
+
+    /// The upstream submit flow: the first Enter completes the open menu,
+    /// the second submits (a closed menu dispatches on the first Enter).
+    fn submit_cmd(app: &mut TuiApp, text: &str) -> Option<TuiAction> {
+        type_str(app, text);
+        match app.handle_key(enter()) {
+            Some(a) => Some(a),
+            None => app.handle_key(enter()),
+        }
+    }
+
+    /// WP-608: dispatch — extension command over the bridge path, template
+    /// expansion as a normal message, local builtins in place, unknown with
+    /// the available list, v0-unwired builtins with a typed error.
+    #[test]
+    fn wp608_dispatch_paths() {
+        use crate::templates::Template;
+        use crate::tui::commands::Command;
+        use std::path::PathBuf;
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app = app.with_commands(
+            vec![Command {
+                name: "deploy".into(),
+                description: "d".into(),
+                argument_hint: None,
+                source: crate::tui::commands::Source::Extension,
+            }],
+            vec![Template { name: "fix".into(), content: "fix: $@".into(), path: PathBuf::from("prompts/fix.md") }],
+        );
+        // Extension command: the M1 bridge `command` path.
+        assert_eq!(
+            submit_cmd(&mut app, "/deploy prod"),
+            Some(TuiAction::BridgeCommand { name: "deploy".into(), args: "prod".into() })
+        );
+        assert_eq!(app.input, "");
+        // Template: expanded and submitted as a normal user message.
+        assert_eq!(submit_cmd(&mut app, "/fix the bug"), Some(TuiAction::Submit("fix: the bug".into())));
+        // Local builtins.
+        assert_eq!(submit_cmd(&mut app, "/session"), None);
+        assert!(app.transcript.last().unwrap().text.contains("session: s"), "{:?}", app.transcript.last());
+        assert_eq!(submit_cmd(&mut app, "/hotkeys"), None);
+        assert!(app.transcript.last().unwrap().text.contains("tui.input.submit"));
+        // Unknown command: error listing the available ones, input kept.
+        assert_eq!(submit_cmd(&mut app, "/zzz"), None);
+        let err = app.last_error.clone().expect("error set");
+        assert!(err.starts_with("unknown command /zzz"), "{err}");
+        assert!(err.contains("/settings") && err.contains("/deploy") && err.contains("/fix"), "{err}");
+        assert_eq!(app.input, "/zzz");
+        // Known builtin, not wired in v0.
+        app.input.clear();
+        app.cursor = (0, 0);
+        assert_eq!(submit_cmd(&mut app, "/export"), None);
+        assert_eq!(app.last_error.as_deref(), Some("/export is not supported in v0"));
+        // /quit exits.
+        app.last_error = None;
+        app.input.clear();
+        app.cursor = (0, 0);
+        assert_eq!(submit_cmd(&mut app, "/quit"), None);
+        assert!(app.exit);
+    }
+
+    /// WP-608: the bridge round-trip result renders in the transcript (and
+    /// a set_model success updates the status bar label).
+    #[test]
+    fn wp608_bridge_result_event() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app.apply_event(&serde_json::json!({
+            "kind": "bridge_cmd_result", "label": "/deploy", "ok": true, "text": "shipped"
+        }));
+        assert_eq!(app.transcript.last().unwrap().text, "/deploy — shipped");
+        app.apply_event(&serde_json::json!({
+            "kind": "bridge_cmd_result", "label": "/model", "ok": false, "text": "unknown model x/y"
+        }));
+        assert_eq!(app.transcript.last().unwrap().text, "/model: unknown model x/y");
+        app.apply_event(&serde_json::json!({
+            "kind": "bridge_cmd_result", "label": "/model", "ok": true, "text": "", "model": "openai/gpt-x"
+        }));
+        assert_eq!(app.transcript.last().unwrap().text, "/model ok");
+        assert_eq!(app.model, "openai/gpt-x");
+    }
+
     /// WP-607 golden: each built-in theme renders the fixture screen with
     /// its own token colors (buffer snapshot over the real render path).
     #[test]
@@ -1229,14 +1622,15 @@ mod tests {
     /// name is rejected by the loader with the available themes listed.
     #[test]
     fn wp606_theme_command_switches() {
-        type_str(&mut TuiApp::new("m", "cwd", "s"), "");
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "/theme light");
-        assert_eq!(app.handle_key(enter()), Some(TuiAction::SwitchTheme("light".into())));
+        // WP-608: the slash menu is open while a bare name is typed — the
+        // first Enter completes it, the second submits.
+        assert_eq!(submit_cmd(&mut app, ""), Some(TuiAction::SwitchTheme("light".into())));
         assert_eq!(app.input, "");
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "/theme");
-        assert_eq!(app.handle_key(enter()), Some(TuiAction::SwitchTheme(String::new())));
+        assert_eq!(submit_cmd(&mut app, ""), Some(TuiAction::SwitchTheme(" ".trim().to_string())));
         // The loader rejects unknown themes with the available list.
         let dir = std::env::temp_dir().join(format!("pi-rust-theme-cmd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

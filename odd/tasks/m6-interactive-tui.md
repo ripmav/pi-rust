@@ -56,7 +56,7 @@ instruction 2026-11-11).
 | T5 | S6 | 605 | #51 | inline (TDD) | bf54d59/2781ec3 on feat/wp-605-editor-pane; PR #62 (stack #59) |
 | T6 | S7 | 606 | #52 | inline (TDD) | 0110479/d4488b2 on feat/wp-606-keybindings; PR #63 (stack #59) |
 | T7 | S8 | 607 | #53 | inline (TDD) | 4112ddd/c7f0deb on feat/wp-607-themes; PR (stack #59) |
-| T8 | S9 | 608 | — | subagent or inline | — |
+| T8 | S9 | 608 | #54 | inline (TDD) | commits on feat/wp-608-slash-commands; PR (stack #59) |
 | T9 | S10 | 609 | — | subagent or inline | — |
 | T10 | S11 | 610 | — | subagent or inline | — |
 
@@ -143,3 +143,23 @@ instruction 2026-11-11).
   fire-and-forget, so that is safe). Golden buffer test asserts the
   exact token colors per cell under both built-in themes. Suite:
   125 in-crate + 19 e2e + 2 PTY; smoke 43/43.
+
+- L11: WP-608 delivered: T8 done, branch feat/wp-608-slash-commands (base
+  feat/wp-607-themes). Slash menu in the editor: the pinned upstream
+  built-in command set (24, verbatim names/descriptions/argumentHints +
+  pi-rust's theme command), prompt templates (WP-307), extension
+  registerCommand commands (M1); extension names conflicting with a
+  built-in are skipped (upstream rule). Menu = 8 visible rows,
+  tui.select.* keys, Enter completes the name (upstream autocomplete
+  flow: the second Enter submits). v0-wired: theme, thinking, model
+  (bridge), session, hotkeys, quit, templates (expand + submit as a
+  normal message), extension commands (bridge `command` path); the other
+  built-ins report "not supported in v0"; unknown -> error listing the
+  available commands (spec). Results render as transcript lines via a
+  TUI-only bridge_cmd_result event; set-model success updates the status
+  bar. Root causes: the first Enter on a typed command completes the
+  open menu, it does not submit (upstream behavior — tests model the
+  two-step flow); the menu truncates to 8 rows, so an extension command
+  must be reached by filtering (the PTY test types /echo first). Suite:
+  133 in-crate + 19 e2e + 3 PTY (new slash-command round-trip); smoke
+  43/43.

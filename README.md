@@ -200,6 +200,24 @@ the same way in TUI mode. An unknown theme name is an error that lists
 the available themes; the current theme stays and the error shows in the
 status bar.
 
+#### Slash commands (M6, WP-608)
+
+Typing `/` in the editor opens the command menu (up to 8 rows, the
+`tui.select.*` keys navigate, Enter completes the name, a second Enter
+submits). The menu lists the upstream built-in command set at the pinned
+commit, the discovered prompt templates (WP-307) and the extension
+`registerCommand` commands (M1); an extension command whose name
+conflicts with a built-in is skipped (the built-in wins, upstream
+semantics).
+
+Wired in v0: `/theme <name>` (WP-607), `/thinking <level>` and
+`/model <provider/model>` (over the bridge, WP-406), `/session` and
+`/hotkeys` (local info), `/quit`, and every prompt template + extension
+command (the bridge `command` path, M1). The remaining built-ins report
+`not supported in v0`. An unknown command is an error listing the
+available ones. Command results render in the transcript (a set-model
+success also updates the status bar).
+
 ### Prompt templates (M3)
 
 `<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on
