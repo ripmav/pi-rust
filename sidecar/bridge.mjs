@@ -1,5 +1,5 @@
 /**
- * Bridge protocol server (docs/bridge-protocol.md v0).
+ * Bridge protocol server (docs/bridge-protocol.md v1).
  * Runs the ORIGINAL upstream loader (discoverAndLoadExtensions) and
  * ExtensionRunner; dispatches core commands, runs decision handlers, and
  * streams events on stdout (logs on stderr).
@@ -93,7 +93,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	let extensions = [];
 	let session = null;
 	let dialog = null;
-	let state = { tools: new Map(), allToolInfo: [], commands: [], activeTools: new Set(), providers: new Set() };
+	let state = { tools: new Map(), allToolInfo: [], commands: [], activeTools: new Set(), providers: new Map() };
 	let capabilities = { ui: [], timeoutMs: 30000 };
 	let initialized = false;
 	let shuttingDown = false;
@@ -136,10 +136,117 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return response(id, type, true, map(await safe(emitFn(), fallback, eventName)));
 	};
 
+	// ---- WP-701: extension-registered providers (legacy config form) ----
+
+	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
+	const providersPayload = () =>
+		[...state.providers.entries()].map(([name, config]) => ({
+			name,
+			models: (config?.models ?? [])
+				.filter((m) => m?.id)
+				.map((m) => ({
+					provider: name,
+					id: m.id,
+					api: m.api ?? config?.api,
+					...(m.name ? { name: m.name } : {}),
+				})),
+		}));
+
+	// Post-ready registration changes are pushed to the core (it re-keys its
+	// per-turn routing + set_model validation on the payload).
+	const emitProvidersChanged = () => {
+		if (initialized) output({ type: "providers_changed", providers: providersPayload() });
+	};
+
+	// ProviderConfig.apiKey: literal or $ENV_VAR/${ENV_VAR} interpolation.
+	// Leading `!command` and a missing env var are typed errors (v0 non-goals).
+	const resolveApiKey = (raw) => {
+		if (raw === undefined) return undefined;
+		if (typeof raw !== "string") throw new Error("apiKey must be a string (literal or $ENV_VAR)");
+		if (raw.startsWith("!")) throw new Error("apiKey !command is not supported in the v0 bridge (literal or $ENV_VAR only)");
+		return raw.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_all, braced, plain) => {
+			const name = braced ?? plain;
+			const value = process.env[name];
+			if (value === undefined) throw new Error(`apiKey env var ${name} is not set`);
+			return value;
+		});
+	};
+
+	// Terminal error event per the upstream AssistantMessageEvent contract
+	// (stopReason "error" + errorMessage); wraps streamSimple setup failures.
+	const providerErrorEvent = (model, err) => ({
+		type: "error",
+		reason: "error",
+		error: {
+			role: "assistant",
+			content: [],
+			api: model?.api,
+			provider: model?.provider,
+			model: model?.id,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "error",
+			errorMessage: message(err),
+			timestamp: Date.now(),
+		},
+	});
+
+	// Core->sidecar `provider_stream`: invoke the captured streamSimple, ack
+	// first, then forward every upstream AssistantMessageEvent as
+	// {type:"provider_stream_event", streamId, event}. Terminal `done`/`error`
+	// events end the stream (forwarded like any other event).
+	async function handleProviderStream(command) {
+		const { id } = command;
+		const model = command.model;
+		if (!model?.provider || !model?.id) {
+			return output(response(id, "provider_stream", false, undefined, "provider_stream needs a model with provider and id"));
+		}
+		const config = state.providers.get(model.provider);
+		if (!config) return output(response(id, "provider_stream", false, undefined, `unknown extension provider: ${model.provider}`));
+		if (typeof config.streamSimple !== "function") {
+			return output(response(id, "provider_stream", false, undefined, `extension provider ${model.provider} has no streamSimple`));
+		}
+		let options = { ...(command.options ?? {}) };
+		try {
+			options.apiKey = resolveApiKey(config.apiKey);
+		} catch (err) {
+			return output(response(id, "provider_stream", false, undefined, message(err)));
+		}
+		// Reconstruct the registered model: provider-level config fields
+		// (api/baseUrl/headers) back the per-model entry the core sent.
+		const registered = (config.models ?? []).find((m) => m?.id === model.id);
+		const streamModel = { ...registered, ...model, provider: model.provider };
+		if (!streamModel.api && config.api) streamModel.api = config.api;
+		if (!streamModel.baseUrl && config.baseUrl) streamModel.baseUrl = config.baseUrl;
+		if (config.headers) streamModel.headers = { ...config.headers, ...(streamModel.headers ?? {}) };
+		const streamId = command.streamId ?? crypto.randomUUID();
+		output(response(id, "provider_stream", true, { ok: true, streamId }));
+		const emit = (event) => output({ type: "provider_stream_event", streamId, event });
+		let stream;
+		try {
+			// TranscriptContext is {messages} (the upstream brand is
+			// compile-time only); streamSimple implementations read
+			// context.messages.
+			stream = await Promise.resolve(config.streamSimple(streamModel, { messages: command.messages ?? [] }, options));
+		} catch (err) {
+			emit(providerErrorEvent(streamModel, err));
+			return;
+		}
+		try {
+			let terminal = false;
+			for await (const event of stream) {
+				emit(event);
+				if (event?.type === "done" || event?.type === "error") terminal = true;
+			}
+			if (!terminal) emit(providerErrorEvent(streamModel, new Error("provider stream ended without a terminal event")));
+		} catch (err) {
+			emit(providerErrorEvent(streamModel, err));
+		}
+	}
+
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 0) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 0)`));
+		if (command.protocolVersion !== 1) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 1)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -175,9 +282,21 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			getCallableTools: () => [...state.tools.values()],
 		};
 		const providerActions = {
-			registerProvider: (name) => state.providers.add(name),
-			registerNativeProvider: (provider) => state.providers.add(provider.id),
-			unregisterProvider: (name) => state.providers.delete(name),
+			// WP-701: legacy config form only — capture the config object at
+			// registration (the sidecar hosts the provider callback); last
+			// registration wins (Map, not Set).
+			registerProvider: (name, config) => {
+				if (typeof name === "string" && config && typeof config === "object") {
+					state.providers.set(name, config);
+					emitProvidersChanged();
+				} else {
+					log("registerProvider native Provider object form is not supported in the v0 bridge (legacy config form only)");
+				}
+			},
+			registerNativeProvider: () => log("registerNativeProvider not supported in the v0 bridge (native Provider object form)"),
+			unregisterProvider: (name) => {
+				if (state.providers.delete(name)) emitProvidersChanged();
+			},
 			registerVirtualModel: () => log("registerVirtualModel accepted but ignored in v0 bridge"),
 			unregisterVirtualModel: () => {},
 		};
@@ -230,7 +349,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			})),
 			commands: state.commands.map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}) })),
 			flags: [...runner.getFlags().values()],
-			providers: [...state.providers],
+			providers: providersPayload(),
 			events: [...new Set(extensions.flatMap((e) => [...e.handlers.keys()]))].sort(),
 		});
 		log(`ready: ${extensions.length} extensions, ${state.tools.size} tools, ${state.commands.length} commands`);
@@ -328,6 +447,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				if (!resolved) return response(id, type, false, undefined, `Unknown command: ${command.name}`);
 				const result = await resolved.handler(command.args ?? "", runner.createCommandContext());
 				return response(id, type, true, result ?? null);
+			}
+			case "provider_stream": {
+				// Ack + events are emitted inside; no dispatcher response line.
+				await handleProviderStream(command);
+				return;
 			}
 			default: {
 				if (F_AND_FORGET.has(type)) {

@@ -6,8 +6,10 @@
  * permission-gate.ts, event-bus.ts, claude-rules.ts, prompt-customizer.ts)
  * plus one scratch test fixture (created in a temp dir) that exercises
  * sendUserMessage / appendEntry / setSessionName / registerFlag /
- * setThinkingLevel, and pins the P1 advisory fixes: shutdown dispatch
- * guard, orderly exit on a broken stdout pipe, and the 1 MB stdin line cap.
+ * setThinkingLevel / registerProvider, and pins the P1 advisory fixes:
+ * shutdown dispatch guard, orderly exit on a broken stdout pipe, and the
+ * 1 MB stdin line cap. Phase 3 verifies the UNMODIFIED upstream
+ * custom-provider-gitlab-duo example loads and registers (701c).
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,6 +17,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+
+const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXAMPLES = path.join(ROOT, "upstream/packages/coding-agent/examples/extensions");
@@ -135,7 +139,39 @@ class FakeCore {
 }
 
 const SCRATCH_EXTENSION = `
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
+
 export default function (pi) {
+	// WP-701: registered providers (legacy config form). smokeprovider has a
+	// deterministic streamSimple ($ENV apiKey resolution is exercised by the
+	// provider_stream round trip); smoke-badkey pins the !command rejection.
+	const U0 = ${JSON.stringify(ZERO_USAGE)};
+	const assistant = (content, usage, stopReason) => ({ role: "assistant", content, usage, stopReason, timestamp: Date.now() });
+	pi.registerProvider("smokeprovider", {
+		api: "smoke-api",
+		apiKey: "$SMOKE_PROVIDER_KEY",
+		models: [{ id: "smoke/echo-1", name: "Smoke Echo", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 512 }],
+		streamSimple(model, context, options) {
+			const stream = createAssistantMessageEventStream();
+			(async () => {
+				const text = "key=" + (options?.apiKey ?? "none") + " msgs=" + (context?.messages?.length ?? 0) + " api=" + (model?.api ?? "?");
+				const partial = assistant([{ type: "text", text }], U0, "stop");
+				stream.push({ type: "start", partial: assistant([], U0, "stop") });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial });
+				stream.push({ type: "done", reason: "stop", message: assistant([{ type: "text", text }], { ...U0, input: 2, output: 2, totalTokens: 4 }, "stop") });
+				stream.end();
+			})();
+			return stream;
+		},
+	});
+	pi.registerProvider("smoke-badkey", {
+		api: "smoke-bad-api",
+		apiKey: "!fake-command",
+		models: [{ id: "smoke/bad-1", name: "Smoke Bad", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 512 }],
+		streamSimple() {
+			throw new Error("must not run");
+		},
+	});
 	pi.registerFlag("probe", { type: "boolean", default: true });
 	pi.registerTool({
 		name: "probe_send",
@@ -204,17 +240,18 @@ async function main() {
 			"--extension-dir", extDir,
 			"--agent-dir", agentDir,
 		],
-		{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, SMOKE_PROVIDER_KEY: "smoke-key-123" } },
 	);
 	child.stderr.on("data", (d) => process.stderr.write(d));
 	const core = new FakeCore(child);
 
 	let child2 = null;
+	let child3 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 0,
+			protocolVersion: 1,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -233,6 +270,20 @@ async function main() {
 			ready.events,
 		);
 		check("ready lists 7 extensions, no errors", ready.extensions.length === 7 && ready.errors.length === 0, ready.errors);
+
+		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
+		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
+		check(
+			"ready providers are objects with model entries",
+			Array.isArray(ready.providers) && ready.providers.length === 2 &&
+				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
+			ready.providers,
+		);
+		check(
+			"ready provider model entry carries provider/id/api",
+			Boolean(smokeProv?.models?.some((m) => m.provider === "smokeprovider" && m.id === "smoke/echo-1" && m.api === "smoke-api" && m.name === "Smoke Echo")),
+			smokeProv,
+		);
 
 		// (c) session_start: pi.events round-trip + claude-rules scan
 		core.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
@@ -329,6 +380,54 @@ async function main() {
 		);
 		check("command -> pi.events -> notify", /Event from \/emit command: smoke/.test(cmdNotify.message), cmdNotify.message);
 
+		// (f4) WP-701: provider_stream round trip — the ack, the forwarded
+		// events, $ENV apiKey resolution, and the !command typed rejection.
+		const streamAck = await core.request({
+			type: "provider_stream",
+			streamId: "s1",
+			model: { provider: "smokeprovider", id: "smoke/echo-1", api: "smoke-api" },
+			messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			options: {},
+		});
+		check("provider_stream acks with the streamId", streamAck.success === true && streamAck.data?.streamId === "s1", streamAck);
+		let terminal = null;
+		const deltas = [];
+		for (let i = 0; i < 20 && !terminal; i++) {
+			const ev = await core.nextEvent(
+				(e) => e.type === "provider_stream_event" && e.streamId === "s1",
+				"provider_stream_event",
+				5000,
+			);
+			if (ev.event?.type === "text_delta") deltas.push(ev.event.delta);
+			if (ev.event?.type === "done" || ev.event?.type === "error") terminal = ev.event;
+		}
+		check(
+			"provider stream forwards events with $ENV apiKey resolved",
+			deltas.length === 1 && /^key=smoke-key-123 msgs=1 api=smoke-api$/.test(deltas[0]),
+			deltas,
+		);
+		check(
+			"provider stream terminates with done + message",
+			terminal?.type === "done" && terminal?.message?.content?.[0]?.text === "key=smoke-key-123 msgs=1 api=smoke-api",
+			terminal,
+		);
+		const badKey = await core.request({
+			type: "provider_stream",
+			streamId: "s2",
+			model: { provider: "smoke-badkey", id: "smoke/bad-1", api: "smoke-bad-api" },
+			messages: [],
+			options: {},
+		});
+		check("!command apiKey is a typed rejection", badKey.success === false && /!command/.test(badKey.error), badKey);
+		const unknownProv = await core.request({
+			type: "provider_stream",
+			streamId: "s3",
+			model: { provider: "nope", id: "nope/1" },
+			messages: [],
+			options: {},
+		});
+		check("unknown provider rejects", unknownProv.success === false && /unknown extension provider/.test(unknownProv.error), unknownProv);
+
 		// (g) before_agent_start: claude-rules rewrites the system prompt
 		const bas = await core.request({
 			type: "before_agent_start",
@@ -423,7 +522,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 0,
+			protocolVersion: 1,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -450,12 +549,49 @@ async function main() {
 			code2 !== "timeout" && /stdout write failed/.test(stderr2Text) && !/UnhandledPromiseRejection|\n\s+at /.test(stderr2Text),
 			{ code2, tail: stderr2Text.slice(-400) },
 		);
+
+		// (l) 701c: the UNMODIFIED upstream custom-provider-gitlab-duo example
+		// loads and registers through the real loader (no streamSimple
+		// invocation — it needs a live GitLab endpoint).
+		const GLD = path.join(EXAMPLES, "custom-provider-gitlab-duo");
+		const agentDir3 = path.join(tmp, "agent3");
+		mkdirSync(agentDir3, { recursive: true });
+		child3 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", GLD, "--agent-dir", agentDir3],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child3.stderr.on("data", (d) => process.stderr.write(d));
+		const core3 = new FakeCore(child3);
+		const init3 = await core3.request({
+			type: "init",
+			protocolVersion: 1,
+			capabilities: { ui: [], timeoutMs: 5000 },
+		});
+		check("gitlab-duo sidecar init", init3.success === true, init3);
+		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
+		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
+		check(
+			"gitlab-duo loads unmodified (1 extension, no errors)",
+			ready3.extensions.length === 1 && ready3.errors.length === 0,
+			ready3.errors,
+		);
+		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
+		check(
+			"gitlab-duo model entry shape (provider/id/api)",
+			gld?.models?.[0] && gld.models[0].provider === "gitlab-duo" && gld.models[0].id === "claude-opus-4-8" && gld.models[0].api === "gitlab-duo-api",
+			gld?.models?.[0],
+		);
+		core3.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code3 = await Promise.race([core3.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("gitlab-duo sidecar clean exit 0", code3 === 0, code3);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
 		try {
 			child.kill("SIGKILL");
 			child2?.kill("SIGKILL");
+			child3?.kill("SIGKILL");
 		} catch {}
 	}
 

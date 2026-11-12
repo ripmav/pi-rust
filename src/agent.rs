@@ -119,6 +119,9 @@ pub struct Core {
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
+    /// WP-701: extension-registered models keyed `provider/id` (ready +
+    /// providers_changed payloads); per-turn bridge routing + set_model gate.
+    pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
     pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
     pub log: EventLog,
     pub fail: Arc<Mutex<Option<String>>>,               // first fatal scenario error
@@ -190,6 +193,8 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     .iter().filter_map(Value::as_str).map(str::to_string).collect();
                 ctx.events.lock().unwrap().extend(names.iter().cloned());
                 ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
+                // WP-701: extension-registered models become routable.
+                *ctx.ext_models.lock().unwrap() = parse_providers(&ev);
                 crate::corelog::line(&format!(
                     "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
                     ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
@@ -250,6 +255,12 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 // Steer for v0 = append to the same queue (drained in order).
                 let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
             }
+            "providers_changed" => {
+                // WP-701: a registration arrived after ready; re-key routing.
+                let next = parse_providers(&ev);
+                crate::corelog::line(&format!("[core] providers_changed: {} extension model(s)", next.len()));
+                *ctx.ext_models.lock().unwrap() = next;
+            }
             "set_model_request" => {
                 let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                 let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
@@ -265,7 +276,19 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                 };
                 match (provider, model_id) {
                     (Some(p), Some(m)) => {
-                        if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                        // WP-701: extension-registered model — routable via
+                        // the bridge stream; no bundled driver is built.
+                        let key = format!("{p}/{m}");
+                        if ctx.ext_models.lock().unwrap().contains_key(&key) {
+                            let prev = ctx.model.lock().unwrap().0.clone();
+                            let model = json!({"id":m,"provider":p});
+                            ctx.model.lock().unwrap().0 = model.clone();
+                            ctx.session.set_model(&p, &m);
+                            reply(true, json!({"ok":true}));
+                            if subscribed(&ctx, "model_select") {
+                                ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                            }
+                        } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
                             reply(false, json!(format!("unknown model {p}/{m}")));
                         } else {
                             match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
@@ -644,19 +667,70 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
         // (the headless NDJSON contract keeps its single `model_output`).
-        let turn = match fake_driver.as_ref() {
-            Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-            None => {
-                let drv = ctx.provider.lock().unwrap().clone();
-                match drv.as_ref() {
-                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    None => unreachable!("fake_driver is None only while a provider exists"),
+        let turn = {
+            // WP-701: an extension-registered model always routes via the
+            // bridge — an explicit provider selection wins over the scripted
+            // fake driver and the live provider driver.
+            let active = ctx.model.lock().unwrap().0.clone();
+            let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+            let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            let ext_model = ctx.ext_models.lock().unwrap().get(&format!("{p}/{mid}")).cloned();
+            match ext_model {
+                Some(model) => {
+                    let stream_id = uuid::Uuid::new_v4().to_string();
+                    let rx = ctx.client.attach_stream(&stream_id);
+                    let resp = ctx.client
+                        .request(
+                            "provider_stream",
+                            json!({"streamId":stream_id,"model":model,"messages":convo,"options":{}}),
+                        )
+                        .await;
+                        match resp {
+                            Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+                                let mut events = Vec::new();
+                                let mut rx = rx;
+                                let mut deltas = delta_emitter(ctx, turn_index);
+                                while let Some(line) = rx.recv().await {
+                                    if let Some(delta) = line.pointer("/event/delta").and_then(Value::as_str) {
+                                        deltas(delta); // TUI model_delta + Json message_update
+                                    }
+                                    let is_terminal = line.get("event")
+                                        .and_then(|e| e.get("type"))
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|t| t == "done" || t == "error");
+                                    events.push(line.get("event").cloned().unwrap_or(Value::Null));
+                                    if is_terminal { break; }
+                                }
+                                ctx.client.detach_stream(&stream_id);
+                                provider_events_to_turn(&events).map_err(anyhow::Error::msg)
+                            }
+                            Decision::Response(r) => {
+                                ctx.client.detach_stream(&stream_id);
+                                Err(anyhow::anyhow!(
+                                    "{}", r.get("error").and_then(Value::as_str).unwrap_or("provider_stream rejected")
+                                ))
+                            }
+                            Decision::Unavailable => {
+                                ctx.client.detach_stream(&stream_id);
+                                Err(anyhow::anyhow!("provider stream unavailable (sidecar degraded)"))
+                            }
+                        }
+                    }
+                    None => match fake_driver.as_ref() {
+                        Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                        None => {
+                            let drv = ctx.provider.lock().unwrap().clone();
+                            match drv.as_ref() {
+                                Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                                Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                                Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                                Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                                None => unreachable!("fake_driver is None only while a provider exists"),
+                            }
+                        }
+                    },
                 }
             }
-        }
         .map_err(|e| e.to_string())?;
 
         // Usage accounting (WP-407): per-turn session entry + cumulative
@@ -673,7 +747,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             *ctx.cost_total.lock().unwrap() += cost;
         }
         // The fake model does not stream: message_start + message_end only.
-        let assistant = assistant_message(&turn);
+        let assistant = assistant_message(&turn, &ctx.model.lock().unwrap().0);
         if subscribed(ctx, "message_start") { ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}})); }
         if subscribed(ctx, "message_end") { ctx.client.fire(json!({"type":"message_end","event":{"type":"message_end","message":assistant}})); }
         // WP-610: message_end carries the final assistant message (the
@@ -756,7 +830,7 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     v
 }
 
-fn assistant_message(turn: &AssistantTurn) -> Value {
+fn assistant_message(turn: &AssistantTurn, model: &Value) -> Value {
     let mut content = Vec::new();
     if let Some(t) = &turn.text {
         content.push(json!({"type":"text","text":t}));
@@ -765,10 +839,203 @@ fn assistant_message(turn: &AssistantTurn) -> Value {
         // pi-ai shape: toolCall blocks carry `input` (upstream session files).
         content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"input":tc.input}));
     }
-    json!({"role":"assistant","content":content,"api":"fake","provider":"fake","model":"fake",
+    let (provider, mid) = (
+        model.get("provider").cloned().unwrap_or(json!("fake")),
+        model.get("id").cloned().unwrap_or(json!("fake")),
+    );
+    json!({"role":"assistant","content":content,"api":"fake","provider":provider,"model":mid,
         "usage":{"input":turn.usage.input,"output":turn.usage.output,
                  "cacheRead":turn.usage.cache_read,"cacheWrite":turn.usage.cache_write},
         "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":crate::session::now_iso()})
+}
+
+/// WP-701: `ready`/`providers_changed` `providers` payload -> extension model
+/// map keyed `provider/id` (per-turn routing + set_model validation key).
+pub(crate) fn parse_providers(payload: &Value) -> std::collections::BTreeMap<String, Value> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(providers) = payload.get("providers").and_then(Value::as_array) else {
+        return map;
+    };
+    for entry in providers {
+        // Legacy name-only entries are not routable.
+        let (Some(name), Some(models)) = (entry.get("name").and_then(Value::as_str), entry.get("models").and_then(Value::as_array)) else {
+            continue;
+        };
+        for m in models {
+            let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
+            let provider = m.get("provider").and_then(Value::as_str).unwrap_or(name);
+            let mut model = m.clone();
+            model["provider"] = Value::String(provider.to_string());
+            map.insert(format!("{provider}/{id}"), model);
+        }
+    }
+    map
+}
+
+/// WP-701: token usage from an upstream `done` message (camelCase wire).
+fn usage_from_message(v: Option<&Value>) -> crate::model::Usage {
+    let Some(u) = v else { return crate::model::Usage::default() };
+    crate::model::Usage {
+        input: u.get("input").and_then(Value::as_u64).unwrap_or(0),
+        output: u.get("output").and_then(Value::as_u64).unwrap_or(0),
+        cache_read: u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0),
+        cache_write: u.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0),
+    }
+}
+
+/// WP-701: maps a run of upstream `AssistantMessageEvent`s (forwarded by the
+/// sidecar as `provider_stream_event` lines) to an AssistantTurn. `done` is
+/// authoritative for text/tool calls/usage; accumulated `text_delta` /
+/// `toolcall_end` state is the fallback when the done message carries no
+/// content. `error` is terminal; a run without a terminal event is an error.
+pub(crate) fn provider_events_to_turn(events: &[Value]) -> Result<AssistantTurn, String> {
+    use crate::model::{ToolCallSpec, Usage};
+    let mut text = String::new();
+    let mut tool_calls: Vec<ToolCallSpec> = Vec::new();
+    for ev in events {
+        match ev.get("type").and_then(Value::as_str) {
+            Some("text_delta") => {
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) { text.push_str(d); }
+            }
+            Some("toolcall_end") => {
+                if let Some(tc) = ev.get("toolCall") {
+                    tool_calls.push(ToolCallSpec {
+                        id: tc.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        name: tc.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        input: tc.get("arguments").cloned().unwrap_or(Value::Null),
+                    });
+                }
+            }
+            Some("done") => {
+                let message = ev.get("message").cloned().unwrap_or(Value::Null);
+                let usage = usage_from_message(message.get("usage"));
+                // The done message is authoritative when it carries content;
+                // otherwise fall back to the accumulated deltas/tool calls.
+                let content = message.get("content").and_then(Value::as_array);
+                let has_content = content.is_some_and(|c| !c.is_empty());
+                if has_content {
+                    let mut final_text = String::new();
+                    let mut final_tools: Vec<ToolCallSpec> = Vec::new();
+                    for part in content.unwrap() {
+                        match part.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                if let Some(t) = part.get("text").and_then(Value::as_str) { final_text.push_str(t); }
+                            }
+                            Some("toolCall") => final_tools.push(ToolCallSpec {
+                                id: part.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                name: part.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                input: part.get("arguments").cloned().unwrap_or(Value::Null),
+                            }),
+                            _ => {}
+                        }
+                    }
+                    return Ok(AssistantTurn { text: Some(final_text), tool_calls: final_tools, usage });
+                }
+                return Ok(AssistantTurn { text: Some(text), tool_calls, usage });
+            }
+            Some("error") => {
+                let msg = ev.pointer("/error/errorMessage").and_then(Value::as_str)
+                    .unwrap_or("provider stream error");
+                return Err(msg.to_string());
+            }
+            _ => {}
+        }
+    }
+    Err("provider stream ended without a terminal event".into())
+}
+
+#[cfg(test)]
+mod provider_stream_tests {
+    use super::{parse_providers, provider_events_to_turn, usage_from_message};
+    use crate::model::Usage;
+    use serde_json::json;
+
+    fn done_event(content: serde_json::Value, usage: Option<serde_json::Value>) -> serde_json::Value {
+        let mut message = json!({"role":"assistant","content":content,"stopReason":"stop","timestamp":1});
+        if let Some(u) = usage {
+            message["usage"] = u;
+        }
+        json!({"type":"done","reason":"stop","message":message})
+    }
+
+    #[test]
+    fn maps_text_deltas_and_toolcall_end_with_done_message() {
+        let events = vec![
+            json!({"type":"start","partial":{"role":"assistant","content":[]}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"Hello ","partial":{}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"world","partial":{}}),
+            json!({"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"tc_1","name":"bash","arguments":{"command":"ls"}},"partial":{}}),
+            done_event(
+                json!([{"type":"text","text":"Hello world"},{"type":"toolCall","id":"tc_1","name":"bash","arguments":{"command":"ls"}}]),
+                Some(json!({"input":7,"output":11,"cacheRead":3,"cacheWrite":4})),
+            ),
+        ];
+        let turn = provider_events_to_turn(&events).expect("done stream maps to a turn");
+        assert_eq!(turn.text.as_deref(), Some("Hello world"));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "tc_1");
+        assert_eq!(turn.tool_calls[0].name, "bash");
+        assert_eq!(turn.tool_calls[0].input, json!({"command":"ls"}));
+        assert_eq!(turn.usage, Usage { input: 7, output: 11, cache_read: 3, cache_write: 4 });
+    }
+
+    #[test]
+    fn terminal_error_event_yields_the_error_message() {
+        let events = vec![json!({"type":"start","partial":{}}),
+            json!({"type":"error","reason":"error","error":{"role":"assistant","stopReason":"error","errorMessage":"boom from fake provider"}})];
+        let err = provider_events_to_turn(&events).unwrap_err();
+        assert_eq!(err, "boom from fake provider");
+    }
+
+    #[test]
+    fn stream_without_terminal_event_is_an_error() {
+        let events = vec![json!({"type":"start","partial":{}}), json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":{}})];
+        let err = provider_events_to_turn(&events).unwrap_err();
+        assert!(err.contains("terminal"), "{err}");
+    }
+
+    #[test]
+    fn done_without_message_falls_back_to_accumulated_state() {
+        let events = vec![
+            json!({"type":"text_delta","contentIndex":0,"delta":"acc ","partial":{}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"text","partial":{}}),
+            json!({"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"tc_9","name":"read","arguments":{"path":"f"}},"partial":{}}),
+            json!({"type":"done","reason":"stop","message":{"role":"assistant","content":[]}}),
+        ];
+        let turn = provider_events_to_turn(&events).expect("fallback turn");
+        assert_eq!(turn.text.as_deref(), Some("acc text"));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "read");
+        assert_eq!(turn.usage, Usage::default());
+    }
+
+    #[test]
+    fn parse_providers_builds_provider_id_keys() {
+        let payload = json!({"providers":[
+            {"name":"faketest","models":[
+                {"provider":"faketest","id":"faketest/echo-1","api":"faketest-api","name":"Fake Echo 1"}
+            ]},
+            {"name":"other","models":[
+                {"id":"other/m-1"}
+            ]}
+        ]});
+        let map = parse_providers(&payload);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("faketest/faketest/echo-1").expect("first model").get("api"), Some(&json!("faketest-api")));
+        // A model entry without `provider` inherits the registered name.
+        let m = map.get("other/other/m-1").expect("second model");
+        assert_eq!(m.get("provider"), Some(&json!("other")));
+        // Legacy name-only entries are not routable.
+        let map = parse_providers(&json!({"providers":["legacy-name"]}));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn usage_from_message_maps_camel_case_fields() {
+        let u = usage_from_message(Some(&json!({"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10})));
+        assert_eq!(u, Usage { input: 1, output: 2, cache_read: 3, cache_write: 4 });
+        assert_eq!(usage_from_message(None), Usage::default());
+    }
 }
 
 fn summarize(content: &Value) -> String {

@@ -261,8 +261,19 @@ pub async fn run() -> Result<i32> {
     let (provider_name, model_id) =
         crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
     // S3: provider credentials come from env only; the fake driver needs none.
-    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
-    let fake_mode = provider.is_none();
+    // WP-701: a name unknown to the bundled registry may be an
+    // extension-registered provider — no driver is built at startup; the
+    // bridge routes it after `ready` (typed error if never registered).
+    let builtin = crate::provider::is_builtin_provider(&provider_name);
+    if !builtin && model_id.is_none() {
+        anyhow::bail!("--provider {provider_name} (not a built-in provider) requires --model <id>");
+    }
+    let provider: Option<ProviderDriver> = if builtin {
+        build_provider(&provider_name, model_id.as_deref(), &agent_dir)?
+    } else {
+        None
+    };
+    let fake_mode = builtin && provider.is_none();
     let initial_model = if fake_mode {
         json!({"id":"fake","provider":"fake"})
     } else {
@@ -394,7 +405,7 @@ pub async fn run() -> Result<i32> {
     } else {
         json!([])
     };
-    let init = json!({"protocolVersion":0,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    let init = json!({"protocolVersion":1,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
         Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
@@ -406,6 +417,7 @@ pub async fn run() -> Result<i32> {
         session: session.clone(),
         events: Arc::default(),
         ext_tools: Arc::default(),
+        ext_models: Arc::default(),
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
@@ -450,6 +462,16 @@ pub async fn run() -> Result<i32> {
         .await.context("sidecar did not send `ready` in time")?.context("sidecar event task exited before `ready`")?;
     if ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
         bail!("sidecar apiVersion != 0");
+    }
+    // WP-701: a startup --provider unknown to the bundled registry must have
+    // been registered by an extension — typed error before the run starts
+    // (no silent fake-driver fallback).
+    if !builtin {
+        let ext = crate::agent::parse_providers(&ready);
+        let key = format!("{provider_name}/{}", model_id.as_deref().unwrap_or(""));
+        if !ext.contains_key(&key) {
+            bail!("provider {key} is not a built-in provider and was not registered by an extension (check --extension-dir)");
+        }
     }
     for e in ready.get("errors").and_then(Value::as_array).into_iter().flatten() {
         crate::corelog::line(&format!("[core] extension load error: {e}"));

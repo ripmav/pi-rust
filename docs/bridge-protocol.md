@@ -1,4 +1,4 @@
-# Extension Bridge Protocol v0
+# Extension Bridge Protocol v1
 
 Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` framing). S3 is the acceptance context: unmodified upstream example extensions must work "wie gewohnt" for the headless-safe API slice through this protocol.
 
@@ -29,13 +29,13 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 0` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout:
+2. Core sends `init`: `protocolVersion: 1` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout:
 
-   `{"id":"…","type":"init","protocolVersion":0,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000}}`
+   `{"id":"…","type":"init","protocolVersion":1,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000}}`
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-zero `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-one `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 0, capabilities: { ui: string[], timeoutMs: number } }` → `data: { apiVersion: 0 }` | req/resp | new in v0 |
+| core→ | `init` | `{ protocolVersion: 1, capabilities: { ui: string[], timeoutMs: number } }` → `data: { apiVersion: 0 }` | req/resp | new in v0 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -67,6 +67,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 | core→ | `session_shutdown` | `SessionShutdownEvent` (`types.ts:845`) | F&F | `emitSessionShutdownEvent()` (`runner.ts:265`) |
 | core→ | `command` | `{ name, args }` → `data: <handler return value as JSON or null>` | req/resp | invokes a registered extension command (`ready.commands`); unknown name → error response |
 | core→ | `extension_tool_call` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` (`packages/agent/src/types.ts:424`) | req/resp | `AgentTool.execute` (`packages/agent/src/types.ts:478-500`) via the `extension.tools` → wrapper path |
+| core→ | `provider_stream` | `{ streamId, model: { provider, id, api? }, messages: AgentMessage[], options: { temperature?, maxTokens? } }` → `data: { ok: true, streamId }` | req/resp + event stream (v1) | invokes the extension-registered provider's `streamSimple` (WP-701): the sidecar acks, then emits one `provider_stream_event` line per upstream `AssistantMessageEvent` (`core/extensions/types.ts:818-848`), verbatim under `event`; the terminal `done`/`error` event ends the stream. Unknown provider/model, missing `streamSimple`, or an unresolvable `apiKey` (`!command` or unset `$ENV_VAR`) → error response, no stream. No abort signal in v1 (documented non-goal). |
 | core→ | `set_model` | `ModelSelectEvent` (`types.ts:1155`) | F&F | `emit()` |
 | core→ | `set_thinking_level` | `ThinkingLevelSelectEvent` (`types.ts:1163`) | F&F | `emit()` |
 | core→ | `extension_ui_response` | `RpcExtensionUIResponse` (`modes/rpc/rpc-types.ts:294-298`) | reply to a dialog | `rpc-mode.ts:786-799` |
@@ -75,7 +76,7 @@ Sidecar→core events:
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| ←sidecar | `ready` | registry per Handshake §4 | event | new in v0 |
+| ←sidecar | `ready` | registry per Handshake §4 — `providers` is v1: `[{ name: string, models: [{ provider, id, api?, name? }] }]` (empty list = none; legacy name-only entries are not emitted) | event | new in v0, providers extended in v1 |
 | ←sidecar | `extension_error` | `ExtensionError` (`types.ts:2348`) | event | `rpc-mode.ts:356` |
 | ←sidecar | `extension_ui_request` | `RpcExtensionUIRequest` (`modes/rpc/rpc-types.ts:252-287`) — dialog subset `select`/`confirm`/`input`/`editor` are req/resp; `notify`, `setStatus`, `setTitle`, `set_editor_text` are F&F (the `notify` variant carries extension user-facing messages) | event | `rpc-mode.ts:95-137, 140-315` |
 | ←sidecar | `session_info_changed` | `SessionInfoChangedEvent` (`types.ts:785`) — session name (no label field exists upstream) | event | `emit()` |
@@ -84,6 +85,8 @@ Sidecar→core events:
 | ←sidecar | `set_model_request` | `{ modelId, provider }` → `data: { ok: boolean }` | req/resp | `pi.setModel` — core switches the active model (provider included: model ids are not unique across providers) |
 | ←sidecar | `set_thinking_level_request` | `{ level }` → `data: { ok: boolean }` | req/resp | `pi.setThinkingLevel` — core switches the level, then echoes `set_thinking_level` to subscribed extensions |
 | ←sidecar | `tool_call_request` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` | req/resp | nested `ctx.executeTool` — core executes the named tool (built-in or extension) with its normal hooks, including `tool_call`/`tool_result` decision events |
+| ←sidecar | `providers_changed` | `{ providers: [{ name, models: [{ provider, id, api?, name? }] }] }` (same shape as `ready.providers`) | event, F&F (v1) | a `registerProvider`/`unregisterProvider` call landed after `ready`; the core re-keys its per-turn provider routing and `set_model` validation from the payload |
+| ←sidecar | `provider_stream_event` | `{ streamId, event: AssistantMessageEvent }` (`core/extensions/types.ts:818-848`, verbatim upstream JSON) | event stream (v1) | one line per event of the `provider_stream` invocation; `done` or `error` is terminal for that `streamId` |
 
 Event delivery for F&F rows: the core writes the command line and writes nothing more; a dead pipe surfaces as a transport error (EOF/EPIPE), not as a per-line failure.
 
@@ -116,9 +119,19 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":0,"capabilities":{"ui":[],"timeoutMs":30000}}
+{"id":"h1","type":"init","protocolVersion":1,"capabilities":{"ui":[],"timeoutMs":30000}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
-{"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[],"events":["tool_call","tool_result","session_start"]}
+{"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
+```
+
+`provider_stream` round-trip (v1, extension-registered model; the terminal `done` ends the stream):
+
+```json
+{"id":"p1","type":"provider_stream","streamId":"s-42","model":{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"},"messages":[{"role":"user","content":"hi"}],"options":{}}
+{"id":"p1","type":"response","command":"provider_stream","success":true,"data":{"ok":true,"streamId":"s-42"}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"start","partial":{"role":"assistant","content":[]}}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"text_delta","contentIndex":0,"delta":"Hello ","partial":{}}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"done","reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"stopReason":"stop","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0}}}}
 ```
 
 `tool_call` decision (handler blocks, input unchanged):
@@ -148,11 +161,11 @@ Handshake:
 {"type":"extension_error","extensionPath":"/home/u/proj/.pi/extensions/broken/index.ts","event":"tool_call","error":"Cannot read properties of undefined (reading 'input')"}
 ```
 
-## Out of scope for v0
+## Out of scope for v1
 
 - **TUI renderers**: message/entry renderers, tool renderers, markdown transformers, themes, `ctx.ui` beyond the dialog subset (`select`, `confirm`, `input`, `editor`, `notify`, `setStatus`, `setTitle`, `set_editor_text`) — no `onTerminalInput`, working indicators, widget factories, footer/header, autocomplete, `custom()`, editor-text readback.
 - **`registerShortcut`**: accepted by the loader, ignored by the bridge.
 - **Compaction**: `session_before_compact` / `session_compact` / `session_compact_failed`, the `compact` command, and boundary mutation (`entries`/`continue` on `turn_end`, `agent_before_settle`); `turn_end`/`message_end` are delivered without their mutation results.
 - **MCP**: registration only — `registerMcpServer` is accepted and reported, but no MCP transport crosses the bridge and MCP-provided tools are not executable.
-- **Provider invocation**: providers registered via `registerProvider` are reported in `ready` but the v0 core never invokes them (the core model driver is standalone).
+- **Provider invocation (v1 limitations)**: extension-registered providers are invoked by the core (WP-701) for the legacy config form (`registerProvider(name, config)` with `streamSimple`). Out of scope: the native `Provider` object form, `registerNativeProvider`, virtual models (`registerVirtualModel` is accepted and ignored), `oauth` refresh flows, `apiKey` `!command` values (typed error), `refreshModels`, and abort signals (no per-turn `AbortSignal` exists in the core loop yet).
 - Remaining upstream events not in the catalog (`project_trust`, `resources_discover`, `before_provider_request`/`before_provider_headers`/`after_provider_response`/`provider_stream_event`, `session_before_switch`/`session_before_fork`/`session_before_tree`, `ui_prompt_start`/`ui_prompt_end`, `tool_execution_*`, `agent_settled`) are not sent; extensions that need them load, but their handlers never fire.

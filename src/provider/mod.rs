@@ -45,6 +45,17 @@ impl ProviderDriver {
 
 /// Builds the driver from CLI values + resolved credentials (WP-303 order:
 /// stored `auth.json` credential, then ambient env var).
+/// WP-701: true for every provider name `build_provider` can serve (built-in
+/// drivers incl. `fake`). Anything else may be an extension-registered
+/// provider: the core defers to the sidecar `ready` payload and routes it via
+/// the bridge (typed error if never registered).
+pub fn is_builtin_provider(name: &str) -> bool {
+    matches!(name, "fake" | "anthropic" | "azure" | "azure-openai" | "amazon-bedrock"
+        | "cloudflare-workers-ai" | "cloudflare-ai-gateway" | "google" | "google-vertex")
+        || compat_family_base(name).is_some()
+        || not_supported_v0(name).is_some()
+}
+
 pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Path) -> Result<Option<ProviderDriver>> {
 	match name {
 		"fake" => Ok(None),

@@ -40,6 +40,8 @@ pub struct BridgeClient {
     /// later state, so the current state alone cannot tell a degraded run from
     /// a clean one (the exit code must still be 3, not 0/2).
     degraded_seen: Arc<AtomicBool>,
+    /// WP-701: provider stream routes, streamId -> event receiver.
+    streams: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>>,
 }
 
 impl BridgeClient {
@@ -53,22 +55,40 @@ impl BridgeClient {
         let (exit_tx, exit_rx) = watch::channel(None::<i32>);
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
         let degraded_seen = Arc::new(AtomicBool::new(false));
+        let streams: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
 
         // Demux: responses correlate strictly by id (a response for an unknown
-        // or already-timed-out id is ignored — protocol rule); everything else
-        // is a sidecar→core event.
+        // or already-timed-out id is ignored — protocol rule); WP-701 provider
+        // stream events route to their attached receiver; everything else is a
+        // sidecar→core event.
         let (p, st) = (pending.clone(), state_tx.clone());
         let seen = degraded_seen.clone();
+        let stream_routes = streams.clone();
         tokio::spawn(async move {
             while let Some(v) = rx.recv().await {
-                if v.get("type").and_then(Value::as_str) == Some("response") {
-                    if let Some(id) = v.get("id").and_then(Value::as_str) {
-                        if let Some(w) = p.lock().unwrap().remove(id) {
-                            let _ = w.send(v);
+                match v.get("type").and_then(Value::as_str) {
+                    Some("response") => {
+                        if let Some(id) = v.get("id").and_then(Value::as_str) {
+                            if let Some(w) = p.lock().unwrap().remove(id) {
+                                let _ = w.send(v);
+                            }
                         }
                     }
-                } else {
-                    let _ = events.send(v);
+                    Some("provider_stream_event") => {
+                        if let Some(stream_id) = v.get("streamId").and_then(Value::as_str) {
+                            let routed = stream_routes
+                                .lock()
+                                .unwrap()
+                                .get(stream_id)
+                                .is_some_and(|tx| tx.send(v.clone()).is_ok());
+                            if !routed {
+                                crate::corelog::line(&format!("[core] provider_stream_event for unknown or closed stream {stream_id} dropped"));
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = events.send(v);
+                    }
                 }
             }
             Self::degrade(&st, &seen); // stdout EOF: transport error unless already stopped
@@ -85,7 +105,7 @@ impl BridgeClient {
         });
 
         (
-            Self { tx, pending, state_tx, state_rx, exit_rx, degraded_seen },
+            Self { tx, pending, state_tx, state_rx, exit_rx, degraded_seen, streams },
             events_rx,
         )
     }
@@ -175,6 +195,20 @@ impl BridgeClient {
         if self.tx.send(line.to_string()).is_err() {
             Self::degrade(&self.state_tx, &self.degraded_seen);
         }
+    }
+
+    /// WP-701: route `provider_stream_event` lines for `stream_id` to a fresh
+    /// receiver. Attach before sending the `provider_stream` request so an
+    /// early event cannot be dropped by the demux.
+    pub fn attach_stream(&self, stream_id: &str) -> mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.streams.lock().unwrap().insert(stream_id.to_string(), tx);
+        rx
+    }
+
+    /// WP-701: drop the stream route (the turn ended or failed).
+    pub fn detach_stream(&self, stream_id: &str) {
+        self.streams.lock().unwrap().remove(stream_id);
     }
 
     /// Resolves with the sidecar exit code once the process has exited.

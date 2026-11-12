@@ -46,7 +46,7 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 
 ## What the sidecar does
 
-- `init` (protocolVersion 0) → loads extensions with the original loader,
+- `init` (protocolVersion 1) → loads extensions with the original loader,
   binds `ExtensionRunner` (actions/context actions/provider actions), responds
   `success`, emits `ready` (tools with TypeBox schemas via the
   `extension.tools` → `wrapper.ts` → `tool-definition-wrapper.ts` path,

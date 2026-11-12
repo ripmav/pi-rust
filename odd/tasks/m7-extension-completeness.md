@@ -1,0 +1,41 @@
+# M7 — Extension Completeness (WP-701…WP-708)
+
+Rust port of earendil-works/pi (compatibility layer: upstream extensions run unmodified).
+M7 completes the extension surface: provider registration, MCP (stdio + HTTP), compaction,
+shortcuts, extension UI chrome, and evaluation memos for `ctx.ui.custom` + bundled extensions.
+One GitHub stack; first PR based on `main`, each WP = one PR based on the previous M7 PR head.
+
+## Specs
+S1 (L1, user): "Ich möchte dass du von folgendem Projekt ein Rust-Port erstellst: https://github.com/earendil-works/pi Es soll eine kompatibiltätsschicht haben um Extensions usw. vom Original weiterhin wie gewohnt nutzen zu können"
+S2 (L2, user): "stack ist gemerged. Mach weiter mit M7"
+S3 (WP-701 acceptance): "A fixture extension registering a fake provider drives a full conversation (text + tool call) end-to-end; provider errors surface as model errors; unregistered id → normal registry fallback."
+S4 (WP-702 acceptance): "Fixture server: tool list + call round-trip; crash/restart semantics per upstream; unmodified MCP-using extension from upstream examples works."
+S5 (WP-703 acceptance): "Mock HTTP MCP server: initialize + tool call; stream response assembly; auth header pinned by test (no secret in logs)."
+S6 (WP-704 acceptance): "Scripted long session triggers compaction; transcript continues coherently (fake model assertions on what it sees); compaction events received by a fixture extension; session file stays upstream-compatible."
+S7 (WP-705 acceptance): "Fixture extension registers a shortcut → pressing it in the TUI (simulated) fires the handler; conflict with a built-in resolves per upstream rule."
+S8 (WP-706 acceptance): "Fixture: status text appears in status bar, title in title area; cleared on session end; matrix re-run."
+S9 (WP-707 acceptance): "Memo in-file: upstream usage examples, feasibility verdict, either a follow-up WP or a documented non-goal with rationale. No code."
+S10 (WP-708 acceptance): "Table in-file: per extension — loads? (matrix run), missing core capability, enable-WP or non-goal. No code."
+
+## Tasks
+- T1 / WP-701 — `registerProvider` invocation (701a bridge protocol + version bump, 701b core dispatch + streaming, 701c upstream example matrix) — S3 — issue #75 — branch `feat/wp-701-register-provider` — commit: (pending)
+- T2 / WP-702 — MCP transport stdio (702a client JSON-RPC, 702b tool bridging, 702c config entries) — S4 — issue #76 — branch `feat/wp-702-mcp-stdio` — commit: (pending)
+- T3 / WP-703 — MCP transport HTTP/SSE (headers/auth from config, env-only values) — S5 — issue #77 — branch `feat/wp-703-mcp-http` — commit: (pending)
+- T4 / WP-704 — Compaction (704a threshold + events, 704b summarization + rewrite, 704c session marker entries) — S6 — issue #78 — branch `feat/wp-704-compaction` — commit: (pending)
+- T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-shortcuts` — commit: (pending)
+- T6 / WP-706 — Extension UI chrome (status/title render + clear, matrix re-run) — S8 — issue #80 — branch `feat/wp-706-extension-ui-chrome` — commit: (pending)
+- T7 / WP-707 — Evaluate `ctx.ui.custom` (decision memo in WP file, no code) — S9 — issue #81 — branch `feat/wp-707-ui-custom-eval` — commit: (pending)
+- T8 / WP-708 — Bundled extensions evaluation (table in WP file, no code) — S10 — issue #82 — branch `feat/wp-708-bundled-extensions` — commit: (pending)
+
+## Log
+L1 (user, session start 2026-11-07): "Ich möchte dass du von folgendem Projekt ein Rust-Port erstellst: `https://github.com/earendil-works/pi` Es soll eine kompatibiltätsschicht haben um Extensions usw. vom Original weiterhin wie gewohnt nutzen zu können"
+L2 (user, 2026-11-12): "stack ist gemerged. Mach weiter mit M7"
+L3 (design decisions T1/WP-701, from explore mwdmws3x-1-cbv6, 2026-11-12):
+- Form: legacy config form `registerProvider(name, {models, streamSimple, baseUrl, apiKey, api})` only (upstream example custom-provider-gitlab-duo shape). Native Provider object form, virtual models, oauth refresh, `!command` apiKey: documented non-goals for v0.
+- Sidecar hosts the callback: capture the config object at registration (models list verbatim as Model objects), call `config.streamSimple(model, transcriptContext, options)` directly on a core `provider_stream` request — no ModelRuntime/auth.json/oauth in the sidecar. apiKey resolution: literal + `$ENV_VAR` only.
+- Protocol 701a: `ready.providers` becomes `[{name, models:[{provider,id,api,...}]}]` (was name-only); new core→sidecar request `provider_stream {streamId, model, messages, options}`; sidecar→core lines `{type:"provider_stream_event", streamId, event:<upstream AssistantMessageEvent JSON>}`; terminal `done`/`error` events end the stream. Bridge version bump + spec section in docs/bridge-protocol.md.
+- Core 701b: per-turn selection — model id in extension model list ⇒ bridge stream path (before the hardcoded OpenAi/Anthropic/Google/Bedrock match); `text_delta`→on_delta, `toolcall_end`→tool_calls, `done`→AssistantTurn, terminal `error`→Err(errorMessage) (existing error surfacing agent.rs:516-522). `set_model_request` accepts extension ids (validated against the extension list); unregistered id ⇒ bundled registry fallback unchanged.
+- No abort signal in v0 (no per-turn AbortSignal exists in the Rust loop) — documented.
+- 701c: fixture extension (tests/fixtures/) with a fake provider (scripted text + tool call) for the e2e matrix; upstream gitlab-duo example loads unmodified through the loader (registration path, no network).
+- No abort, no picker change (provider UI = WP-609 follow-up), same-name re-registration: last wins (sidecar keeps a Map, not Set).
+L4 (T1/WP-701 evidence, 2026-11-12): writer mwdnqpg8-2-3jdo stalled twice mid-task (provider timeout); parent finished inline from the worker's partial tree (tests + sidecar + client routing were done; core mapping stubs + CLI + docs were not). RED observed: `cargo test --test extension_bridge wp701` — 4/5 failed ("unknown provider faketest" typed startup error, 0 tool executions, error run exited 0, set_model turn served by scripted fake) plus a worker-introduced E0505 compile error. Fixes applied inline: E0505 (`v.clone()`), `parse_providers`/`provider_events_to_turn` implementations, `protocolVersion 0→1` (cli.rs + docs + sidecar README), `is_builtin_provider` gate so an unknown --provider defers to the ready payload (typed error before the run if never registered), extension routing ahead of the scripted fake driver, `assistant_message` carries the active model's real labels, test-side filter for non-message session entries. GREEN: 232 in-crate, 28 e2e (5 new wp701), 3 PTY, 55 smoke (701c: unmodified upstream gitlab-duo example loads + registers). S3 covered. Deviations from L3: none (test-side fix only: session entry filter for WP-407 usage entries).

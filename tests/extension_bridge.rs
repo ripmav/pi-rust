@@ -1296,3 +1296,240 @@ fn extension_tool_shadows_builtin() {
     // the missing file `x`).
     assert_eq!(execs[0]["result_summary"], "shadow-read:x");
 }
+
+// --- M7/WP-701: extension-registered providers (registerProvider) ---
+
+/// S3: a fixture extension registering a fake provider drives a full
+/// conversation (text + tool call) end-to-end: turn 1 = text + bash tool
+/// call, the core executes it, turn 2 = final text. Exit 0.
+#[test]
+fn wp701_extension_provider_full_conversation() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp701-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/fake-provider.ts");
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider").arg("faketest")
+        .arg("--model").arg("faketest/echo-1")
+        .arg("--extension-dir").arg(&fixture)
+        .arg("--prompt").arg("run the check")
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // No handler errors.
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
+        "unexpected extension_error\n{stdout}",
+    );
+
+    // The fake provider's tool call executed (built-in bash round trip).
+    let execs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "tool_execution").collect();
+    assert_eq!(execs.len(), 1, "expected one tool execution\n{stdout}");
+    assert_eq!(execs[0]["name"], "bash");
+    assert_eq!(execs[0]["input"]["command"], "echo fake-provider-ok");
+    assert_eq!(execs[0]["blocked"], json!(false));
+    assert!(execs[0]["result_summary"].as_str().unwrap_or("").contains("fake-provider-ok"));
+
+    // Turn 0: text + the tool call; turn 1: the final text.
+    let model_outputs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "model_output").collect();
+    assert_eq!(model_outputs.len(), 2, "expected 2 model outputs\n{stdout}");
+    assert_eq!(model_outputs[0]["toolCalls"], json!(["bash"]));
+    assert_eq!(model_outputs[0]["text"], "checking with bash");
+    assert_eq!(model_outputs[1]["text"], "fake provider done");
+    assert_eq!(model_outputs[1]["toolCalls"], json!([]));
+
+    // Final transcript: user + assistant(tool call) + toolResult + assistant(text).
+    let last = lines.last().expect("no stdout lines");
+    assert_eq!(last["kind"], "transcript");
+    let entries: Vec<&Value> = last["session"]["entries"].as_array().unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    let roles: Vec<&str> = entries.iter().map(|e| e["message"]["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "toolResult", "assistant"]);
+    // Assistant messages carry the extension model's real labels.
+    let assistants = entries.iter().filter(|e| e["message"]["role"] == "assistant");
+    for a in assistants {
+        assert_eq!(a["message"]["provider"], "faketest");
+        assert_eq!(a["message"]["model"], "faketest/echo-1");
+    }
+    assert_eq!(entries.last().unwrap()["message"]["content"][0]["text"], "fake provider done");
+
+    // Provider usage was recorded in the session file (from the done messages).
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let usage_entries: Vec<&str> = file.lines().filter(|l| l.contains("\"type\":\"usage\"")).collect();
+    assert_eq!(usage_entries.len(), 2, "usage entries: {file}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S3: a fixture variant whose streamSimple pushes a terminal error event ->
+/// the run surfaces a model error (exit 2 in NDJSON mode, message on stderr).
+#[test]
+fn wp701_extension_provider_error_surfaces_as_model_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp701e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/fake-provider-error.ts");
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider").arg("faketest-error")
+        .arg("--model").arg("faketest-error/boom-1")
+        .arg("--extension-dir").arg(&fixture)
+        .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(2), "model error run exits 2\n{stderr}");
+    assert!(
+        stderr.contains("boom from fake provider"),
+        "provider errorMessage must surface on stderr: {stderr}",
+    );
+
+    // The run failed before any tool call; the transcript holds the user
+    // message only.
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let last = lines.last().expect("no stdout lines");
+    assert_eq!(last["kind"], "transcript");
+    let msgs = last["session"]["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1, "only the user message: {last}");
+    assert_eq!(msgs[0]["role"], "user");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S3: a bundled-registry model still works with a provider extension loaded
+/// (fallback unchanged: the extension's model list does not shadow the
+/// bundled driver).
+#[test]
+fn wp701_bundled_model_fallback_with_extension_loaded() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp701f-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let base = sse_loop_mock("mock-openai-text");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("OPENAI_API_KEY", "e2e-key")
+        .env("OPENAI_BASE_URL", &base)
+        .arg("--provider").arg("openai")
+        .arg("--model").arg("gpt-4o-mini")
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/fake-provider.ts"))
+        .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(tmp.join("session.jsonl"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let last = lines.last().expect("no stdout lines");
+    let dump = last["session"].to_string();
+    assert!(dump.contains("mock-openai-text"), "bundled driver must serve the run: {dump}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S3: set_model (sidecar->core) accepts an extension-registered id — the
+/// fixture tool switches the active model mid-run (a scripted fake turn), the
+/// core validates it against the extension list, and the NEXT turn is served
+/// by the extension provider over the bridge. One model_change entry.
+#[test]
+fn wp701_set_model_accepts_extension_id() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp701s-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/fake-provider.ts");
+    let scenario = json!({
+        "user_messages": ["switch"],
+        "model_scripts": [[
+            { "tool_call": { "name": "switch_to_fake", "input": {} } },
+            { "text": "should never be used" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(&fixture)
+        .arg("--scenario").arg(&scen)
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The setModel round-trip was accepted (ok:true in the tool result).
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "switch_to_fake")
+        .expect("switch_to_fake tool_execution missing\n{stdout}");
+    assert_eq!(exec["result_summary"], "switched:true");
+
+    // Turn 2 was served by the extension provider, not the scripted fake.
+    let model_outputs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "model_output").collect();
+    assert_eq!(model_outputs.len(), 2, "expected 2 model outputs\n{stdout}");
+    assert_eq!(model_outputs[1]["text"], "fake provider done");
+
+    let last = lines.last().expect("no stdout lines");
+    let dump = last["session"].to_string();
+    assert!(!dump.contains("should never be used"), "scripted turn leaked: {dump}");
+
+    // Exactly one model_change entry: the accepted extension switch.
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let changes: Vec<Value> = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("model_change"))
+        .collect();
+    assert_eq!(changes.len(), 1, "model_change entries: {file}");
+    assert_eq!(changes[0]["provider"], "faketest");
+    assert_eq!(changes[0]["modelId"], "faketest/echo-1");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S3: a provider name that is neither bundled nor extension-registered is a
+/// typed startup error (no silent fake-driver fallback).
+#[test]
+fn wp701_unknown_extension_provider_is_typed_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp701u-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider").arg("not-registered-anywhere")
+        .arg("--model").arg("not-registered-anywhere/m-1")
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/fake-provider.ts"))
+        .arg("--prompt").arg("hi")
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .arg("--session-file").arg(tmp.join("session.jsonl"))
+        .output()
+        .expect("running pi-rust");
+    assert_ne!(out.status.code(), Some(0), "unknown provider must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("not-registered-anywhere/m-1"), "typed error names the model: {stderr}");
+    assert!(stderr.contains("extension"), "typed error mentions the extension registry: {stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
