@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap, Widget};
 use ratatui::buffer::Buffer;
+use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 pub mod dialog;
@@ -54,8 +55,9 @@ pub struct TuiApp {
     pub session: String,
     /// Window title set by an extension (`setTitle`); shown in the status bar.
     pub title: Option<String>,
-    /// Status text set by an extension (`setStatus`); shown in the status bar.
-    pub status_text: Option<String>,
+    /// Extension statuses by key (`setStatus`, upstream keyed map); the
+    /// status bar renders them sorted by key, space-joined.
+    pub statuses: BTreeMap<String, String>,
     /// Open dialog (WP-604); keys are routed to it until it closes.
     pub dialog: Option<dialog::Dialog>,
     /// Open `editor` dialog (WP-605): the main editor pane is reused as the
@@ -134,6 +136,14 @@ impl TuiApp {
     pub fn with_shortcuts(mut self, ext_shortcuts: Vec<(String, String)>) -> Self {
         self.ext_shortcuts = ext_shortcuts;
         self
+    }
+
+    /// WP-706: upstream `resetExtensionUI` on session replacement — the
+    /// extension-contributed chrome (status entries, title) belongs to the
+    /// previous session.
+    pub fn clear_extension_chrome(&mut self) {
+        self.statuses.clear();
+        self.title = None;
     }
 
     pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
@@ -342,7 +352,7 @@ impl TuiApp {
             cwd: cwd.into(),
             session: session.into(),
             title: None,
-            status_text: None,
+            statuses: BTreeMap::new(),
             dialog: None,
             editor_session: None,
             kb,
@@ -1120,7 +1130,17 @@ impl TuiApp {
                 self.scroll = 0;
             }
             Some("set_status") => {
-                self.status_text = ev.get("statusText").and_then(Value::as_str).map(str::to_string);
+                // Upstream semantics: keyed; undefined text deletes the key.
+                if let Some(k) = ev.get("statusKey").and_then(Value::as_str) {
+                    match ev.get("statusText").and_then(Value::as_str) {
+                        Some(t) => {
+                            self.statuses.insert(k.to_string(), t.to_string());
+                        }
+                        None => {
+                            self.statuses.remove(k);
+                        }
+                    }
+                }
             }
             Some("set_title") => {
                 self.title = ev.get("title").and_then(Value::as_str).map(str::to_string);
@@ -1281,8 +1301,9 @@ impl TuiApp {
             if let Some(t) = &self.title {
                 segs.push(t.clone());
             }
-            if let Some(st) = &self.status_text {
-                segs.push(st.clone());
+            if !self.statuses.is_empty() {
+                // BTreeMap iterates sorted by key (upstream footer order).
+                segs.push(self.statuses.values().cloned().collect::<Vec<_>>().join(" "));
             }
             if self.pending {
                 segs.push("● working".into());
@@ -1880,7 +1901,7 @@ mod tests {
         app.apply_event(&json!({"kind":"notify","message":"hello"}));
         assert!(app.transcript.last().unwrap().text.contains("hello"));
         app.apply_event(&json!({"kind":"set_status","statusKey":"k","statusText":"busy"}));
-        assert_eq!(app.status_text.as_deref(), Some("busy"));
+        assert_eq!(app.statuses.get("k"), Some(&"busy".to_string()));
         app.apply_event(&json!({"kind":"set_title","title":"MyTitle"}));
         assert_eq!(app.title.as_deref(), Some("MyTitle"));
         app.apply_event(&json!({"kind":"set_editor_text","text":"preset"}));
@@ -2185,5 +2206,28 @@ mod tests {
         // A key without an extension shortcut still reaches the built-ins.
         assert_eq!(app.handle_key(key('h')), None);
         assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn wp706_keyed_statuses_sorted_joined_deleted_and_cleared() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        // Upstream semantics: keyed statuses, rendered sorted by key and
+        // space-joined in the status bar.
+        app.apply_event(&json!({"kind":"set_status","statusKey":"zeta","statusText":"zz"}));
+        app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"aa"}));
+        let s = app.render_string();
+        assert!(s.contains("aa zz"), "sorted + space-joined in the status bar:\n{s}");
+        // Overwrite + delete (undefined text removes the key).
+        app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"ab"}));
+        app.apply_event(&json!({"kind":"set_status","statusKey":"zeta"}));
+        assert_eq!(app.statuses.len(), 1, "one entry survives");
+        let s = app.render_string();
+        assert!(s.contains("ab") && !s.contains("zz"), "{s}");
+        // Session replacement clears the extension chrome (upstream
+        // resetExtensionUI: statuses + title).
+        app.apply_event(&json!({"kind":"set_title","title":"gone"}));
+        assert_eq!(app.title.as_deref(), Some("gone"));
+        app.clear_extension_chrome();
+        assert!(app.statuses.is_empty() && app.title.is_none());
     }
 }
