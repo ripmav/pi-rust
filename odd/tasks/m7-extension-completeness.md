@@ -20,7 +20,7 @@ S10 (WP-708 acceptance): "Table in-file: per extension — loads? (matrix run), 
 ## Tasks
 - T1 / WP-701 — `registerProvider` invocation (701a bridge protocol + version bump, 701b core dispatch + streaming, 701c upstream example matrix) — S3 — issue #75 — branch `feat/wp-701-register-provider` — commit: c5554d1
 - T2 / WP-702 — MCP transport stdio (702a client JSON-RPC, 702b tool bridging, 702c config entries) — S4 — issue #76 — branch `feat/wp-702-mcp-stdio` — commit: 2d9a08a
-- T3 / WP-703 — MCP transport HTTP/SSE (headers/auth from config, env-only values) — S5 — issue #77 — branch `feat/wp-703-mcp-http` — commit: (pending)
+- T3 / WP-703 — MCP transport HTTP/SSE (headers/auth from config, env-only values) — S5 — issue #77 — branch `feat/wp-703-mcp-http` — commit: 608638b
 - T4 / WP-704 — Compaction (704a threshold + events, 704b summarization + rewrite, 704c session marker entries) — S6 — issue #78 — branch `feat/wp-704-compaction` — commit: (pending)
 - T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-shortcuts` — commit: (pending)
 - T6 / WP-706 — Extension UI chrome (status/title render + clear, matrix re-run) — S8 — issue #80 — branch `feat/wp-706-extension-ui-chrome` — commit: (pending)
