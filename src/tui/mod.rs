@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 pub mod dialog;
 pub mod keybindings;
 pub mod markdown;
+pub mod theme;
 pub mod terminal;
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyModifiers};
@@ -52,6 +53,8 @@ pub struct TuiApp {
     pub editor_session: Option<EditorSession>,
     /// WP-606: upstream keybinding schema + user configuration.
     pub kb: keybindings::KeybindingManager,
+    /// WP-607: the active theme (built-in or user theme).
+    pub theme: theme::Theme,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
     pub scroll: usize,
     pub size: (u16, u16),
@@ -75,11 +78,19 @@ pub enum TuiAction {
     /// An `editor` dialog closed; the caller sends the outcome over the
     /// bridge (WP-604 outcome type).
     EditorClosed(dialog::DialogOutcome),
+    /// WP-607: `/theme <name>` — switch the active theme in place.
+    SwitchTheme(String),
 }
 
 impl TuiApp {
     pub fn new(model: impl Into<String>, cwd: impl Into<String>, session: impl Into<String>) -> Self {
         Self::with_kb(keybindings::KeybindingManager::default(), model, cwd, session)
+    }
+
+    /// WP-607: set the active theme (returns self for construction chains).
+    pub fn with_theme(mut self, theme: theme::Theme) -> Self {
+        self.theme = theme;
+        self
     }
 
     /// WP-606: construct with a configured keybinding manager.
@@ -105,6 +116,7 @@ impl TuiApp {
             dialog: None,
             editor_session: None,
             kb,
+            theme: theme::Theme::builtin("dark").expect("built-in dark theme"),
             scroll: 0,
             size: (80, 24),
             exit: false,
@@ -655,6 +667,20 @@ impl TuiApp {
                         return Some(self.close_editor_session(response));
                     }
                     if kb.matches(&k, "tui.input.submit") {
+                        // WP-607: the built-in /theme command switches the
+                        // active theme in place (no agent turn).
+                        let name = self
+                            .input
+                            .trim()
+                            .strip_prefix("/theme")
+                            .map(|t| t.trim().to_string());
+                        if let Some(name) = name {
+                            self.input.clear();
+                            self.cursor = (0, 0);
+                            self.leave_history();
+                            self.scroll = 0;
+                            return Some(TuiAction::SwitchTheme(name));
+                        }
                         if let Some(t) = self.submit_text() {
                             self.scroll = 0;
                             return Some(TuiAction::Submit(t));
@@ -843,13 +869,14 @@ impl TuiApp {
         } else {
             for m in &self.transcript {
                 let (prefix, style): (&str, Style) = match m.role {
-                    "user" => ("▸ ", Style::default().add_modifier(Modifier::BOLD)),
+                    // WP-607: role prefixes from the active theme.
+                    "user" => ("▸ ", self.theme.fg_bold("userMessageText")),
                     "assistant" => ("", Style::default()),
-                    "tool" => ("⚙ ", Style::default().add_modifier(Modifier::DIM)),
-                    _ => ("· ", Style::default().add_modifier(Modifier::DIM)),
+                    "tool" => ("⚙ ", self.theme.fg("toolOutput")),
+                    _ => ("· ", self.theme.fg("muted")),
                 };
                 let body: Vec<Line> = if matches!(m.role, "user" | "assistant") {
-                    markdown::md_lines(&m.text)
+                    markdown::md_lines(&m.text, &self.theme)
                 } else {
                     m.text.split('\n').map(markdown::plain_line).collect()
                 };
@@ -872,7 +899,7 @@ impl TuiApp {
                 .map(|s| s.content.as_ref().is_empty())
                 .unwrap_or(true)
         {
-            lines.push(Line::from(Span::styled("● ", Style::default().add_modifier(Modifier::DIM))));
+            lines.push(Line::from(Span::styled("● ", self.theme.fg("accent"))));
         }
         let total = lines.len();
         let start = total.saturating_sub(transcript_h).saturating_sub(self.scroll);
@@ -885,22 +912,22 @@ impl TuiApp {
         // prompt on the first line, title + hint rows for an editor dialog.
         if input_h > 0 {
             let bold = Style::default().add_modifier(Modifier::BOLD);
-            let dim = Style::default().add_modifier(Modifier::DIM);
+            let accent_bold = self.theme.fg_bold("accent");
             let mut pane: Vec<Line> = Vec::new();
             if let Some(es) = &self.editor_session {
-                pane.push(Line::from(Span::styled(es.title.clone(), bold.clone())));
+                pane.push(Line::from(Span::styled(es.title.clone(), accent_bold.clone())));
             }
             let hint_rows = if self.editor_session.is_some() { 2 } else { 0 };
             let visible = input_h.saturating_sub(hint_rows);
             let text_lines: Vec<String> = self.input.split('\n').map(String::from).collect();
             for (i, line) in text_lines.iter().take(visible).enumerate() {
                 let prompt = if i == 0 { "> " } else { "  " };
-                let mut spans = vec![Span::styled(prompt.to_string(), bold.clone())];
+                let mut spans = vec![Span::styled(prompt.to_string(), accent_bold.clone())];
                 if i == self.cursor.0 {
                     let chars: Vec<char> = line.chars().collect();
                     let c = self.cursor.1.min(chars.len());
                     spans.push(Span::raw(chars[..c].iter().collect::<String>()));
-                    spans.push(Span::styled("\u{258c}".to_string(), bold.clone()));
+                    spans.push(Span::styled("\u{258c}".to_string(), accent_bold.clone()));
                     spans.push(Span::raw(chars[c..].iter().collect::<String>()));
                 } else {
                     spans.push(Span::raw(line.clone()));
@@ -910,7 +937,7 @@ impl TuiApp {
             if self.editor_session.is_some() {
                 pane.push(Line::from(Span::styled(
                     "enter ok \u{b7} esc cancel",
-                    dim,
+                    self.theme.fg("dim"),
                 )));
             }
             while pane.len() < input_h {
@@ -942,7 +969,7 @@ impl TuiApp {
                 let t: String = s.chars().take(keep).collect();
                 s = t + "…";
             }
-            Paragraph::new(Line::from(Span::styled(s, Style::default().fg(Color::Gray))))
+            Paragraph::new(Line::from(Span::styled(s, self.theme.fg("muted"))))
                 .render(chunks[2], buf);
         }
     }
@@ -1152,6 +1179,79 @@ mod tests {
         type_str(&mut app, "x");
         app.handle_key(key_code(KeyCode::Up, KeyModifiers::CONTROL));
         assert_eq!(app.input, "x", "ctrl+up is previousPrompt, not history, in v0");
+    }
+
+    /// WP-607 golden: each built-in theme renders the fixture screen with
+    /// its own token colors (buffer snapshot over the real render path).
+    #[test]
+    fn wp607_builtin_themes_render_golden_colors() {
+        use ratatui::style::Color;
+        // (theme, mdHeading, mdListBullet, userMessageText)
+        let cases: &[(&str, Color, Color, Color)] = &[
+            ("dark", Color::Rgb(205, 154, 34), Color::Rgb(167, 152, 215), Color::Rgb(222, 224, 225)),
+            ("light", Color::Rgb(143, 104, 2), Color::Rgb(116, 89, 180), Color::Rgb(59, 63, 65)),
+        ];
+        for (name, heading, bullet, user_text) in cases {
+            let theme = keybindings_dummy_theme(name);
+            let mut app = TuiApp::new("m", "cwd", "s");
+            app.theme = theme;
+            app.transcript.push(Msg {
+                role: "assistant",
+                text: "# Head\n- item\nsee [docs](https://x)".to_string(),
+            });
+            app.transcript.push(Msg { role: "user", text: "hello".to_string() });
+            let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, app.size.0, app.size.1));
+            app.render_to(&mut buf, Rect::new(0, 0, app.size.0, app.size.1));
+            let cell = |needle: &str| -> Option<ratatui::buffer::Cell> {
+                buf.content.iter().find(|c| c.symbol() == needle).cloned()
+            };
+            let h = cell("H").unwrap_or_else(|| panic!("{name}: heading not rendered"));
+            assert_eq!(h.fg, *heading, "{name}: heading color");
+            let b = cell("-").unwrap_or_else(|| panic!("{name}: bullet not rendered"));
+            assert_eq!(b.fg, *bullet, "{name}: bullet color");
+            let p = cell("\u{25b8}").unwrap_or_else(|| panic!("{name}: user prefix not rendered"));
+            assert_eq!(p.fg, *user_text, "{name}: user prefix color");
+            // The status bar uses the theme's muted token.
+            // The status bar (last row) uses the theme's muted token.
+            let last_row = (app.size.1 as usize - 1) * app.size.0 as usize;
+            let s_cell = &buf.content[last_row];
+            assert_ne!(s_cell.symbol(), " ", "{name}: status bar not rendered");
+            let muted = app.theme.color("muted");
+            assert_eq!(s_cell.fg, muted, "{name}: status bar color");
+        }
+    }
+
+    fn keybindings_dummy_theme(name: &str) -> theme::Theme {
+        theme::Theme::builtin(name).expect("built-in theme")
+    }
+
+    /// WP-607: `/theme <name>` submits the SwitchTheme action; an unknown
+    /// name is rejected by the loader with the available themes listed.
+    #[test]
+    fn wp606_theme_command_switches() {
+        type_str(&mut TuiApp::new("m", "cwd", "s"), "");
+        let mut app = TuiApp::new("m", "cwd", "s");
+        type_str(&mut app, "/theme light");
+        assert_eq!(app.handle_key(enter()), Some(TuiAction::SwitchTheme("light".into())));
+        assert_eq!(app.input, "");
+        let mut app = TuiApp::new("m", "cwd", "s");
+        type_str(&mut app, "/theme");
+        assert_eq!(app.handle_key(enter()), Some(TuiAction::SwitchTheme(String::new())));
+        // The loader rejects unknown themes with the available list.
+        let dir = std::env::temp_dir().join(format!("pi-rust-theme-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = theme::Theme::load(&dir, "nope").unwrap_err();
+        assert!(err.contains("nope") && err.contains("dark"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WP-607: the settings `theme` value resolves per upstream semantics.
+    #[test]
+    fn wp607_theme_setting_resolves() {
+        assert_eq!(theme::resolve_theme_setting(Some("light")), Some("light".into()));
+        assert_eq!(theme::resolve_theme_setting(Some("a/b")), Some("b".into()));
+        assert_eq!(theme::resolve_theme_setting(Some("a/b/c")), None);
     }
 
     fn is_submit(action: Option<TuiAction>, text: &str) -> bool {
