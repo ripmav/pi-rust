@@ -22,7 +22,7 @@ S10 (WP-708 acceptance): "Table in-file: per extension — loads? (matrix run), 
 - T2 / WP-702 — MCP transport stdio (702a client JSON-RPC, 702b tool bridging, 702c config entries) — S4 — issue #76 — branch `feat/wp-702-mcp-stdio` — commit: 2d9a08a
 - T3 / WP-703 — MCP transport HTTP/SSE (headers/auth from config, env-only values) — S5 — issue #77 — branch `feat/wp-703-mcp-http` — commit: 608638b
 - T4 / WP-704 — Compaction (704a threshold + events, 704b summarization + rewrite, 704c session marker entries) — S6 — issue #78 — branch `feat/wp-704-compaction` — commit: afc519c
-- T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-shortcuts` — commit: (pending)
+- T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-register-shortcut` — commit: 5466a08
 - T6 / WP-706 — Extension UI chrome (status/title render + clear, matrix re-run) — S8 — issue #80 — branch `feat/wp-706-extension-ui-chrome` — commit: (pending)
 - T7 / WP-707 — Evaluate `ctx.ui.custom` (decision memo in WP file, no code) — S9 — issue #81 — branch `feat/wp-707-ui-custom-eval` — commit: (pending)
 - T8 / WP-708 — Bundled extensions evaluation (table in WP file, no code) — S10 — issue #82 — branch `feat/wp-708-bundled-extensions` — commit: (pending)
