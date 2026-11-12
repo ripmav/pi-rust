@@ -14,11 +14,20 @@ use serde_json::{json, Value};
 pub mod dialog;
 pub mod commands;
 pub mod keybindings;
+pub mod picker;
 pub mod markdown;
 pub mod theme;
 pub mod terminal;
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyModifiers};
+
+/// WP-609: which picker is open (routes the selection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickerKind {
+	#[default]
+	Model,
+	Session,
+}
 
 /// One transcript line. Roles: `user`, `assistant`, `tool`, `system`.
 #[derive(Debug, Clone)]
@@ -62,6 +71,10 @@ pub struct TuiApp {
     pub templates: Vec<crate::templates::Template>,
     /// WP-608: the open slash menu (matched commands + selection).
     pub slash: Option<(Vec<commands::Command>, usize)>,
+    /// WP-609: the open picker (session resume / model switch).
+    pub picker: Option<picker::Picker>,
+    /// WP-609: what the open picker selects (its outcome routing).
+    pub picker_kind: PickerKind,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
     pub scroll: usize,
     pub size: (u16, u16),
@@ -93,6 +106,9 @@ pub enum TuiAction {
     SetThinking { level: String },
     /// WP-608: `/model <provider/model>` over the bridge (WP-406 request).
     SetModel { provider: String, model: String },
+    /// WP-609: `/resume` — the terminal loads the session list and opens
+    /// the picker (it owns the agent dir).
+    OpenSessionsPicker,
 }
 
 impl TuiApp {
@@ -123,6 +139,34 @@ impl TuiApp {
         }
         let all = commands::collect_menu(&self.templates, &self.ext_commands);
         self.slash = commands::menu_items(&all, &self.input).map(|items| (items, 0));
+    }
+
+    /// WP-609: open the model picker (bundled registry, `provider/model`
+    /// labels, sorted).
+    pub fn open_model_picker(&mut self) {
+        let reg = crate::registry::ModelRegistry::bundled();
+        let mut items: Vec<picker::PickerItem> = Vec::new();
+        for p in reg.providers() {
+            for m in reg.models_of(p) {
+                let label = format!("{}/{}", m.provider, m.id);
+                items.push(picker::PickerItem { display: label.clone(), value: label });
+            }
+        }
+        items.sort_by(|a, b| a.display.cmp(&b.display));
+        self.picker_kind = PickerKind::Model;
+        self.slash = None;
+        self.picker = Some(picker::Picker::new("Select model", items));
+    }
+
+    /// WP-609: route one key to the open picker (the terminal calls this
+    /// before the normal key handling; a closing outcome is returned).
+    pub fn handle_picker_key(&mut self, ev: &TermEvent) -> Option<picker::PickerOutcome> {
+        let k = match ev {
+            TermEvent::Key(k) => k,
+            _ => return None,
+        };
+        let kb = &self.kb;
+        self.picker.as_mut()?.handle_key(k, kb)
     }
 
     /// WP-608: push one command result line to the transcript (dim system
@@ -204,6 +248,12 @@ impl TuiApp {
                 return Some(TuiAction::SetThinking { level: args.to_string() });
             }
             "model" => {
+                if args.is_empty() {
+                    // WP-609: no argument opens the model picker (upstream
+                    // opens the selector UI here too).
+                    self.open_model_picker();
+                    return None;
+                }
                 if let Some((provider, model)) = args.split_once('/') {
                     self.history.push(format!("/model {args}"));
                     self.history_idx = None;
@@ -238,6 +288,15 @@ impl TuiApp {
             self.cursor = (0, 0);
             self.scroll = 0;
             return Some(TuiAction::BridgeCommand { name: name.to_string(), args: args.to_string() });
+        }
+        // WP-609: /resume opens the session picker (the terminal loads the
+        // list — it owns the agent dir).
+        if name == "resume" {
+            self.input.clear();
+            self.cursor = (0, 0);
+            self.leave_history();
+            self.scroll = 0;
+            return Some(TuiAction::OpenSessionsPicker);
         }
         // Known built-in, not wired in v0 (upstream has a full
         // implementation; v0 says so explicitly).
@@ -279,6 +338,8 @@ impl TuiApp {
             ext_commands: Vec::new(),
             templates: Vec::new(),
             slash: None,
+            picker: None,
+            picker_kind: PickerKind::default(),
             scroll: 0,
             size: (80, 24),
             exit: false,
@@ -1086,7 +1147,14 @@ impl TuiApp {
         // lines stay plain. While a dialog is open it occupies this area
         // (WP-604).
         let mut lines: Vec<Line> = Vec::new();
-        if let Some(d) = &self.dialog {
+        if let Some(p) = &self.picker {
+            // WP-609: the picker occupies the transcript area.
+            lines.extend(p.render_rows(
+                self.theme.fg_bold("accent"),
+                Style::default(),
+                self.theme.fg("muted"),
+            ));
+        } else if let Some(d) = &self.dialog {
             lines.push(Line::from(Span::raw("")));
             lines.extend(d.render_lines());
         } else {
@@ -1418,6 +1486,68 @@ mod tests {
         type_str(&mut app, "x");
         app.handle_key(key_code(KeyCode::Up, KeyModifiers::CONTROL));
         assert_eq!(app.input, "x", "ctrl+up is previousPrompt, not history, in v0");
+    }
+
+    /// WP-609: `/model` without args opens the model picker (bundled
+    /// registry labels), `/resume` asks the terminal for the session list.
+    #[test]
+    fn wp609_pickers_open_from_commands() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        assert_eq!(submit_cmd(&mut app, "/model"), None);
+        let p = app.picker.as_ref().expect("model picker open");
+        assert_eq!(app.picker_kind, PickerKind::Model);
+        let items = p.visible();
+        assert!(!items.is_empty(), "bundled registry is not empty");
+        assert!(items.iter().all(|i| i.display.contains('/')), "{items:?}");
+        // First provider alphabetically in the bundled catalog.
+        assert!(items.first().is_some_and(|i| i.display.starts_with("amazon-bedrock/")), "{:?}", items.first());
+        // The picker renders in the transcript area.
+        assert!(app.render_string().contains("Select model"), "picker renders");
+        // /resume routes to the terminal (session list load).
+        app.picker = None;
+        app.input.clear();
+        app.cursor = (0, 0);
+        assert_eq!(submit_cmd(&mut app, "/resume"), Some(TuiAction::OpenSessionsPicker));
+        // /model with args still switches directly (no picker).
+        app.input.clear();
+        app.cursor = (0, 0);
+        assert_eq!(
+            submit_cmd(&mut app, "/model fake/echo"),
+            Some(TuiAction::SetModel { provider: "fake".into(), model: "echo".into() })
+        );
+    }
+
+    /// WP-609: picker selection flow — filter, navigate, enter returns the
+    /// selection with its value; cancel returns Cancelled.
+    #[test]
+    fn wp609_picker_selection_flow() {
+        use crate::tui::picker::PickerItem;
+        let mut app = TuiApp::new("m", "cwd", "s");
+        app.picker_kind = PickerKind::Session;
+        app.picker = Some(picker::Picker::new(
+            "Resume session",
+            vec![
+                PickerItem { display: "alpha · 2026-01-01T00:00:00Z".into(), value: "/s/a.jsonl".into() },
+                PickerItem { display: "beta · 2026-01-02T00:00:00Z".into(), value: "/s/b.jsonl".into() },
+            ],
+        ));
+        // Filter to "be".
+        app.handle_picker_key(&TermEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('b'), crossterm::event::KeyModifiers::NONE)));
+        assert_eq!(app.picker.as_ref().unwrap().visible().len(), 1);
+        // Enter selects the filtered item.
+        match app.handle_picker_key(&enter()) {
+            Some(picker::PickerOutcome::Selected { value, .. }) => assert_eq!(value, "/s/b.jsonl"),
+            other => panic!("expected selection: {other:?}"),
+        }
+        assert!(app.picker.is_some(), "picker closes via the terminal");
+        // Escape cancels.
+        app.picker = Some(picker::Picker::new("Resume session", vec![PickerItem { display: "x".into(), value: "y".into() }]));
+        assert_eq!(app.handle_picker_key(&TermEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE))), Some(picker::PickerOutcome::Cancelled));
+        // An empty list renders gracefully.
+        app.picker = Some(picker::Picker::new("Resume session", vec![]));
+        assert!(app.render_string().contains("no matches"), "empty picker renders a placeholder");
     }
 
     /// WP-608: the slash menu opens on "/" and shows built-ins, the
