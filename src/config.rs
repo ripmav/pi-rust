@@ -23,6 +23,9 @@ pub struct AgentConfig {
 	pub session_dir: Option<String>,
 	/// Settings `defaultTools` (consumed by M5).
 	pub default_tools: Option<String>,
+	/// Settings `theme` (consumed by M6 WP-607): a theme name, or a
+	/// `light/dark` auto pair (v0 takes the dark side).
+	pub theme: Option<String>,
 }
 
 /// Loads `<agent_dir>/settings.json`; absent file → defaults, malformed

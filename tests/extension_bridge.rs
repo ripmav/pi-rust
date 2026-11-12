@@ -8,6 +8,147 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
+
+/// WP-610 golden: `--print` (text mode) — stdout is the final assistant
+/// text only (one trailing newline), no NDJSON event log, exit 0.
+#[test]
+fn wp610_print_mode_text_golden() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp610-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let scenario = json!({
+        "user_messages": ["run the checks"],
+        "model_scripts": [[
+            { "tool_call": { "name": "bash", "input": { "command": "echo ok" } } },
+            { "text": "all good" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--print")
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(tmp.join("session.jsonl"))
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(stdout, "all good\n", "exact text-mode stdout: {stdout:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-610 golden: `--mode json` — stdout is the upstream-shaped
+/// AgentSessionEvent stream (header first), exit 0.
+#[test]
+fn wp610_json_mode_event_stream_golden() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp610j-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let scenario = json!({
+        "user_messages": ["run the checks"],
+        "model_scripts": [[
+            { "tool_call": { "name": "bash", "input": { "command": "echo ok" } } },
+            { "text": "all good" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--mode").arg("json")
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(tmp.join("session.jsonl"))
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON: {l}: {e}")))
+        .collect();
+    // 1. session header; 2. agent_start; 3. turn_start.
+    // Upstream order: the session header, the user message (added on
+    // prompt), then the agent loop.
+    assert_eq!(lines[0].get("type").and_then(Value::as_str), Some("session"));
+    assert!(lines[0].get("id").is_some());
+    assert_eq!(lines[1].get("type").and_then(Value::as_str), Some("message_start"));
+    assert_eq!(lines[1].pointer("/message/role").and_then(Value::as_str), Some("user"));
+    assert_eq!(lines[2], json!({"type":"agent_start"}));
+    assert_eq!(lines[3], json!({"type":"turn_start"}));
+    // The user message_start (index 1, pinned above), then the assistant
+    // stream (start/update/end).
+    let mi = 1usize;
+    let mut a_start: Option<usize> = None; let mut delta: Option<usize> = None; let mut t_start: Option<usize> = None; let mut t_end: Option<usize> = None;
+    for (idx, l) in lines.iter().enumerate() {
+        let t = l.get("type").and_then(Value::as_str);
+        let role = l.pointer("/message/role").and_then(Value::as_str);
+        if a_start.is_none() && t == Some("message_start") && role == Some("assistant") { a_start = Some(idx); }
+        if delta.is_none() && t == Some("message_update") { delta = Some(idx); }
+        if t_start.is_none() && t == Some("tool_execution_start") { t_start = Some(idx); }
+        if t_end.is_none() && t == Some("tool_execution_end") { t_end = Some(idx); }
+    }
+    assert!(mi < a_start.expect("assistant message_start"), "order: user start before assistant start");
+    assert!(a_start < Some(delta.expect("text_delta update")), "order: start before deltas");
+    // The final assistant message_end (the text turn) follows its delta.
+    let d = delta.unwrap();
+    assert!(lines.iter().skip(d + 1).any(|l| l.get("type").and_then(Value::as_str) == Some("message_end")
+        && l.pointer("/message/role").and_then(Value::as_str) == Some("assistant")), "order: deltas before end");
+    assert_eq!(lines[d].pointer("/assistantMessageEvent/type").and_then(Value::as_str), Some("text_delta"));
+    assert_eq!(lines[d].pointer("/assistantMessageEvent/delta").and_then(Value::as_str), Some("all good"));
+    let end = lines.iter().rev().find(|l| l.get("type").and_then(Value::as_str) == Some("message_end")
+        && l.pointer("/message/role").and_then(Value::as_str) == Some("assistant")).expect("final assistant end");
+    assert_eq!(end.pointer("/message/stopReason").and_then(Value::as_str), Some("stop"));
+    assert!(end.pointer("/message/content/0/text").and_then(Value::as_str) == Some("all good"));
+    // Tool execution pair with upstream field names.
+    let ts = t_start.expect("tool_execution_start");
+    let te = t_end.expect("tool_execution_end");
+    assert!(a_start < Some(ts) && ts < te, "tool pair after assistant message");
+    assert_eq!(lines[ts].get("toolName").and_then(Value::as_str), Some("bash"));
+    assert_eq!(lines[ts].pointer("/args/command").and_then(Value::as_str), Some("echo ok"));
+    assert!(lines[ts].get("toolCallId").is_some());
+    assert_eq!(lines[te].get("toolCallId"), lines[ts].get("toolCallId"));
+    assert_eq!(lines[te].get("isError"), Some(&json!(false)));
+    // The run ends with agent_end (messages + willRetry:false).
+    let last = lines.last().expect("events");
+    assert_eq!(last.get("type").and_then(Value::as_str), Some("agent_end"));
+    assert_eq!(last.get("willRetry"), Some(&json!(false)));
+    assert!(last.get("messages").and_then(Value::as_array).is_some_and(|m| !m.is_empty()));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-610: print mode error exit — a failing run exits 1 with the error on
+/// stderr and empty stdout (upstream text-mode exit codes).
+#[test]
+fn wp610_print_mode_error_exit() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp610e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    // The scripted model calls a tool that exists nowhere: the run fails
+    // with a model-script error (upstream text mode: exit 1, stderr, no
+    // stdout).
+    let scenario = json!({
+        "user_messages": ["hi"],
+        "model_scripts": [[{ "tool_call": { "name": "nope", "input": {} } }]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--print")
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(tmp.join("session.jsonl"))
+        .arg("--agent-dir").arg(tmp.join("agent"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "upstream error exit ({:?}) stdout: {:?}", out.status.code(), String::from_utf8_lossy(&out.stdout));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "no stdout on error");
+    assert!(stderr.contains("unknown tool"), "error on stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

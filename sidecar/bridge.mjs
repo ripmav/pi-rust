@@ -150,7 +150,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		extensions = loaded.extensions;
 		loaded.errors.forEach((e) => log(`extension load error ${e.path}: ${e.error}`));
 		session = createSessionView(cwd);
-		dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs });
+		dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs, sendRequest });
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
 
 		const contextActions = {

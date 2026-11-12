@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -121,6 +122,7 @@ pub async fn run() -> Result<i32> {
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut image_paths: Vec<PathBuf> = Vec::new();
+    let mut out_mode: Option<crate::agent::OutputMode> = None;
     let mut template_name: Option<String> = None;
     let mut template_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -142,6 +144,22 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            // WP-610: one-shot stdout variants (upstream print-mode parity).
+            "-p" | "--print" => {
+                let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
+                anyhow::ensure!(m == crate::agent::OutputMode::Text, "--mode json conflicts with --print (text)");
+                out_mode = Some(crate::agent::OutputMode::Text);
+            }
+            "--mode" => {
+                let v = val(&args, &mut i)?;
+                let m = match v.as_str() {
+                    "text" => crate::agent::OutputMode::Text,
+                    "json" => crate::agent::OutputMode::Json,
+                    other => bail!("invalid --mode '{other}' (valid: text, json)"),
+                };
+                anyhow::ensure!(out_mode.map(|o| o == m).unwrap_or(true), "--mode conflicts with --print (text)");
+                out_mode = Some(m);
+            }
             "--image" => image_paths.push(PathBuf::from(val(&args, &mut i)?)),
             "--template" => {
                 template_name = Some(val(&args, &mut i)?);
@@ -161,10 +179,20 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
+            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [-p|--print] [--mode text|json] [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
         }
         i += 1;
     }
+    if let Some(m) = out_mode {
+        use crate::agent::OutputMode::*;
+        anyhow::ensure!(
+            prompt.is_some() || scenario_path.is_some(),
+            "{:?} mode requires --prompt <text> or --scenario <file>",
+            if m == Json { "json" } else { "print" }
+        );
+        anyhow::ensure!(!list_sessions, "print/json mode cannot be combined with --list-sessions");
+    }
+
     let cwd = std::env::current_dir().context("cwd")?;
 
     // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
@@ -208,6 +236,8 @@ pub async fn run() -> Result<i32> {
         (None, None) => {
             if list_sessions {
                 Vec::new() // --list-sessions needs no scenario
+            } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                Vec::new() // interactive TUI (WP-601)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -238,6 +268,11 @@ pub async fn run() -> Result<i32> {
     } else {
         json!({"id":model_id,"provider":provider_name})
     };
+    let model_label = format!(
+        "{}/{}",
+        initial_model.get("provider").and_then(Value::as_str).unwrap_or("?"),
+        initial_model.get("id").and_then(Value::as_str).unwrap_or("?")
+    );
 
     // S8: --image requires an image-capable registry model (openai/anthropic
     // drivers emit the wire parts; other drivers drop images).
@@ -308,16 +343,44 @@ pub async fn run() -> Result<i32> {
     }
     sidecar_args.push("--agent-dir".into());
     sidecar_args.push(agent_dir.to_string_lossy().into());
-    eprintln!("[core] spawning sidecar: {node} {}", sidecar.display());
 
-    let log = EventLog::start();
+    // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
+    let tui_mode = scenario_path.is_none() && prompt.is_none() && !list_sessions;
+
+    // TUI mode owns the terminal: the sidecar's stderr and the core's own
+    // diagnostic lines must not corrupt the screen — both go to a log file
+    // in the agent dir.
+    // shortcut: the sink-setup error line itself stays on stderr (rare, pre-TUI).
+    let sidecar_stderr = if tui_mode {
+        let tui_log = agent_dir.join("tui-stderr.log");
+        match std::fs::File::create(&tui_log) {
+            Ok(f) => {
+                crate::corelog::set_log_file(&tui_log);
+                Stdio::from(f)
+            }
+            Err(e) => {
+                eprintln!("[core] tui stderr log: {e}");
+                Stdio::inherit()
+            }
+        }
+    } else {
+        Stdio::inherit() // sidecar logs pass through to the core's stderr
+    };
+    crate::corelog::line(&format!("[core] spawning sidecar: {node} {}", sidecar.display()));
+
+    // WP-610: the NDJSON-on-stdout contract applies to the default headless
+    // mode only; --print/--mode json keep stdout clean (their own streams).
+    let log = EventLog::start(!tui_mode && out_mode != Some(crate::agent::OutputMode::Text) && out_mode != Some(crate::agent::OutputMode::Json));
     let fail: Arc<Mutex<Option<String>>> = Arc::default();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    // WP-604: blocking ui dialog requests for the TUI (headless: unused,
+    // the default-answers path handles them in the event task).
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
-    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd).await?;
+    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
     let (client, events_rx) = BridgeClient::connect(child, tx, rx);
     let client = Arc::new(client);
 
@@ -344,7 +407,33 @@ pub async fn run() -> Result<i32> {
         agent_dir: Arc::new(agent_dir.clone()),
         usage_total: Arc::default(),
         cost_total: Arc::default(),
+        tui: tui_mode,
+        ui_tx,
+        out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
+        text_final: Arc::default(),
+        json_tx: {
+            if out_mode == Some(crate::agent::OutputMode::Json) {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
+                    while let Some(line) = rx.recv().await {
+                        let _ = out.write_all(format!("{}\n", line.trim_end()).as_bytes()).await;
+                        let _ = out.flush().await;
+                    }
+                });
+                Some(tx)
+            } else {
+                None
+            }
+        },
     });
+    // WP-610: the json stream opens with the session header (upstream parity).
+    if ctx.out_mode == crate::agent::OutputMode::Json {
+        if let Some(h) = session.header() {
+            ctx.json_tx.as_ref().unwrap().send(h.to_string()).ok();
+        }
+    }
     tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
@@ -354,12 +443,12 @@ pub async fn run() -> Result<i32> {
         bail!("sidecar apiVersion != 0");
     }
     for e in ready.get("errors").and_then(Value::as_array).into_iter().flatten() {
-        eprintln!("[core] extension load error: {e}");
+        crate::corelog::line(&format!("[core] extension load error: {e}"));
     }
     client.set_running();
     {
         let ev = ctx.events.lock().unwrap().clone();
-        eprintln!("[core] running: subscribed events {ev:?}");
+        crate::corelog::line(&format!("[core] running: subscribed events {ev:?}"));
         if ev.contains("session_start") {
             client.fire(json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}));
         }
@@ -367,8 +456,30 @@ pub async fn run() -> Result<i32> {
 
     // --command: run each registered extension command after ready, before the
     // scenario. Unknown command or handler error logs ok:false + error and
-    // continues (does not abort the run).
-    for (name, cargs) in &commands {
+    // continues (does not abort the run). TUI mode runs them on a task after
+    // the TUI loop is up: a command that opens a dialog would otherwise
+    // block its own response (the dialog is answered in the TUI).
+    if tui_mode {
+        let c_client = client.clone();
+        let c_log = log.clone();
+        let c_commands = commands.clone();
+        tokio::spawn(async move {
+            for (name, cargs) in &c_commands {
+                let resp = c_client.request("command", json!({"name":name,"args":cargs})).await;
+                let (ok, error) = match resp {
+                    Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
+                    Decision::Response(r) => (false, r.get("error").and_then(Value::as_str).map(str::to_string)),
+                    Decision::Unavailable => (false, Some("command unanswered: bridge not running".into())),
+                };
+                let mut line = json!({"kind":"command","name":name,"ok":ok});
+                if let Some(e) = error {
+                    line["error"] = json!(e);
+                }
+                c_log.emit(line);
+            }
+        });
+    } else {
+        for (name, cargs) in &commands {
         let resp = client.request("command", json!({"name":name,"args":cargs})).await;
         let (ok, error) = match resp {
             Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
@@ -380,18 +491,179 @@ pub async fn run() -> Result<i32> {
             line["error"] = json!(e);
         }
         log.emit(line);
+        }
     }
 
-    // Seed the runs: one agent run per user message. Fake mode validates each
-    // model_script up front; provider mode ignores scripts (real completions).
-    for r in &runs {
-        if fake_mode {
-            FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+    // Interactive mode: the TUI owns input and lifetime; the agent loop runs
+    // until the user quits (Item::End). Non-interactive: seed the scripted
+    // runs and end immediately.
+    if tui_mode {
+        // WP-606: upstream keybinding schema + <agentDir>/keybindings.json.
+        // An invalid file is logged (with the valid actions) and the TUI
+        // starts on the defaults with the error in the status bar.
+        let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
+            Ok(kb) => (kb, None),
+            Err(e) => {
+                crate::corelog::line(&format!("[core] keybindings: {e}"));
+                (crate::tui::keybindings::KeybindingManager::default(), Some(e))
+            }
+        };
+        // WP-608: the slash menu gets the extension commands (ready
+        // payload) and the discovered prompt templates (WP-307).
+        let mut ext_cmds: Vec<crate::tui::commands::Command> = Vec::new();
+        if let Some(arr) = ready.get("commands").and_then(serde_json::Value::as_array) {
+            for c in arr {
+                ext_cmds.push(crate::tui::commands::Command {
+                    name: c.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    description: c.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    argument_hint: None,
+                    source: crate::tui::commands::Source::Extension,
+                });
+            }
         }
-        let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-        msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+        let tui_templates = crate::templates::discover(&agent_dir, &cwd);
+        let mut app = crate::tui::TuiApp::with_kb(
+            kb,
+            model_label,
+            cwd.display().to_string(),
+            session.id.lock().unwrap().clone(),
+        )
+        .with_commands(ext_cmds, tui_templates);
+        if let Some(e) = kb_error {
+            app.last_error = Some(format!("keybindings: {e}"));
+        }
+        // WP-607: the `theme` setting selects the starting theme (a
+        // `light/dark` auto pair takes its dark side in v0). An invalid name
+        // keeps the built-in dark theme and reports in the status bar.
+        if let Some(setting) = agent_config.theme.as_deref() {
+            if let Some(name) = crate::tui::theme::resolve_theme_setting(Some(setting)) {
+                match crate::tui::theme::Theme::load(&agent_dir, &name) {
+                    Ok(t) => {
+                        app.theme = t;
+                    }
+                    Err(e) => {
+                        crate::corelog::line(&format!("[core] theme: {e}"));
+                        app.last_error = Some(format!("theme: {e}"));
+                    }
+                }
+            }
+        }
+        let submit_tx = msg_tx.clone();
+        let end_tx = msg_tx.clone();
+        let dialog_client = client.clone();
+        let dialog_log = log.clone();
+        let result = crate::tui::terminal::run(
+            &mut app,
+            log.subscribe(),
+            ui_rx,
+            move |text| {
+                let _ = submit_tx.send(Item::User(QueuedUser {
+                    text: text.to_string(),
+                    source: "tui",
+                    steps: vec![],
+                    images: vec![],
+                }));
+            },
+            move |outcome| match outcome {
+                // WP-604: the answer flows back over the unchanged bridge
+                // protocol; the event log records the round trip.
+                crate::tui::dialog::DialogOutcome::Answered { id, method, title, message, response } => {
+                    dialog_client.send(response.clone());
+                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":response}));
+                }
+                // Timeout: the sidecar already resolved with its upstream
+                // default — the TUI only stops showing the dialog.
+                crate::tui::dialog::DialogOutcome::TimedOut { id, method, title, message } => {
+                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":Value::Null,"timedOut":true}));
+                }
+            },
+            agent_dir.clone(),
+            {
+                let req_client = client.clone();
+                let req_log = log.clone();
+                move |label, extra, ty, payload| {
+                    // WP-608: the slash command's bridge round-trip; the
+                    // result comes back as a TUI-only event rendered in the
+                    // transcript.
+                    let ty = ty.to_string();
+                    let c = req_client.clone();
+                    let l = req_log.clone();
+                    tokio::spawn(async move {
+                        let resp = c.request(&ty, payload).await;
+                        let (ok, text) = match resp {
+                            Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+                                let data = r.get("data").cloned().unwrap_or(Value::Null);
+                                let text = if data == json!({ "ok": true }) {
+                                    String::new()
+                                } else {
+                                    data.as_str().map(str::to_string).unwrap_or_else(|| data.to_string())
+                                };
+                                (true, text)
+                            }
+                            Decision::Response(r) => (
+                                false,
+                                r.get("error").and_then(Value::as_str).unwrap_or("failed").to_string(),
+                            ),
+                            Decision::Unavailable => (false, "bridge not running".into()),
+                        };
+                        let mut ev = json!({
+                            "kind": "bridge_cmd_result",
+                            "label": label,
+                            "ok": ok,
+                            "text": text,
+                        });
+                        if ok {
+                            if let Some(obj) = extra.as_object() {
+                                for (k, v) in obj {
+                                    ev[k] = v.clone();
+                                }
+                            }
+                        }
+                        l.emit_tui(ev);
+                    });
+                }
+            },
+            {
+                let resume_session = session.clone();
+                move |path: &str| -> Result<(String, Vec<serde_json::Value>), String> {
+                    // WP-609: resume the selected file in place (the core
+                    // keeps the same Arc<Session>; the identity/file
+                    // swap is inside Session::resume_from) and snapshot
+                    // id + transcript for the TUI display.
+                    resume_session
+                        .resume_from(std::path::Path::new(path))
+                        .map_err(|e| e.to_string())?;
+                    let id = resume_session.id.lock().unwrap().clone();
+                    let msgs = resume_session
+                        .transcript()
+                        .into_iter()
+                        .filter(|m| matches!(m.get("role").and_then(serde_json::Value::as_str), Some("user") | Some("assistant")))
+                        .collect();
+                    Ok((id, msgs))
+                }
+            },
+            move || {
+                let _ = end_tx.send(Item::End);
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            crate::corelog::line(&format!("[core] tui: {e}"));
+        }
+    } else {
+        // Seed the runs: one agent run per user message. Fake mode validates each
+        // model_script up front; provider mode ignores scripts (real completions).
+        for r in &runs {
+            if fake_mode {
+                FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+            }
+            let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
+            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+        }
+        msg_tx.send(Item::End).unwrap();
     }
-    msg_tx.send(Item::End).unwrap();
 
     // Wait for the scenario (and any extension-injected user messages).
     let _ = done_rx.await;
@@ -411,7 +683,7 @@ pub async fn run() -> Result<i32> {
             }
             Ok(None) => unreachable!("wait_exited resolves only on exit"),
             Err(_) => {
-                eprintln!("[core] sidecar did not exit 10s after session_shutdown");
+                crate::corelog::line("[core] sidecar did not exit 10s after session_shutdown");
                 fail.lock().unwrap().get_or_insert("sidecar did not exit after session_shutdown".into());
             }
         }
@@ -420,77 +692,54 @@ pub async fn run() -> Result<i32> {
     }
 
     // Final event: the full session (acked: written+flushed before exit).
-    if print_usage {
-        let u = ctx.usage_total.lock().unwrap().clone();
-        let cost = *ctx.cost_total.lock().unwrap();
-        log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
-            "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
+    // WP-610: print/json keep stdout clean — no usage/transcript events.
+    if ctx.out_mode == crate::agent::OutputMode::Ndjson {
+        if print_usage {
+            let u = ctx.usage_total.lock().unwrap().clone();
+            let cost = *ctx.cost_total.lock().unwrap();
+            log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
+                "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
+        }
+        log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
+    } else if ctx.out_mode == crate::agent::OutputMode::Text {
+        // Upstream print mode: the final assistant text, one trailing newline.
+        if let Some(t) = ctx.text_final.lock().unwrap().take() {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{t}");
+            let _ = out.flush();
+        }
     }
-    log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
 
     // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
     // (sidecar crashed mid-run — protocol: degraded is terminal, no respawn).
-    Ok(if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 })
+    // WP-610: print/json use the upstream exit codes (1 for any failure).
+    Ok(match ctx.out_mode {
+        crate::agent::OutputMode::Ndjson => {
+            if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 }
+        }
+        _ => {
+            if client.degraded_seen() || fail.lock().unwrap().is_some() { 1 } else { 0 }
+        }
+    })
 }
 
 /// `--list-sessions`: one NDJSON line per session file under
 /// `<agentDir>/sessions/` (recursive): {file, id, cwd, name, updated, entries}.
 fn list_sessions_json(agent_dir: &Path) -> Result<()> {
-    let root = agent_dir.join("sessions");
-    if !root.exists() {
-        return Ok(());
-    }
-    let mut files = Vec::new();
-    collect_session_files(&root, &mut files);
-    files.sort_by(|a, b| b.cmp(a)); // most recently modified first
-    for f in &files {
-        let Ok(raw) = std::fs::read_to_string(f) else { continue };
-        let Some(first) = raw.lines().next() else { continue };
-        let Ok(h) = serde_json::from_str::<Value>(first) else { continue };
-        if h.get("type").and_then(Value::as_str) != Some("session") {
-            continue;
-        }
-        let mut name: Option<String> = None;
-        let mut entries = 0usize;
-        for line in raw.lines().skip(1) {
-            if line.trim().is_empty() {
-                continue;
-            }
-            entries += 1;
-            if let Ok(e) = serde_json::from_str::<Value>(line) {
-                if e.get("type").and_then(Value::as_str) == Some("session_info") {
-                    name = e.get("name").and_then(Value::as_str).map(str::to_string);
-                }
-            }
-        }
-        let updated = std::fs::metadata(f)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| crate::session::iso_from_secs(d.as_secs()));
+    // WP-609: the shared session listing (same source as the TUI picker).
+    for s in crate::session::list(agent_dir) {
         println!("{}", json!({
-            "file": f.to_string_lossy(),
-            "id": h.get("id"),
-            "cwd": h.get("cwd"),
-            "name": name,
-            "parentSession": h.get("parentSession"),
-            "updated": updated,
-            "entries": entries,
+            "file": s.path.to_string_lossy(),
+            "id": s.id,
+            "cwd": s.cwd,
+            "name": s.name,
+            "parentSession": s.parent_session,
+            "updated": s.updated,
+            "entries": s.entries,
         }));
     }
     Ok(())
-}
-
-fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_session_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
-            out.push(p);
-        }
-    }
 }
 
 /// Resolves a `--resume`/`--fork` reference: an existing file path wins;
@@ -500,11 +749,8 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
     if p.exists() {
         return Ok(p);
     }
-    let root = agent_dir.join("sessions");
-    let mut files = Vec::new();
-    collect_session_files(&root, &mut files);
-    for f in &files {
-        let Ok(raw) = std::fs::read_to_string(f) else { continue };
+    for f in crate::session::list(agent_dir).iter().map(|s| s.path.clone()) {
+        let Ok(raw) = std::fs::read_to_string(&f) else { continue };
         let Some(first) = raw.lines().next() else { continue };
         if let Ok(h) = serde_json::from_str::<Value>(first) {
             if h.get("type").and_then(Value::as_str) == Some("session")
@@ -514,7 +760,7 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", root.display())
+    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", agent_dir.join("sessions").display())
 }
 
 #[cfg(test)]
