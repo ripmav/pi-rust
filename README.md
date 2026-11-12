@@ -180,6 +180,26 @@ and shows the error in the status bar. In v0 the wired actions are the
 editor/input/select/app core keys; picker and theme actions resolve and
 are configurable now and get wired by their feature WPs.
 
+#### Themes (M6, WP-607)
+
+The TUI renders with the pinned upstream theme system: the built-in
+`dark` and `light` themes (copied from the pinned upstream
+`modes/interactive/theme/*.json`), the upstream token table (text, muted,
+accent, mdHeading, mdCode, mdLink, ...), and the upstream color grammar
+(`#hex`, `okhsl(...)`, `oklch(...)` — the OKLab/OKHSL→sRGB conversion is
+ported from the pinned upstream `oklab.ts` and pinned against golden RGB
+vectors generated from the upstream code itself). Custom themes are JSON
+files in `<agentDir>/themes/` (upstream path), partial themes falling back
+per token to the built-in defaults.
+
+Select a theme with the `theme` entry in `<agentDir>/settings.json`
+(`"light"`, or `"light/dark"` for the upstream auto pair — v0 takes the
+dark side) or switch at runtime with the built-in command
+`/theme <name>`; `pi.setTheme` from extensions (`ctx.ui.setTheme`) works
+the same way in TUI mode. An unknown theme name is an error that lists
+the available themes; the current theme stays and the error shows in the
+status bar.
+
 ### Prompt templates (M3)
 
 `<agentDir>/prompts/*.md` and `<cwd>/.pi/prompts/*.md` (project wins on

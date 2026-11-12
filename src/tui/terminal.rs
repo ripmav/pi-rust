@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 /// - `ui`: dialog requests from the core (WP-604).
 /// - `on_submit`: called with the submitted input text.
 /// - `on_dialog`: called when a dialog closes (WP-604).
+/// - `agent_dir`: used by `/theme <name>` to load the named theme (WP-607);
+///   an invalid theme is shown in the status bar, the old theme stays.
 /// - `on_exit`: called once when the user quits.
 pub async fn run<F, G, H>(
     app: &mut super::TuiApp,
@@ -34,6 +36,7 @@ pub async fn run<F, G, H>(
     mut ui: mpsc::UnboundedReceiver<Value>,
     mut on_submit: F,
     mut on_dialog: H,
+    agent_dir: std::path::PathBuf,
     mut on_exit: G,
 ) -> anyhow::Result<()>
 where
@@ -109,6 +112,20 @@ where
                             match action {
                                 super::TuiAction::Submit(text) => on_submit(&text),
                                 super::TuiAction::EditorClosed(outcome) => on_dialog(outcome),
+                                super::TuiAction::SwitchTheme(name) => {
+                                    // WP-607: in-place theme switch; an invalid
+                                    // theme keeps the old one and reports.
+                                    match super::theme::Theme::load(&agent_dir, &name) {
+                                        Ok(t) => {
+                                            app.theme = t;
+                                            app.last_error = None;
+                                        }
+                                        Err(e) => {
+                                            crate::corelog::line(&format!("[core] theme: {e}"));
+                                            app.last_error = Some(format!("theme: {e}"));
+                                        }
+                                    }
+                                }
                             }
                         }
                         dirty = true;
@@ -141,6 +158,21 @@ where
                         let mut v = first;
                         loop {
                             app.apply_event(&v);
+                            // WP-607: theme switch from the core (pi.setTheme).
+                            if v.get("kind").and_then(|k| k.as_str()) == Some("set_theme") {
+                                if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                                    match super::theme::Theme::load(&agent_dir, name) {
+                                        Ok(t) => {
+                                            app.theme = t;
+                                            app.last_error = None;
+                                        }
+                                        Err(e) => {
+                                            crate::corelog::line(&format!("[core] theme: {e}"));
+                                            app.last_error = Some(format!("theme: {e}"));
+                                        }
+                                    }
+                                }
+                            }
                             match events.try_recv() {
                                 Ok(more) => v = more,
                                 Err(_) => break,

@@ -464,6 +464,22 @@ pub async fn run() -> Result<i32> {
         if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
+        // WP-607: the `theme` setting selects the starting theme (a
+        // `light/dark` auto pair takes its dark side in v0). An invalid name
+        // keeps the built-in dark theme and reports in the status bar.
+        if let Some(setting) = agent_config.theme.as_deref() {
+            if let Some(name) = crate::tui::theme::resolve_theme_setting(Some(setting)) {
+                match crate::tui::theme::Theme::load(&agent_dir, &name) {
+                    Ok(t) => {
+                        app.theme = t;
+                    }
+                    Err(e) => {
+                        crate::corelog::line(&format!("[core] theme: {e}"));
+                        app.last_error = Some(format!("theme: {e}"));
+                    }
+                }
+            }
+        }
         let submit_tx = msg_tx.clone();
         let end_tx = msg_tx.clone();
         let dialog_client = client.clone();
@@ -495,6 +511,7 @@ pub async fn run() -> Result<i32> {
                         "title":title,"message":message,"response":Value::Null,"timedOut":true}));
                 }
             },
+            agent_dir.clone(),
             move || {
                 let _ = end_tx.send(Item::End);
             },
