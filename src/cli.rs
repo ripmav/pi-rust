@@ -455,12 +455,27 @@ pub async fn run() -> Result<i32> {
                 (crate::tui::keybindings::KeybindingManager::default(), Some(e))
             }
         };
+        // WP-608: the slash menu gets the extension commands (ready
+        // payload) and the discovered prompt templates (WP-307).
+        let mut ext_cmds: Vec<crate::tui::commands::Command> = Vec::new();
+        if let Some(arr) = ready.get("commands").and_then(serde_json::Value::as_array) {
+            for c in arr {
+                ext_cmds.push(crate::tui::commands::Command {
+                    name: c.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    description: c.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    argument_hint: None,
+                    source: crate::tui::commands::Source::Extension,
+                });
+            }
+        }
+        let tui_templates = crate::templates::discover(&agent_dir, &cwd);
         let mut app = crate::tui::TuiApp::with_kb(
             kb,
             model_label,
             cwd.display().to_string(),
             session.id.clone(),
-        );
+        )
+        .with_commands(ext_cmds, tui_templates);
         if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
@@ -512,6 +527,51 @@ pub async fn run() -> Result<i32> {
                 }
             },
             agent_dir.clone(),
+            {
+                let req_client = client.clone();
+                let req_log = log.clone();
+                move |label, extra, ty, payload| {
+                    // WP-608: the slash command's bridge round-trip; the
+                    // result comes back as a TUI-only event rendered in the
+                    // transcript.
+                    let ty = ty.to_string();
+                    let c = req_client.clone();
+                    let l = req_log.clone();
+                    tokio::spawn(async move {
+                        let resp = c.request(&ty, payload).await;
+                        let (ok, text) = match resp {
+                            Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+                                let data = r.get("data").cloned().unwrap_or(Value::Null);
+                                let text = if data == json!({ "ok": true }) {
+                                    String::new()
+                                } else {
+                                    data.as_str().map(str::to_string).unwrap_or_else(|| data.to_string())
+                                };
+                                (true, text)
+                            }
+                            Decision::Response(r) => (
+                                false,
+                                r.get("error").and_then(Value::as_str).unwrap_or("failed").to_string(),
+                            ),
+                            Decision::Unavailable => (false, "bridge not running".into()),
+                        };
+                        let mut ev = json!({
+                            "kind": "bridge_cmd_result",
+                            "label": label,
+                            "ok": ok,
+                            "text": text,
+                        });
+                        if ok {
+                            if let Some(obj) = extra.as_object() {
+                                for (k, v) in obj {
+                                    ev[k] = v.clone();
+                                }
+                            }
+                        }
+                        l.emit_tui(ev);
+                    });
+                }
+            },
             move || {
                 let _ = end_tx.send(Item::End);
             },

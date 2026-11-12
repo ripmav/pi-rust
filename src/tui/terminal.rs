@@ -19,7 +19,7 @@ use crossterm::event::EnableBracketedPaste;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 /// Run the TUI loop until the app sets `exit`.
@@ -29,20 +29,24 @@ use tokio::sync::mpsc;
 /// - `on_dialog`: called when a dialog closes (WP-604).
 /// - `agent_dir`: used by `/theme <name>` to load the named theme (WP-607);
 ///   an invalid theme is shown in the status bar, the old theme stays.
+/// - `on_request`: WP-608 slash commands that need the bridge; the closure
+///   sends the request and renders the result via a TUI-only event.
 /// - `on_exit`: called once when the user quits.
-pub async fn run<F, G, H>(
+pub async fn run<F, G, H, I>(
     app: &mut super::TuiApp,
     mut events: tokio::sync::broadcast::Receiver<Value>,
     mut ui: mpsc::UnboundedReceiver<Value>,
     mut on_submit: F,
     mut on_dialog: H,
     agent_dir: std::path::PathBuf,
+    mut on_request: I,
     mut on_exit: G,
 ) -> anyhow::Result<()>
 where
     F: FnMut(&str) + Send,
     G: FnMut() + Send,
     H: FnMut(super::dialog::DialogOutcome) + Send,
+    I: FnMut(String, Value, &str, Value) + Send,
 {
     // Stdin reader thread: crossterm's blocking poll+read into a channel.
     // The stop flag bounds the final join: without it the reader only
@@ -125,6 +129,20 @@ where
                                             app.last_error = Some(format!("theme: {e}"));
                                         }
                                     }
+                                }
+                                super::TuiAction::BridgeCommand { name, args } => {
+                                    on_request(format!("/{name}"), Value::Null, "command", json!({ "name": name, "args": args }));
+                                }
+                                super::TuiAction::SetThinking { level } => {
+                                    on_request(format!("/thinking {level}"), Value::Null, "set_thinking_level_request", json!({ "level": level }));
+                                }
+                                super::TuiAction::SetModel { provider, model } => {
+                                    on_request(
+                                        format!("/model {provider}/{model}"),
+                                        json!({ "model": format!("{provider}/{model}") }),
+                                        "set_model_request",
+                                        json!({ "provider": provider, "modelId": model }),
+                                    );
                                 }
                             }
                         }
