@@ -58,7 +58,7 @@ instruction 2026-11-11).
 | T7 | S8 | 607 | #53 | inline (TDD) | 4112ddd/c7f0deb on feat/wp-607-themes; PR (stack #59) |
 | T8 | S9 | 608 | #54 | inline (TDD) | commits on feat/wp-608-slash-commands; PR (stack #59) |
 | T9 | S10 | 609 | #55 | inline (TDD) | commits on feat/wp-609-pickers; PR (stack #59) |
-| T10 | S11 | 610 | — | subagent or inline | — |
+| T10 | S11 | 610 | #56 | inline (TDD) | commits on feat/wp-610-print-json-modes; PR (stack #59) |
 
 ## Log
 
@@ -181,3 +181,20 @@ instruction 2026-11-11).
   alphabetical — the test asserted anthropic); Session is not Clone,
   so the resume snapshots id+transcript and swaps in place instead of
   replacing the Arc. Suite: 141 in-crate + 19 e2e + 3 PTY; smoke 43/43.
+
+- L13: WP-610 delivered: T10 done, branch feat/wp-610-print-json-modes
+  (base feat/wp-609-pickers). One-shot stdout variants with upstream
+  print-mode parity: -p/--print/--mode text = final assistant text only
+  (exit 0/1 per upstream), --mode json = upstream-shaped
+  AgentSessionEvent stream (session header, agent_start, turn_start,
+  message_start user/assistant skeleton, message_update text_delta per
+  streamed chunk, message_end with usage, tool_execution_start/end,
+  agent_end with willRetry:false; a failing run reports an error
+  message_end in-stream and exits 1). The default headless mode keeps
+  the pi-rust NDJSON contract unchanged (exit 0/2/3). Root causes: the
+  assistant message_start had to move before the driver call (the
+  skeleton opens the stream; deltas land between start and end) and the
+  turn_start event moved ahead of the model call with it (upstream
+  order; same payload, no assertion pinned the old position). Suite:
+  141 in-crate + 22 e2e + 3 PTY; smoke 43/43. M6 complete: all 10 WPs
+  are PRs in stack #59.

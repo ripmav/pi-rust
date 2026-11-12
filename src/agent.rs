@@ -97,8 +97,25 @@ impl EventLog {
 }
 
 /// Shared state of the agent loop and the sidecar-event processor.
+/// WP-610: one-shot stdout variants (upstream print-mode parity).
+/// `Ndjson` is the default core contract (kind events on stdout);
+/// `Text` writes only the final assistant text; `Json` writes the
+/// upstream-shaped AgentSessionEvent stream.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputMode {
+    Ndjson,
+    Text,
+    Json,
+}
+
 pub struct Core {
     pub client: Arc<BridgeClient>,
+    /// WP-610: the one-shot stdout variant (headless only).
+    pub out_mode: OutputMode,
+    /// WP-610: Text mode — the last assistant text of the run.
+    pub text_final: Arc<Mutex<Option<String>>>,
+    /// WP-610: Json mode — upstream-shaped event lines to stdout.
+    pub json_tx: Option<mpsc::UnboundedSender<String>>,
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
@@ -121,6 +138,20 @@ pub struct Core {
     pub tui: bool,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
+}
+
+/// WP-610: Json mode — write one upstream-shaped event line.
+fn jemit(ctx: &Core, v: Value) {
+    if ctx.out_mode == OutputMode::Json {
+        let _ = ctx.json_tx.as_ref().unwrap().send(v.to_string());
+    }
+}
+
+/// WP-610: Json mode — the streamed text delta as an upstream
+/// `message_update` (the `partial` snapshot is dropped, per toJsonEvent).
+fn json_delta(ctx: &Core, content_index: u32, delta: &str) {
+    jemit(ctx, json!({"type":"message_update","usage":json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}),
+        "assistantMessageEvent":{"type":"text_delta","contentIndex":content_index,"delta":delta}}));
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -463,6 +494,9 @@ fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32) -> Box<dyn FnMut(&str) + Se
     Box::new(move |chunk: &str| {
         ctx.log
             .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":chunk}));
+        if ctx.out_mode == OutputMode::Json {
+            json_delta(ctx, 0, chunk);
+        }
     })
 }
 
@@ -477,6 +511,14 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
                 ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
                 if let Err(msg) = run_agent(&ctx, &u).await {
                     crate::corelog::line(&format!("[core] agent run failed: {msg}"));
+                    // WP-610: Json mode surfaces the failure in-stream (the
+                    // upstream error assistant message); Text mode stays
+                    // silent on stdout (the error goes to stderr + exit 1).
+                    if ctx.out_mode == OutputMode::Json {
+                        jemit(&ctx, json!({"type":"message_end","message":{"role":"assistant","content":[],
+                            "stopReason":"error","errorMessage":msg,"timestamp":crate::session::now_iso()}}));
+                        jemit(&ctx, json!({"type":"agent_end","messages":[],"willRetry":false}));
+                    }
                     *ctx.fail.lock().unwrap() = Some(msg);
                     break; // remaining queued items are dropped (v0)
                 }
@@ -533,6 +575,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     }
     let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
+    jemit(ctx, json!({"type":"message_start","message":user_msg}));
 
     // `before_agent_start`: prepend returned custom messages; a returned
     // systemPrompt (present only when a handler changed it) replaces the prompt
@@ -563,6 +606,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
     if subscribed(ctx, "agent_start") { ctx.client.fire(json!({"type":"agent_start","event":{"type":"agent_start"}})); }
     ctx.log.emit(json!({"kind":"agent_start"}));
+    jemit(ctx, json!({"type":"agent_start"}));
     let run_start = ctx.session.transcript().len();
 
     let mut turn_index = 0u32;
@@ -577,6 +621,22 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             if let Some(ms) = resp.as_array() {
                 convo = ms.clone();
             }
+        }
+
+        // WP-610: turn_start now precedes the model call (the upstream
+        // order; the events carry the same payload).
+        if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
+        ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
+        jemit(ctx, json!({"type":"turn_start"}));
+        // WP-610: the assistant message_start (skeleton) opens the stream
+        // before the driver call — the deltas land between start and end.
+        if ctx.out_mode == OutputMode::Json {
+            let active = ctx.model.lock().unwrap().0.clone();
+            jemit(ctx, json!({"type":"message_start","message":{"role":"assistant",
+                "content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                "api":active.get("id").cloned().unwrap_or(Value::Null),
+                "provider":active.get("provider").cloned().unwrap_or(Value::Null),
+                "model":active.get("id").cloned().unwrap_or(Value::Null)}}));
         }
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
@@ -609,24 +669,37 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
         }
-        if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
-        ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
-
         // The fake model does not stream: message_start + message_end only.
         let assistant = assistant_message(&turn);
         if subscribed(ctx, "message_start") { ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}})); }
         if subscribed(ctx, "message_end") { ctx.client.fire(json!({"type":"message_end","event":{"type":"message_end","message":assistant}})); }
+        // WP-610: message_end carries the final assistant message (the
+        // skeleton message_start + the on_delta updates came first).
         let msg_id = ctx.session.append_message(&assistant);
+        jemit(ctx, json!({"type":"message_end","message":assistant}));
         ctx.log.emit(json!({"kind":"model_output","turnIndex":turn_index,"text":turn.text.as_deref(),
             "toolCalls":turn.tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()}));
+        if ctx.out_mode == OutputMode::Text {
+            if let Some(t) = &turn.text {
+                *ctx.text_final.lock().unwrap() = Some(t.clone());
+            }
+        }
 
         let mut tool_results: Vec<Value> = Vec::new();
         let mut tool_result_ids: Vec<String> = Vec::new();
         let mut all_terminate = true;
         for tc in &turn.tool_calls {
+            // WP-610: upstream tool_execution_start before the run (args).
+            jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
             match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input).await {
                 Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
+                    // WP-610: upstream tool_execution_end (result + isError).
+                    let is_error = trm.get("content").and_then(Value::as_array)
+                        .map(|c| c.iter().any(|x| x.get("isError") == Some(&json!(true))))
+                        .unwrap_or(false);
+                    jemit(ctx, json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
+                        "result":trm.get("content").cloned().unwrap_or(Value::Null),"isError":is_error}));
                     tool_results.push(trm);
                     if !terminate {
                         all_terminate = false;
@@ -654,6 +727,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let run_messages = ctx.session.transcript()[run_start..].to_vec();
     if subscribed(ctx, "agent_end") { ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages}})); }
     ctx.log.emit(json!({"kind":"agent_end"}));
+    jemit(ctx, json!({"type":"agent_end","messages":run_messages,"willRetry":false}));
     Ok(())
 }
 

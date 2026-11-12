@@ -122,6 +122,7 @@ pub async fn run() -> Result<i32> {
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut image_paths: Vec<PathBuf> = Vec::new();
+    let mut out_mode: Option<crate::agent::OutputMode> = None;
     let mut template_name: Option<String> = None;
     let mut template_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -143,6 +144,22 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            // WP-610: one-shot stdout variants (upstream print-mode parity).
+            "-p" | "--print" => {
+                let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
+                anyhow::ensure!(m == crate::agent::OutputMode::Text, "--mode json conflicts with --print (text)");
+                out_mode = Some(crate::agent::OutputMode::Text);
+            }
+            "--mode" => {
+                let v = val(&args, &mut i)?;
+                let m = match v.as_str() {
+                    "text" => crate::agent::OutputMode::Text,
+                    "json" => crate::agent::OutputMode::Json,
+                    other => bail!("invalid --mode '{other}' (valid: text, json)"),
+                };
+                anyhow::ensure!(out_mode.map(|o| o == m).unwrap_or(true), "--mode conflicts with --print (text)");
+                out_mode = Some(m);
+            }
             "--image" => image_paths.push(PathBuf::from(val(&args, &mut i)?)),
             "--template" => {
                 template_name = Some(val(&args, &mut i)?);
@@ -162,10 +179,20 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
+            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [-p|--print] [--mode text|json] [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
         }
         i += 1;
     }
+    if let Some(m) = out_mode {
+        use crate::agent::OutputMode::*;
+        anyhow::ensure!(
+            prompt.is_some() || scenario_path.is_some(),
+            "{:?} mode requires --prompt <text> or --scenario <file>",
+            if m == Json { "json" } else { "print" }
+        );
+        anyhow::ensure!(!list_sessions, "print/json mode cannot be combined with --list-sessions");
+    }
+
     let cwd = std::env::current_dir().context("cwd")?;
 
     // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
@@ -341,7 +368,9 @@ pub async fn run() -> Result<i32> {
     };
     crate::corelog::line(&format!("[core] spawning sidecar: {node} {}", sidecar.display()));
 
-    let log = EventLog::start(!tui_mode);
+    // WP-610: the NDJSON-on-stdout contract applies to the default headless
+    // mode only; --print/--mode json keep stdout clean (their own streams).
+    let log = EventLog::start(!tui_mode && out_mode != Some(crate::agent::OutputMode::Text) && out_mode != Some(crate::agent::OutputMode::Json));
     let fail: Arc<Mutex<Option<String>>> = Arc::default();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -380,7 +409,31 @@ pub async fn run() -> Result<i32> {
         cost_total: Arc::default(),
         tui: tui_mode,
         ui_tx,
+        out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
+        text_final: Arc::default(),
+        json_tx: {
+            if out_mode == Some(crate::agent::OutputMode::Json) {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
+                    while let Some(line) = rx.recv().await {
+                        let _ = out.write_all(format!("{}\n", line.trim_end()).as_bytes()).await;
+                        let _ = out.flush().await;
+                    }
+                });
+                Some(tx)
+            } else {
+                None
+            }
+        },
     });
+    // WP-610: the json stream opens with the session header (upstream parity).
+    if ctx.out_mode == crate::agent::OutputMode::Json {
+        if let Some(h) = session.header() {
+            ctx.json_tx.as_ref().unwrap().send(h.to_string()).ok();
+        }
+    }
     tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
@@ -639,17 +692,36 @@ pub async fn run() -> Result<i32> {
     }
 
     // Final event: the full session (acked: written+flushed before exit).
-    if print_usage {
-        let u = ctx.usage_total.lock().unwrap().clone();
-        let cost = *ctx.cost_total.lock().unwrap();
-        log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
-            "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
+    // WP-610: print/json keep stdout clean — no usage/transcript events.
+    if ctx.out_mode == crate::agent::OutputMode::Ndjson {
+        if print_usage {
+            let u = ctx.usage_total.lock().unwrap().clone();
+            let cost = *ctx.cost_total.lock().unwrap();
+            log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
+                "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
+        }
+        log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
+    } else if ctx.out_mode == crate::agent::OutputMode::Text {
+        // Upstream print mode: the final assistant text, one trailing newline.
+        if let Some(t) = ctx.text_final.lock().unwrap().take() {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{t}");
+            let _ = out.flush();
+        }
     }
-    log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
 
     // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
     // (sidecar crashed mid-run — protocol: degraded is terminal, no respawn).
-    Ok(if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 })
+    // WP-610: print/json use the upstream exit codes (1 for any failure).
+    Ok(match ctx.out_mode {
+        crate::agent::OutputMode::Ndjson => {
+            if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 }
+        }
+        _ => {
+            if client.degraded_seen() || fail.lock().unwrap().is_some() { 1 } else { 0 }
+        }
+    })
 }
 
 /// `--list-sessions`: one NDJSON line per session file under

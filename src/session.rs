@@ -292,6 +292,21 @@ impl Session {
         self.inner.lock().unwrap().append_message(msg)
     }
 
+    /// WP-610: the first JSON line of the session file (the header) —
+    /// leading blank lines are skipped (upstream json mode writes it first).
+    pub fn header(&self) -> Option<Value> {
+        let path = self.path.lock().unwrap().clone();
+        let raw = std::fs::read_to_string(&path).ok()?;
+        for line in raw.lines() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            return serde_json::from_str(t).ok();
+        }
+        None
+    }
+
     /// Persists a sidecar `session_append_entry` payload as a `custom` entry.
     pub fn append_entry(&self, entry: Value) {
         self.inner.lock().unwrap().append_entry(entry);
