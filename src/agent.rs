@@ -270,6 +270,39 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
                 }
             }
+            "set_theme_request" => {
+                // WP-607: pi.setTheme from an extension. The TUI applies the
+                // switch via the `set_theme` broadcast; headless runs reject
+                // (upstream theme switching is an interactive-mode feature).
+                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                let reply = |success: bool, data: Value| {
+                    let mut line =
+                        json!({"id":id,"type":"response","command":"set_theme_request","success":success});
+                    if success {
+                        line["data"] = data;
+                    } else {
+                        line["error"] = data;
+                    }
+                    ctx.client.send(line);
+                };
+                match name {
+                    Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
+                        Ok(t) => {
+                            ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
+                            reply(true, json!({"ok":true}));
+                        }
+                        Err(e) => reply(false, json!(e)),
+                    },
+                    Some(n) => reply(
+                        false,
+                        json!(format!(
+                            "theme {n:?} cannot be switched outside interactive (TUI) mode"
+                        )),
+                    ),
+                    None => reply(false, json!("setTheme requires a theme name")),
+                }
+            }
             "tool_call_request" => nested_tool(&ctx, &ev).await,
             other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
         }

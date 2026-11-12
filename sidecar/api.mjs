@@ -24,7 +24,7 @@ export const modelRegistryStub = {
 	unregisterVirtualModel: () => {},
 };
 
-export function createDialogManager({ output, uiMethods, defaultTimeoutMs }) {
+export function createDialogManager({ output, uiMethods, defaultTimeoutMs, sendRequest }) {
 	const supported = new Set(uiMethods ?? []);
 	const pending = new Map();
 
@@ -75,7 +75,14 @@ export function createDialogManager({ output, uiMethods, defaultTimeoutMs }) {
 		},
 		getAllThemes: () => [],
 		getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "Theme switching not supported in bridge mode" }),
+		setTheme: (name) => {
+			// WP-607: the core applies the switch in TUI mode (it validates
+			// the theme name and answers); headless runs reject it.
+			return sendRequest({ type: "set_theme_request", name }).then(
+				(res) => (res?.success ? { success: true } : { success: false, error: res?.error ?? "theme switch failed" }),
+				(e) => ({ success: false, error: String(e) }),
+			);
+		},
 		getToolsExpanded: () => false,
 		// TUI-only surface: accepted, ignored (rpc-mode precedent).
 		setWorkingMessage: () => {},
