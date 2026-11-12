@@ -218,8 +218,10 @@ fn bridge_scenario_end_to_end() {
 
     let blocked = tool_execs.iter().find(|t| t["blocked"] == json!(true))
         .expect("blocked bash missing\n{stdout}");
+    // WP-505: the pi-rust core is headless (no UI methods advertised), so the
+    // unmodified permission-gate takes the upstream no-UI default path.
     assert_eq!(blocked["input"]["command"], "sudo true");
-    assert_eq!(blocked["result_summary"], "Blocked by extension: Blocked by user");
+    assert_eq!(blocked["result_summary"], "Blocked by extension: Dangerous command blocked (no UI for confirmation)");
 
     // The tool_call decision for the blocked command carries the handler's block + reason.
     let decisions: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "decision").collect();
@@ -227,7 +229,7 @@ fn bridge_scenario_end_to_end() {
         && d["request"]["input"]["command"] == "sudo true")
         .expect("sudo tool_call decision missing\n{stdout}");
     assert_eq!(gate["response"]["result"]["block"], json!(true));
-    assert_eq!(gate["response"]["result"]["reason"], "Blocked by user");
+    assert_eq!(gate["response"]["result"]["reason"], "Dangerous command blocked (no UI for confirmation)");
 
     // Turn boundaries and model outputs (turn 0 = 3 tool calls, turn 1 = text).
     assert!(lines.iter().any(|l| l["kind"] == "turn_start" && l["turnIndex"] == 0));
@@ -395,18 +397,12 @@ fn plan_mode_command_end_to_end() {
         "plan-mode custom entry missing from session file\n{session_text}",
     );
 
-    // (f) the agent_end select dialog is logged and answered with the v0 default.
-    let sel = lines
-        .iter()
-        .find(|l| l.get("kind").and_then(Value::as_str) == Some("extension_ui_request")
-            && l.get("method").and_then(Value::as_str) == Some("select"))
-        .expect("select extension_ui_request missing\n{stdout}");
-    assert!(sel["title"].as_str().expect("select title missing").contains("Plan mode"), "{sel}");
-    assert_eq!(
-        sel["response"],
-        json!({ "type": "extension_ui_response", "id": sel["id"], "cancelled": true }),
-        "select not answered with v0 default\n{sel}",
-    );
+    // (f) WP-505: headless = no UI context (upstream noOp defaults): the plan-mode
+    // agent_end select produces no dialog event and no response round-trip.
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_ui_request")
+            && l.get("method").and_then(Value::as_str) == Some("select")),
+        "headless select must not open a dialog\n{stdout}");
 
     // Healthy run: no handler errors.
     assert!(
@@ -1257,4 +1253,46 @@ fn provider_e2e_image_file_errors_typed() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr.contains("not a supported image format"), "{stderr}");
+}
+
+/// WP-506: an extension tool named `read` shadows the built-in read — execution
+/// reaches the extension (upstream registry precedence), pinned by the fixture's
+/// result text. Test-only fixture: tests/fixtures/shadow-read.ts.
+#[test]
+fn extension_tool_shadows_builtin() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp506-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({
+        "user_messages": ["read x"],
+        "model_scripts": [[
+            { "tool_call": { "name": "read", "input": { "path": "x" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/shadow-read.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let execs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "tool_execution").collect();
+    assert_eq!(execs.len(), 1, "expected one tool execution\n{stdout}");
+    assert_eq!(execs[0]["name"], "read");
+    assert_eq!(execs[0]["blocked"], json!(false));
+    // The fixture's execute() ran, not the built-in read (which would error on
+    // the missing file `x`).
+    assert_eq!(execs[0]["result_summary"], "shadow-read:x");
 }

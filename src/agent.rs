@@ -426,11 +426,13 @@ async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value)
 }
 
 async fn run_tool(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Result<tools::ExecResult, ToolFailure> {
-    if tools::is_builtin(name) {
+    // Upstream precedence: an extension tool shadows the built-in of the same name.
+    let ext_hit = ctx.client.state() == State::Running
+        && ctx.ext_tools.lock().unwrap().iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+    if !ext_hit && tools::is_builtin(name) {
         return Ok(tools::execute(name, input).await);
     }
-    let known = ctx.ext_tools.lock().unwrap().iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
-    if !known {
+    if !ext_hit && !tools::is_builtin(name) {
         return Err(ToolFailure::Unknown(name.to_string()));
     }
     // Extension tools are dropped from the model's tool set while degraded; a
@@ -586,7 +588,8 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         let event = json!({"type":"before_agent_start","messageType":"user","prompt":text});
         // BuildSystemPromptOptions subset for the sidecar: core cwd, currently
         // active built-in tool names, empty sections (handlers mutate in place).
-        let selected_tools: Vec<String> = tools::schemas().iter()
+        let selected_tools: Vec<String> = merged_tool_defs(ctx)
+            .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
             .collect();
         let spon = json!({
@@ -734,11 +737,19 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 /// Full transcript for `context_with_system`: leading system message (prompt +
 /// tool declarations), custom messages from before_agent_start, then the
 /// session transcript. Degraded: extension tools are dropped from the set.
+/// Model tool set: built-ins merged with `ready.tools` via the upstream
+/// precedence (extension tools shadow built-ins by name). Degraded: extension
+/// tools are dropped from the set.
+fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
+    let ext = if ctx.client.state() == State::Running {
+        ctx.ext_tools.lock().unwrap().clone()
+    } else {
+        Vec::new()
+    };
+    tools::merge_with_extensions(tools::schemas(), ext)
+}
 fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<Value> {
-    let mut tool_defs = tools::schemas();
-    if ctx.client.state() == State::Running {
-        tool_defs.extend(ctx.ext_tools.lock().unwrap().iter().cloned()); // ready.tools pass-through
-    }
+    let tool_defs = merged_tool_defs(ctx);
     let mut v = vec![json!({"role":"system","content":system_prompt,"toolsAdded":tool_defs,"timestamp":now_ms()})];
     v.extend(custom.iter().cloned());
     v.extend(ctx.session.transcript().iter().cloned());

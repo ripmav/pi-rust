@@ -385,7 +385,16 @@ pub async fn run() -> Result<i32> {
     let client = Arc::new(client);
 
     // Handshake: init → success response → ready event → state Running.
-    let init = json!({"protocolVersion":0,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":INIT_TIMEOUT_MS}});
+    // WP-505: a headless core advertises no UI methods — the sidecar then
+    // keeps the upstream noOp UI context (hasUI=false) and extensions take
+    // their no-UI defaults (upstream print-mode behavior). The TUI client
+    // (M6/WP-604) advertises its methods to get the dialog wiring.
+    let ui_methods = if tui_mode {
+        json!(["select", "confirm", "input", "editor", "notify"])
+    } else {
+        json!([])
+    };
+    let init = json!({"protocolVersion":0,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
         Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
