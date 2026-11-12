@@ -30,38 +30,64 @@ type Ack = Option<tokio::sync::oneshot::Sender<()>>;
 
 #[derive(Clone)]
 pub struct EventLog {
-    tx: mpsc::UnboundedSender<(Value, Ack)>,
+    tx: Option<mpsc::UnboundedSender<(Value, Ack)>>,
+    sub: tokio::sync::broadcast::Sender<Value>,
 }
 
 impl EventLog {
-    /// Machine-readable NDJSON event log on stdout, one line per event.
-    pub fn start() -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
-            while let Some((v, ack)) = rx.recv().await {
-                let _ = out.write_all(format!("{}\n", v.to_string().trim_end()).as_bytes()).await;
-                let _ = out.flush().await;
-                if let Some(a) = ack {
-                    let _ = a.send(());
+    /// `headless` = NDJSON on stdout (the core output contract for
+    /// --scenario/--prompt/--list-sessions runs); the TUI renders in-process
+    /// instead and passes `false`.
+    pub fn start(headless: bool) -> Self {
+        let (sub, _) = tokio::sync::broadcast::channel(8192); // 8192: streaming bursts (WP-603)
+        let tx = if headless {
+            let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
+                while let Some((v, ack)) = rx.recv().await {
+                    let _ = out.write_all(format!("{}\n", v.to_string().trim_end()).as_bytes()).await;
+                    let _ = out.flush().await;
+                    if let Some(a) = ack {
+                        let _ = a.send(());
+                    }
                 }
-            }
-        });
-        Self { tx }
+            });
+            Some(tx)
+        } else {
+            None
+        };
+        Self { tx, sub }
+    }
+
+    /// Subscribe to the in-process event stream (TUI).
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.sub.subscribe()
+    }
+
+    /// TUI-only event (in-process broadcast only — never on the headless
+    /// NDJSON stdout, so the machine output contract stays unchanged).
+    pub fn emit_tui(&self, v: Value) {
+        let _ = self.sub.send(v);
     }
 
     pub fn emit(&self, v: Value) {
-        let _ = self.tx.send((v, None));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send((v.clone(), None));
+        }
+        let _ = self.sub.send(v);
     }
 
-    /// Emits and waits until the line is written and flushed (the final
-    /// transcript line must reach stdout before the core exits).
+    /// Emits and (headless) waits until the line is written and flushed (the
+    /// final transcript line must reach stdout before the core exits).
     pub async fn emit_final(&self, v: Value) {
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        if self.tx.send((v, Some(ack_tx))).is_ok() {
-            let _ = ack_rx.await;
+        if let Some(tx) = &self.tx {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            if tx.send((v.clone(), Some(ack_tx))).is_ok() {
+                let _ = ack_rx.await;
+            }
         }
+        let _ = self.sub.send(v);
     }
 
     /// One line per decision event: name + request + response.
@@ -71,8 +97,25 @@ impl EventLog {
 }
 
 /// Shared state of the agent loop and the sidecar-event processor.
+/// WP-610: one-shot stdout variants (upstream print-mode parity).
+/// `Ndjson` is the default core contract (kind events on stdout);
+/// `Text` writes only the final assistant text; `Json` writes the
+/// upstream-shaped AgentSessionEvent stream.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputMode {
+    Ndjson,
+    Text,
+    Json,
+}
+
 pub struct Core {
     pub client: Arc<BridgeClient>,
+    /// WP-610: the one-shot stdout variant (headless only).
+    pub out_mode: OutputMode,
+    /// WP-610: Text mode — the last assistant text of the run.
+    pub text_final: Arc<Mutex<Option<String>>>,
+    /// WP-610: Json mode — upstream-shaped event lines to stdout.
+    pub json_tx: Option<mpsc::UnboundedSender<String>>,
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
@@ -90,6 +133,25 @@ pub struct Core {
     /// Cumulative token usage / cost for --print-usage (WP-407).
     pub usage_total: Arc<Mutex<crate::model::Usage>>,
     pub cost_total: Arc<Mutex<f64>>,
+    /// TUI mode (WP-604): blocking ui dialogs are forwarded to the TUI
+    /// instead of answering with the upstream defaults.
+    pub tui: bool,
+    /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
+    pub ui_tx: mpsc::UnboundedSender<Value>,
+}
+
+/// WP-610: Json mode — write one upstream-shaped event line.
+fn jemit(ctx: &Core, v: Value) {
+    if ctx.out_mode == OutputMode::Json {
+        let _ = ctx.json_tx.as_ref().unwrap().send(v.to_string());
+    }
+}
+
+/// WP-610: Json mode — the streamed text delta as an upstream
+/// `message_update` (the `partial` snapshot is dropped, per toJsonEvent).
+fn json_delta(ctx: &Core, content_index: u32, delta: &str) {
+    jemit(ctx, json!({"type":"message_update","usage":json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}),
+        "assistantMessageEvent":{"type":"text_delta","contentIndex":content_index,"delta":delta}}));
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -107,7 +169,7 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
     let data = match resp {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => r.get("data").cloned().unwrap_or(Value::Null),
         Decision::Response(r) => {
-            eprintln!("[core] {name} decision error: {}", r.get("error").and_then(Value::as_str).unwrap_or("?"));
+            crate::corelog::line(&format!("[core] {name} decision error: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")));
             fallback.clone()
         }
         Decision::Unavailable => fallback.clone(),
@@ -128,23 +190,54 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     .iter().filter_map(Value::as_str).map(str::to_string).collect();
                 ctx.events.lock().unwrap().extend(names.iter().cloned());
                 ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
-                eprintln!("[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
+                crate::corelog::line(&format!(
+                    "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
                     ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-                    ctx.ext_tools.lock().unwrap().len());
+                    ctx.ext_tools.lock().unwrap().len()
+                ));
                 if let Some(r) = ctx.ready.lock().unwrap().take() {
                     let _ = r.send(ev);
                 }
             }
-            "extension_ui_request" => ui_default(&ctx, &ev),
+            "extension_ui_request" => {
+                let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
+                if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
+                    // WP-604: the TUI renders the dialog and answers it over
+                    // the unchanged bridge protocol.
+                    if ctx.ui_tx.send(ev.clone()).is_err() {
+                        ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
+                    }
+                } else if ctx.tui {
+                    // F&F UI channel: display-only, the TUI renders it.
+                    let kind = match method {
+                        "notify" => "notify",
+                        "setStatus" => "set_status",
+                        "setTitle" => "set_title",
+                        "set_editor_text" => "set_editor_text",
+                        _ => "extension_ui_request",
+                    };
+                    ctx.log.emit(json!({"kind":kind,
+                        "id":ev.get("id").cloned().unwrap_or(Value::Null),
+                        "method":method,
+                        "title":ev.get("title").cloned().unwrap_or(Value::Null),
+                        "message":ev.get("message").cloned().unwrap_or(Value::Null),
+                        "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
+                        "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
+                        "text":ev.get("text").cloned().unwrap_or(Value::Null),
+                        "response":Value::Null}));
+                } else {
+                    ui_default(&ctx, &ev);
+                }
+            }
             "extension_error" => {
-                eprintln!("[core] extension_error: {ev}");
+                crate::corelog::line(&format!("[core] extension_error: {ev}"));
                 ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
                     "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
             }
             "session_info_changed" => {
                 let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
                 ctx.session.set_name(name.clone());
-                eprintln!("[core] session name: {name:?}");
+                crate::corelog::line(&format!("[core] session name: {name:?}"));
             }
             "session_append_entry" => {
                 if let Some(entry) = ev.get("entry") {
@@ -153,7 +246,7 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
             }
             "user_message" => {
                 let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-                eprintln!("[core] extension user_message: {text}");
+                crate::corelog::line(&format!("[core] extension user_message: {text}"));
                 // Steer for v0 = append to the same queue (drained in order).
                 let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
             }
@@ -208,22 +301,57 @@ pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Cor
                     ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
                 }
             }
+            "set_theme_request" => {
+                // WP-607: pi.setTheme from an extension. The TUI applies the
+                // switch via the `set_theme` broadcast; headless runs reject
+                // (upstream theme switching is an interactive-mode feature).
+                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                let reply = |success: bool, data: Value| {
+                    let mut line =
+                        json!({"id":id,"type":"response","command":"set_theme_request","success":success});
+                    if success {
+                        line["data"] = data;
+                    } else {
+                        line["error"] = data;
+                    }
+                    ctx.client.send(line);
+                };
+                match name {
+                    Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
+                        Ok(t) => {
+                            ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
+                            reply(true, json!({"ok":true}));
+                        }
+                        Err(e) => reply(false, json!(e)),
+                    },
+                    Some(n) => reply(
+                        false,
+                        json!(format!(
+                            "theme {n:?} cannot be switched outside interactive (TUI) mode"
+                        )),
+                    ),
+                    None => reply(false, json!("setTheme requires a theme name")),
+                }
+            }
             "tool_call_request" => nested_tool(&ctx, &ev).await,
-            other => eprintln!("[core] ignoring unknown sidecar event: {other}"),
+            other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
         }
     }
 }
 
-/// v0 has no human UI: blocking dialogs are answered with the upstream
-/// defaults immediately (select/input/editor → cancelled, confirm → false) and
-/// logged to stderr; F&F ui requests (notify, setStatus, ...) need no reply.
-/// Every ui request is logged to the event log with its v0 default answer.
+/// Headless default-answers path: blocking dialogs are answered with the
+/// upstream defaults immediately (select/input/editor → cancelled, confirm →
+/// false) and logged; F&F ui requests (notify, setStatus, ...) need no
+/// reply. Every ui request is logged to the event log with its answer.
+/// TUI mode (WP-604) does not use this path for dialogs: the TUI renders
+/// them and answers with the user's choice.
 fn ui_default(ctx: &Core, ev: &Value) {
     let (Some(id), Some(method)) = (ev.get("id").and_then(Value::as_str), ev.get("method").and_then(Value::as_str)) else {
         return;
     };
     let title = ev.get("title").and_then(Value::as_str).unwrap_or_default();
-    eprintln!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)");
+    crate::corelog::line(&format!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)"));
     let resp = if method == "confirm" {
         json!({"type":"extension_ui_response","id":id,"confirmed":false})
     } else if matches!(method, "select" | "input" | "editor") {
@@ -360,6 +488,18 @@ async fn finalize_tool_result(ctx: &Core, call_id: &str, name: &str, input: &Val
     (result, terminate)
 }
 
+/// WP-603: the per-turn streaming callback — each text chunk becomes a
+/// TUI-only `model_delta` event (never on the headless NDJSON stdout).
+fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32) -> Box<dyn FnMut(&str) + Send + 'c> {
+    Box::new(move |chunk: &str| {
+        ctx.log
+            .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":chunk}));
+        if ctx.out_mode == OutputMode::Json {
+            json_delta(ctx, 0, chunk);
+        }
+    })
+}
+
 pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>) {
     let mut index = 0u32;
     loop {
@@ -370,7 +510,15 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
                 index += 1;
                 ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
                 if let Err(msg) = run_agent(&ctx, &u).await {
-                    eprintln!("[core] agent run failed: {msg}");
+                    crate::corelog::line(&format!("[core] agent run failed: {msg}"));
+                    // WP-610: Json mode surfaces the failure in-stream (the
+                    // upstream error assistant message); Text mode stays
+                    // silent on stdout (the error goes to stderr + exit 1).
+                    if ctx.out_mode == OutputMode::Json {
+                        jemit(&ctx, json!({"type":"message_end","message":{"role":"assistant","content":[],
+                            "stopReason":"error","errorMessage":msg,"timestamp":crate::session::now_iso()}}));
+                        jemit(&ctx, json!({"type":"agent_end","messages":[],"willRetry":false}));
+                    }
                     *ctx.fail.lock().unwrap() = Some(msg);
                     break; // remaining queued items are dropped (v0)
                 }
@@ -392,8 +540,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let fake_driver: Option<Box<dyn ModelDriver>> = match ctx.provider.lock().unwrap().as_ref() {
         Some(_) => None,
         None => {
-            if u.steps.is_empty() && u.source == "cli" {
-                // Prompt mode with the fake driver: deterministic echo turn.
+            if u.steps.is_empty() {
+                // No scripted model: deterministic echo turn (prompt runs and
+                // TUI messages alike; the fake driver is a test double).
                 Some(Box::new(FakeDriver::echo_mode()))
             } else {
                 Some(Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?))
@@ -408,7 +557,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         let data = decision_data(ctx, ctx.client.request("input", json!({"event":event.clone()})).await, "input", &event, &json!({"action":"continue"}));
         match data.get("action").and_then(Value::as_str) {
             Some("handled") => {
-                eprintln!("[core] input handled by extension; no agent turn");
+                crate::corelog::line(&format!("[core] input handled by extension; no agent turn"));
                 return Ok(());
             }
             Some("transform") => {
@@ -426,6 +575,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     }
     let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
+    jemit(ctx, json!({"type":"message_start","message":user_msg}));
 
     // `before_agent_start`: prepend returned custom messages; a returned
     // systemPrompt (present only when a handler changed it) replaces the prompt
@@ -456,6 +606,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
     if subscribed(ctx, "agent_start") { ctx.client.fire(json!({"type":"agent_start","event":{"type":"agent_start"}})); }
     ctx.log.emit(json!({"kind":"agent_start"}));
+    jemit(ctx, json!({"type":"agent_start"}));
     let run_start = ctx.session.transcript().len();
 
     let mut turn_index = 0u32;
@@ -472,15 +623,33 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             }
         }
 
+        // WP-610: turn_start now precedes the model call (the upstream
+        // order; the events carry the same payload).
+        if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
+        ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
+        jemit(ctx, json!({"type":"turn_start"}));
+        // WP-610: the assistant message_start (skeleton) opens the stream
+        // before the driver call — the deltas land between start and end.
+        if ctx.out_mode == OutputMode::Json {
+            let active = ctx.model.lock().unwrap().0.clone();
+            jemit(ctx, json!({"type":"message_start","message":{"role":"assistant",
+                "content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                "api":active.get("id").cloned().unwrap_or(Value::Null),
+                "provider":active.get("provider").cloned().unwrap_or(Value::Null),
+                "model":active.get("id").cloned().unwrap_or(Value::Null)}}));
+        }
+
+        // WP-603: streamed text chunks become TUI-only `model_delta` events
+        // (the headless NDJSON contract keeps its single `model_output`).
         let turn = match fake_driver.as_ref() {
-            Some(d) => d.complete(&convo).await,
+            Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
             None => {
                 let drv = ctx.provider.lock().unwrap().clone();
                 match drv.as_ref() {
-                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Google(d)) => d.complete(&convo).await,
-                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo).await,
+                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
+                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
                     None => unreachable!("fake_driver is None only while a provider exists"),
                 }
             }
@@ -500,24 +669,37 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
         }
-        if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
-        ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
-
         // The fake model does not stream: message_start + message_end only.
         let assistant = assistant_message(&turn);
         if subscribed(ctx, "message_start") { ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}})); }
         if subscribed(ctx, "message_end") { ctx.client.fire(json!({"type":"message_end","event":{"type":"message_end","message":assistant}})); }
+        // WP-610: message_end carries the final assistant message (the
+        // skeleton message_start + the on_delta updates came first).
         let msg_id = ctx.session.append_message(&assistant);
+        jemit(ctx, json!({"type":"message_end","message":assistant}));
         ctx.log.emit(json!({"kind":"model_output","turnIndex":turn_index,"text":turn.text.as_deref(),
             "toolCalls":turn.tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()}));
+        if ctx.out_mode == OutputMode::Text {
+            if let Some(t) = &turn.text {
+                *ctx.text_final.lock().unwrap() = Some(t.clone());
+            }
+        }
 
         let mut tool_results: Vec<Value> = Vec::new();
         let mut tool_result_ids: Vec<String> = Vec::new();
         let mut all_terminate = true;
         for tc in &turn.tool_calls {
+            // WP-610: upstream tool_execution_start before the run (args).
+            jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
             match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input).await {
                 Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
+                    // WP-610: upstream tool_execution_end (result + isError).
+                    let is_error = trm.get("content").and_then(Value::as_array)
+                        .map(|c| c.iter().any(|x| x.get("isError") == Some(&json!(true))))
+                        .unwrap_or(false);
+                    jemit(ctx, json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
+                        "result":trm.get("content").cloned().unwrap_or(Value::Null),"isError":is_error}));
                     tool_results.push(trm);
                     if !terminate {
                         all_terminate = false;
@@ -545,6 +727,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let run_messages = ctx.session.transcript()[run_start..].to_vec();
     if subscribed(ctx, "agent_end") { ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages}})); }
     ctx.log.emit(json!({"kind":"agent_end"}));
+    jemit(ctx, json!({"type":"agent_end","messages":run_messages,"willRetry":false}));
     Ok(())
 }
 

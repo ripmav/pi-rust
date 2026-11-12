@@ -104,6 +104,16 @@ class FakeCore {
 				const waiter = this.pending.get(obj.id);
 				this.pending.delete(obj.id);
 				waiter(obj);
+			} else if (obj.type === "set_theme_request") {
+				// Test policy: the fake (headless) core rejects theme switches
+				// with the upstream-shaped error; the sidecar must surface it.
+				this.send({
+					id: obj.id,
+					type: "response",
+					command: obj.type,
+					success: false,
+					error: `theme ${obj.name} cannot be switched outside interactive (TUI) mode`,
+				});
 			} else if (obj.type === "set_thinking_level_request") {
 				// Test policy: the fake core accepts only "high".
 				const ok = obj.level === "high";
@@ -137,6 +147,20 @@ export default function (pi) {
 			pi.appendEntry("probe", { n: 1 });
 			pi.setSessionName("smoke-session");
 			return { content: [{ type: "text", text: "probed" }], details: { ok: true } };
+		},
+	});
+	pi.registerTool({
+		name: "theme_probe",
+		label: "Theme Probe",
+		description: "Smoke fixture: reports setTheme acceptance",
+		parameters: { type: "object", properties: { name: { type: "string" } } },
+		async execute(_toolCallId, args, _signal, _onUpdate, ctx) {
+			// Upstream contract: ctx.ui.setTheme (synchronous return; the bridge
+			// round-trip makes it a Promise — upstream usage is fire-and-forget,
+			// this probe awaits it).
+			const res = await ctx.ui.setTheme(args.name);
+			pi.appendEntry("theme-probe", { success: res.success, error: res.error ?? null });
+			return { content: [{ type: "text", text: "probed" }], details: { success: res.success, error: res.error ?? null } };
 		},
 	});
 	pi.registerTool({
@@ -280,6 +304,20 @@ async function main() {
 			"thinking probe (accepted)",
 		);
 		check("accepted setThinkingLevel updates view", probeAccepted.entry?.data?.after === "high", probeAccepted);
+
+		// (f3) setTheme: the headless core rejects; the sidecar surfaces the
+		// core's error verbatim (upstream {success,error} shape)
+		await core.request({ type: "extension_tool_call", toolCallId: "tc_7", toolName: "theme_probe", input: { name: "light" } });
+		const probeTheme = await core.nextEvent(
+			(e) => e.type === "session_append_entry" && e.entry?.customType === "theme-probe",
+			"theme probe",
+		);
+		check(
+			"headless setTheme rejected with core error",
+			probeTheme.entry?.data?.success === false &&
+				/interactive \(TUI\) mode/.test(probeTheme.entry?.data?.error ?? ""),
+			probeTheme,
+		);
 
 		// registered command invocation (bridge v0.1 addition, see README)
 		const cmd = await core.request({ type: "command", name: "emit", args: "smoke" });

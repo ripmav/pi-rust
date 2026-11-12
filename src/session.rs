@@ -24,16 +24,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct Session {
-    pub path: PathBuf,
-    pub id: String,
-    pub cwd: String,
-    pub parent_session: Option<String>,
+    /// WP-609: identity fields are lock-protected — the TUI's runtime
+    /// resume (`resume_from`) swaps them in place.
+    pub path: Mutex<PathBuf>,
+    pub id: Mutex<String>,
+    pub cwd: Mutex<String>,
+    pub parent_session: Mutex<Option<String>>,
     inner: Mutex<Inner>,
 }
 
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Session({})", self.path.display())
+        write!(f, "Session({})", self.path.lock().unwrap().display())
     }
 }
 
@@ -159,7 +161,7 @@ impl Session {
             .with_context(|| format!("opening session file {}", path.display()))?;
         let header = json!({"type":"session","version":3,"id":id,"timestamp":now_iso(),"cwd":cwd});
         let inner = Inner { name: None, entries: Vec::new(), messages: Vec::new(), leaf_id: None, file };
-        let mut s = Self { path, id: id.clone(), cwd: cwd.to_string(), parent_session: None, inner: Mutex::new(inner) };
+        let mut s = Self { path: Mutex::new(path), id: Mutex::new(id.clone()), cwd: Mutex::new(cwd.to_string()), parent_session: Mutex::new(None), inner: Mutex::new(inner) };
         {
             let mut inner = s.inner.lock().unwrap();
             Inner::write_line(&mut inner.file, &header);
@@ -227,12 +229,34 @@ impl Session {
             .with_context(|| format!("reopening session file {}", path.display()))?;
         let leaf_id = chain.last().and_then(|e| e.get("id").and_then(Value::as_str)).map(str::to_string);
         let inner = Inner { name, entries, messages, leaf_id, file };
-        Ok(Self { path: path.to_path_buf(), id, cwd, parent_session, inner: Mutex::new(inner) })
+        Ok(Self { path: Mutex::new(path.to_path_buf()), id: Mutex::new(id), cwd: Mutex::new(cwd), parent_session: Mutex::new(parent_session), inner: Mutex::new(inner) })
     }
 
     /// Creates a fork of an existing session: a NEW file (new id) whose
     /// header carries `parentSession` = the original id, with all original
     /// entries copied. The original file is not touched.
+    /// WP-609: replace this session's identity and file with the one at
+    /// `path` (runtime resume from the TUI session picker). The previous
+    /// file is left untouched; the in-memory name/entries of the loaded
+    /// file take over.
+    pub fn resume_from(&self, path: &Path) -> Result<()> {
+        let next = Self::load(path)?;
+        let mut inner = self.inner.lock().unwrap();
+        let mut next_inner = next.inner.lock().unwrap();
+        inner.name = next_inner.name.clone();
+        inner.entries = std::mem::take(&mut next_inner.entries);
+        inner.messages = std::mem::take(&mut next_inner.messages);
+        inner.leaf_id = next_inner.leaf_id.clone();
+        inner.file = OpenOptions::new().create(true).append(true).open(next.path.lock().unwrap().clone())
+            .with_context(|| format!("opening session file {}", path.display()))?;
+        drop(inner);
+        *self.path.lock().unwrap() = next.path.lock().unwrap().clone();
+        *self.id.lock().unwrap() = next.id.lock().unwrap().clone();
+        *self.cwd.lock().unwrap() = next.cwd.lock().unwrap().clone();
+        *self.parent_session.lock().unwrap() = next.parent_session.lock().unwrap().clone();
+        Ok(())
+    }
+
     pub fn fork(old_path: &Path, new_path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(old_path)
             .with_context(|| format!("reading session file {}", old_path.display()))?;
@@ -268,6 +292,21 @@ impl Session {
         self.inner.lock().unwrap().append_message(msg)
     }
 
+    /// WP-610: the first JSON line of the session file (the header) —
+    /// leading blank lines are skipped (upstream json mode writes it first).
+    pub fn header(&self) -> Option<Value> {
+        let path = self.path.lock().unwrap().clone();
+        let raw = std::fs::read_to_string(&path).ok()?;
+        for line in raw.lines() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            return serde_json::from_str(t).ok();
+        }
+        None
+    }
+
     /// Persists a sidecar `session_append_entry` payload as a `custom` entry.
     pub fn append_entry(&self, entry: Value) {
         self.inner.lock().unwrap().append_entry(entry);
@@ -297,9 +336,9 @@ impl Session {
     /// not the file format).
     pub fn dump(&self) -> Value {
         let inner = self.inner.lock().unwrap();
-        json!({"id":self.id,"cwd":self.cwd,"parentSession":self.parent_session,
+        json!({"id":self.id.lock().unwrap().clone(),"cwd":self.cwd.lock().unwrap().clone(),"parentSession":self.parent_session.lock().unwrap().clone(),
             "name":inner.name,"entries":inner.entries,"messages":inner.messages,
-            "file":self.path.to_string_lossy()})
+            "file":self.path.lock().unwrap().to_string_lossy()})
     }
 }
 
@@ -316,9 +355,110 @@ pub fn extract_text(msg: &Value) -> String {
     }
 }
 
+/// One session file under `<agentDir>/sessions/` (the shared source for
+/// `--list-sessions` and the TUI session picker, WP-609).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionInfo {
+	pub path: PathBuf,
+	pub id: String,
+	pub name: Option<String>,
+	pub cwd: String,
+	pub parent_session: Option<String>,
+	pub updated: Option<String>,
+	pub entries: usize,
+}
+
+/// Lists session files under `<agentDir>/sessions/` (recursive), most
+/// recently modified first. Unreadable/unparseable files are skipped.
+pub fn list(agent_dir: &Path) -> Vec<SessionInfo> {
+	let root = agent_dir.join("sessions");
+	let mut files = Vec::new();
+	if root.exists() {
+		collect_session_files(&root, &mut files);
+	}
+	let mut out = Vec::new();
+	for f in &files {
+		let Ok(raw) = std::fs::read_to_string(f) else { continue };
+		let Some(first) = raw.lines().next() else { continue };
+		let Ok(h) = serde_json::from_str::<Value>(first) else { continue };
+		if h.get("type").and_then(Value::as_str) != Some("session") {
+			continue;
+		}
+		let id = h.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+		let cwd = h.get("cwd").and_then(Value::as_str).unwrap_or_default().to_string();
+		let parent_session = h.get("parentSession").and_then(Value::as_str).map(str::to_string);
+		let mut name: Option<String> = None;
+		let mut entries = 0usize;
+		for line in raw.lines().skip(1) {
+			if line.trim().is_empty() {
+				continue;
+			}
+			entries += 1;
+			if let Ok(e) = serde_json::from_str::<Value>(line) {
+				if e.get("type").and_then(Value::as_str) == Some("session_info") {
+					name = e.get("name").and_then(Value::as_str).map(str::to_string);
+				}
+			}
+		}
+		let updated = std::fs::metadata(f)
+			.and_then(|m| m.modified())
+			.ok()
+			.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+			.map(|d| iso_from_secs(d.as_secs()));
+		out.push(SessionInfo { path: f.clone(), id, name, cwd, parent_session, updated, entries });
+	}
+	out.sort_by(|a, b| b.path.cmp(&a.path)); // most recently modified first (path-embedded timestamp, as before)
+	out
+}
+
+fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
+	let Ok(rd) = std::fs::read_dir(dir) else { return };
+	for e in rd.flatten() {
+		let p = e.path();
+		if p.is_dir() {
+			collect_session_files(&p, out);
+		} else if p.extension().is_some_and(|x| x == "jsonl") {
+			out.push(p);
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WP-609: resume_from swaps identity + file in place; appends after
+    /// the resume land in the NEW file, the old file stays untouched.
+    #[test]
+    fn resume_from_swaps_file_and_identity() {
+        let dir = std::env::temp_dir().join(format!("pi-rust-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.jsonl");
+        let b = dir.join("b.jsonl");
+        let s = Session::create(a.clone(), "/w").unwrap();
+        let other = Session::create(b.clone(), "/other").unwrap();
+        other.append_message(&json!({"role":"user","content":"from-b","timestamp":"t"}));
+        let old_id = s.id.lock().unwrap().clone();
+        let new_id = other.id.lock().unwrap().clone();
+        s.resume_from(&b).unwrap();
+        assert_eq!(s.id.lock().unwrap().as_str(), new_id);
+        assert_ne!(s.id.lock().unwrap().as_str(), old_id);
+        assert_eq!(s.cwd.lock().unwrap().as_str(), "/other");
+        // The resumed transcript is visible through the same handle.
+        let t = s.transcript();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0]["content"], "from-b");
+        // Appends now land in file b.
+        s.append_message(&json!({"role":"user","content":"after","timestamp":"t2"}));
+        let b_lines = std::fs::read_to_string(&b).unwrap().lines().count();
+        let a_lines = std::fs::read_to_string(&a).unwrap().lines().count();
+        assert_eq!(a_lines, 1, "old file untouched (header only)");
+        assert!(b_lines >= 3, "new file gets the append: {b_lines}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
 
     fn tmpdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("pi-rust-sess-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
@@ -349,7 +489,7 @@ mod tests {
         assert_eq!(h["type"], "session");
         assert_eq!(h["version"], 3);
         assert_eq!(h["cwd"], "/work/demo");
-        assert_eq!(h["id"], s.id);
+        assert_eq!(h["id"], s.id.lock().unwrap().clone());
         let e1: Value = serde_json::from_str(lines[1]).unwrap();
         let e2: Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(e1["type"], "message");
@@ -374,7 +514,7 @@ mod tests {
             s.set_name(Some("named".into()));
         }
         let s = Session::load(&path).unwrap();
-        assert_eq!(s.id, {
+        assert_eq!(s.id.lock().unwrap().clone(), {
             let h: Value = serde_json::from_str(std::fs::read_to_string(&path).unwrap().lines().next().unwrap()).unwrap();
             h["id"].as_str().unwrap().to_string()
         });
@@ -408,8 +548,8 @@ mod tests {
 ";
         std::fs::write(&path, content).unwrap();
         let s = Session::load(&path).unwrap();
-        assert_eq!(s.id, "ses-1");
-        assert_eq!(s.cwd, "/home/user/proj");
+        assert_eq!(s.id.lock().unwrap().as_str(), "ses-1");
+        assert_eq!(s.cwd.lock().unwrap().as_str(), "/home/user/proj");
         assert_eq!(s.transcript().len(), 3, "user + assistant + toolResult");
         let a = &s.transcript()[1];
         assert_eq!(a["content"][1]["type"], "toolCall");

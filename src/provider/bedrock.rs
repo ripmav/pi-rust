@@ -176,7 +176,11 @@ impl BedrockDriver {
 		}
 	}
 
-	async fn complete_impl(&self, convo: &[Value]) -> Result<AssistantTurn> {
+	async fn complete_impl<'a>(
+		&'a self,
+		convo: &'a [Value],
+		mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+	) -> Result<AssistantTurn> {
 		let (system_field, messages) = Self::map_messages(convo);
 		let mut body = json!({"modelId":self.model,"messages":messages});
 		if let Some(s) = system_field {
@@ -266,6 +270,7 @@ impl BedrockDriver {
 						let delta = v.pointer("/contentBlockDelta/delta");
 						if let Some(t) = delta.and_then(|d| d.get("text")).and_then(Value::as_str) {
 							text.push_str(t);
+							on_delta(t); // WP-603: TUI renders tokens as they arrive
 						}
 						if let Some(tu) = delta.and_then(|d| d.get("toolUse")) {
 							let id = tu.get("toolUseId").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -370,8 +375,8 @@ fn hex(b: &[u8]) -> String {
 }
 
 impl ModelDriver for BedrockDriver {
-	fn complete<'a>(&'a self, convo: &'a [Value]) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
-		Box::pin(async move { self.complete_impl(convo).await })
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+		Box::pin(async move { self.complete_impl(convo, on_delta).await })
 	}
 }
 
@@ -480,7 +485,7 @@ mod tests {
 		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock_bytes(raw_response(&events), tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "anthropic.claude-3-5-sonnet-v2:0".into());
-		let turn = d.complete(&mock::test_convo()).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Hello"));
 		assert_eq!(turn.tool_calls, vec![ToolCallSpec { id: "tu1".into(), name: "bash".into(), input: json!({"command":"ls"}) }]);
 		assert_eq!(turn.usage.input, 12);
@@ -501,7 +506,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock(resp, tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "m".into());
-		let err = d.complete(&mock::test_convo()).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
 		assert!(err.contains("403"), "{err}");
 		assert!(err.contains("Unauthorized access"), "{err}");
 	}
@@ -515,7 +520,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock_bytes(raw_response(&events), tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "m".into());
-		let err = d.complete(&mock::test_convo()).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
 		assert!(err.contains("field required"), "{err}");
 	}
 }

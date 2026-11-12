@@ -124,6 +124,8 @@ pi-rust --extension-dir <path> (repeatable)
         [--resume <file|id>]          # continue an existing session
         [--fork <file|id>]            # branch a new session (parentSession header)
         [--list-sessions]             # NDJSON listing, then exit
+        [-p | --print]                # print mode: stdout = final assistant text only (WP-610)
+        [--mode text|json]            # text = --print; json = upstream-shaped event stream (WP-610)
         [--command <name> [args...]]  # repeatable; run after ready, before the runs
         [--provider <id>]                 # fake|anthropic|google|google-vertex|azure|cloudflare-workers-ai|cloudflare-ai-gateway|amazon-bedrock|openai|groq|cerebras|deepseek|
                                                  #   together|huggingface|openrouter (default: settings/fake)
@@ -134,6 +136,127 @@ Env: `PI_RUST_SIDECAR` (sidecar entry override), `PI_RUST_NODE` (node
 binary), `PI_CODING_AGENT_DIR` (agent dir override, upstream name). The
 sidecar is found by walking up from the cwd, then from the executable's
 directory.
+
+### Interactive TUI (M6, WP-601)
+
+Run `pi-rust` without `--scenario`/`--prompt`/`--list-sessions` on a TTY to
+get the interactive terminal UI (ratatui + crossterm): a transcript pane,
+a multi-line editor pane (bracketed paste, history with up/down, word-wise
+deleting, cursor movement), and a status bar (model, cwd, session, titles
+set by extensions). Type a message and press Enter to send it (shift+Enter
+or ctrl+j inserts a newline; `ctrl+w`/`alt+Backspace` delete a word
+backward, `alt+d` forward, `ctrl+u`/`ctrl+k` to line start/end — upstream
+default bindings, rebindable in WP-606). `ctrl+d` (empty editor) or
+`ctrl+c` twice exits (upstream key semantics). In TUI mode the
+sidecar's stderr and the core's own diagnostic lines go to
+`<agentDir>/tui-stderr.log` so they cannot corrupt the screen. The headless
+NDJSON-on-stdout contract is unchanged for scenario/prompt runs.
+
+#### Extension dialogs in the TUI (M6, WP-604)
+
+When an extension asks the human for input (`ctx.ui.select`, `ctx.ui.confirm`,
+`ctx.ui.input`, `ctx.ui.editor`), the TUI renders the dialog over the
+transcript and the answer flows back over the unchanged bridge protocol
+(`extension_ui_response`). Key handling: select — `↑`/`↓` + Enter, Esc
+cancels; confirm — `y`/`n` (Enter = yes, Esc cancels); input/editor —
+type + Enter, Esc cancels. Timeouts keep the sidecar-side semantics
+(upstream defaults: select/input/editor → undefined, confirm → false).
+Fire-and-forget UI methods render too: `notify` becomes a transcript line,
+`setStatus`/`setTitle` show in the status bar, `set_editor_text` fills the
+input. Headless/no-TTY runs keep answering with the upstream defaults.
+The `editor` dialog reuses the editor pane itself: the prefilled text opens
+in the pane, Enter answers with the pane text, Esc cancels (WP-605).
+
+#### Keybindings (M6, WP-606)
+
+The TUI loads the upstream keybinding schema and golden defaults (the
+pinned upstream `TUI_KEYBINDINGS` + `APP_KEYBINDINGS`, 90 actions). User
+bindings live in `<agentDir>/keybindings.json` (upstream path), e.g.
+`{"tui.input.newLine": "ctrl+m"}` or `"enter"` / `["enter", "ctrl+m"]`
+(legacy flat names like `"submit"` migrate automatically). User bindings
+replace the defaults of the bound action (an empty list unbinds it); two
+user bindings on the same key are reported as a conflict (upstream
+semantics — default collisions are not). An invalid action or key is an
+error that lists the valid actions; the TUI then starts on the defaults
+and shows the error in the status bar. In v0 the wired actions are the
+editor/input/select/app core keys; picker and theme actions resolve and
+are configurable now and get wired by their feature WPs.
+
+#### Themes (M6, WP-607)
+
+The TUI renders with the pinned upstream theme system: the built-in
+`dark` and `light` themes (copied from the pinned upstream
+`modes/interactive/theme/*.json`), the upstream token table (text, muted,
+accent, mdHeading, mdCode, mdLink, ...), and the upstream color grammar
+(`#hex`, `okhsl(...)`, `oklch(...)` — the OKLab/OKHSL→sRGB conversion is
+ported from the pinned upstream `oklab.ts` and pinned against golden RGB
+vectors generated from the upstream code itself). Custom themes are JSON
+files in `<agentDir>/themes/` (upstream path), partial themes falling back
+per token to the built-in defaults.
+
+Select a theme with the `theme` entry in `<agentDir>/settings.json`
+(`"light"`, or `"light/dark"` for the upstream auto pair — v0 takes the
+dark side) or switch at runtime with the built-in command
+`/theme <name>`; `pi.setTheme` from extensions (`ctx.ui.setTheme`) works
+the same way in TUI mode. An unknown theme name is an error that lists
+the available themes; the current theme stays and the error shows in the
+status bar.
+
+#### Slash commands (M6, WP-608)
+
+Typing `/` in the editor opens the command menu (up to 8 rows, the
+`tui.select.*` keys navigate, Enter completes the name, a second Enter
+submits). The menu lists the upstream built-in command set at the pinned
+commit, the discovered prompt templates (WP-307) and the extension
+`registerCommand` commands (M1); an extension command whose name
+conflicts with a built-in is skipped (the built-in wins, upstream
+semantics).
+
+Wired in v0: `/theme <name>` (WP-607), `/thinking <level>`,
+`/model <provider/model>` (argument) and `/model` (picker, WP-609),
+`/resume` (session picker, WP-609), `/session` and
+`/hotkeys` (local info), `/quit`, and every prompt template + extension
+command (the bridge `command` path, M1). The remaining built-ins report
+`not supported in v0`. An unknown command is an error listing the
+available ones. Command results render in the transcript (a set-model
+success also updates the status bar).
+
+#### Print / JSON output modes (M6, WP-610)
+
+One-shot runs can select the upstream stdout variants:
+
+- `pi-rust -p` / `--print` / `--mode text` — stdout is the final
+  assistant text only (one trailing newline); the NDJSON event log is
+  not written to stdout. Exit codes follow upstream print mode: `0`
+  clean, `1` on any run failure (the error goes to stderr).
+- `pi-rust --mode json` — stdout is the upstream-shaped
+  AgentSessionEvent stream: the session header line, then
+  `agent_start`, `turn_start`, `message_start` (user on prompt, then the
+  assistant skeleton per turn), `message_update` (`text_delta` per
+  streamed chunk, the cumulative `partial` snapshot dropped per upstream
+  `toJsonEvent`), `message_end` (final assistant message with usage),
+  `tool_execution_start`/`tool_execution_end` (toolCallId, toolName,
+  args / result + isError), and `agent_end` (`messages`,
+  `willRetry: false`). A failing run reports the failure in-stream as
+  an error `message_end` and exits `1`.
+- The default (no flag) keeps the pi-rust NDJSON event log on stdout
+  (the M1+ core contract, exit codes `0`/`2`/`3` unchanged).
+- stderr stays human-only in all modes.
+
+### Prompt templates (M3)
+
+#### Pickers (M6, WP-609)
+
+`/model` (without an argument) opens the model picker over the bundled
+registry (`provider/model` labels); selecting one switches the model
+over the bridge (WP-406) and updates the status bar. `/resume` opens
+the session picker (the shared `<agentDir>/sessions/` listing behind
+`--list-sessions`); selecting a session resumes it in place (the core
+keeps the same session handle — `Session::resume_from` swaps the file
+and identity, the TUI transcript resets to the resumed messages). Both
+pickers use the `tui.select.*` keys with a typed prefix filter (fuzzy
+search is out of scope); Esc/ctrl+c cancel, an empty list renders a
+placeholder.
 
 ### Prompt templates (M3)
 

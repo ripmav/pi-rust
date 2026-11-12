@@ -93,7 +93,7 @@ impl BridgeClient {
     fn degrade(st: &watch::Sender<State>, seen: &AtomicBool) {
         if *st.borrow() == State::Running {
             seen.store(true, Ordering::SeqCst);
-            eprintln!("[core] bridge DEGRADED: sidecar transport lost; built-ins continue, extension tools unavailable, no respawn");
+            crate::corelog::line(&format!("[core] bridge DEGRADED: sidecar transport lost; built-ins continue, extension tools unavailable, no respawn"));
             let _ = st.send(State::Degraded);
         }
     }
@@ -119,7 +119,7 @@ impl BridgeClient {
     /// line matches the id; per-request timeout = the negotiated init timeoutMs.
     pub async fn request(&self, ty: &str, payload: Value) -> Decision {
         if self.state() != State::Running {
-            eprintln!("[core] {ty} dropped (bridge {:?}): protocol default applies", self.state());
+            crate::corelog::line(&format!("[core] {ty} dropped (bridge {:?}): protocol default applies", self.state()));
             return Decision::Unavailable;
         }
         self.request_inner(ty, payload).await
@@ -157,7 +157,7 @@ impl BridgeClient {
     /// in `Degraded`/`Stopped`.
     pub fn fire(&self, line: Value) {
         if self.state() != State::Running {
-            eprintln!("[core] F&F dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?"));
+            crate::corelog::line(&format!("[core] F&F dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?")));
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
@@ -169,7 +169,7 @@ impl BridgeClient {
     /// set_model_request, set_thinking_level_request) or an extension_ui_response.
     pub fn send(&self, line: Value) {
         if self.state() != State::Running {
-            eprintln!("[core] reply dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?"));
+            crate::corelog::line(&format!("[core] reply dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?")));
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
