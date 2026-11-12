@@ -105,3 +105,27 @@ one PR in one GitHub stack (user instruction 2026-11-11).
   define the reference), M4 magic-byte image set, no resize pipeline.
   WP-505's TUI confirm path belongs to WP-604 (M6); M5 delivers the
   default-allow + extension-gate contract.
+
+## Rebase onto post-M6 main (2026-11-12)
+
+Stack #42 rebased from the pre-M6 main (3feff03) onto the new main
+(11ba5c2, M6 merged via PR #67). Chain rebuilt in order (wp-501 onto
+main, each next onto its rebased predecessor); each branch kept
+exactly its own commits (3/2/1/2/1/2). Two M5xM6 integration
+collisions surfaced only once both milestones stacked (M6 was built on
+pre-M5 main):
+1. sidecar/bridge.mjs: M6/WP-607 added the unconditional
+   createDialogManager(+sendRequest) while M5/WP-505 kept its
+   conditional UI-wiring block — the cherry-pick merged both, and the
+   WP-505 block re-created the dialog WITHOUT sendRequest (smoke theme
+   probe + PTY dialog test failed). Fix: one wiring — the WP-505
+   conditional block now carries sendRequest; headless clients keep
+   the noOp UI context, TUI clients get the dialog manager.
+2. src/cli.rs init capabilities: WP-505 advertises ui:[] (correct for
+   headless) which breaks M6/WP-604 TUI dialog forwarding. Fix:
+   ui methods are advertised only in TUI mode (ui_methods =
+   tui_mode ? [select,confirm,input,editor,notify] : []).
+Verified at the stack top (feat/wp-506-tool-registry = M5+M6
+superset): 226 in-crate + 23 e2e + 3 PTY + 43 sidecar smoke green.
+Branches re-pushed (user-approved force, via normal push to temp refs
++ API ref update); all six PRs report mergeable_state clean.
