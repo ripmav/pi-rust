@@ -74,3 +74,6 @@ Stack note (T3): the stacks REST single-item routes (add/get/delete) returned 40
 
 
 
+
+
+L13 (M7 close, 2026-11-12): all 8 WPs delivered as one stacked GitHub chain (PRs #83, #84, #86, #87, #88, #89, #90, #91 on top of each other, base main; stack object 3461256 holds [83,84] — the single-stack REST routes 404 in this environment, the base chain is the real stacking, documented in the L7 note). Final full suite at the chain head (feat/wp-708-bundled-extensions): 248 in-crate, 38 e2e, 3 PTY, 68 smoke — all green. Bridge protocol ended at v4 (v1 providers, v2 MCP, v3 compaction, v4 shortcuts). M7 acceptance: unmodified upstream extensions run through the original loader for the headless-safe API slice + MCP + compaction + shortcuts + UI chrome; ui.custom and the bundled extensions beyond mcp are evaluated with documented decisions (WP-707/708). Merge to main: user decision (stack merge order WP-701 first).
