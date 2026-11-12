@@ -29,18 +29,18 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 3` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
+2. Core sends `init`: `protocolVersion: 4` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
 
-   `{"id":"…","type":"init","protocolVersion":3,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
+   `{"id":"…","type":"init","protocolVersion":4,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-three `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-four `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
 
-`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON) — the **initial snapshot**; post-ready changes arrive as `tools_changed` (v2), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
+`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON) — the **initial snapshot**; post-ready changes arrive as `tools_changed` (v2), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `shortcuts: [{ key, description?, extensionPath }]` (upstream-resolved `ExtensionShortcut`s, v4) + `shortcutDiagnostics: string[]` (the conflict messages, v4), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
 
 ## Message catalog
 
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 3, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2 |
+| core→ | `init` | `{ protocolVersion: 4, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> }, keybindings?: { action: string[] } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2; `keybindings` new in v4 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -69,6 +69,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 | core→ | `session_compact_failed` | `SessionCompactFailedEvent` (`types.ts:830`) — `reason`, `errorMessage?`, `aborted`, `willRetry`, `fromExtension` | F&F (v3) | `emit()` |
 | core→ | `session_shutdown` | `SessionShutdownEvent` (`types.ts:845`) | F&F | `emitSessionShutdownEvent()` (`runner.ts:265`) |
 | core→ | `command` | `{ name, args }` → `data: <handler return value as JSON or null>` | req/resp | invokes a registered extension command (`ready.commands`); unknown name → error response |
+| core→ | `shortcut` | `{ key }` → `data: <handler return value as JSON or null>` | req/resp (v4) | the TUI dispatched a keypress to a resolved extension shortcut (`ready.shortcuts`); the sidecar invokes the handler with the same context stand-ins as `command`; no shortcut for the key → error response |
 | core→ | `extension_tool_call` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` (`packages/agent/src/types.ts:424`) | req/resp | `AgentTool.execute` (`packages/agent/src/types.ts:478-500`) via the `extension.tools` → wrapper path |
 | core→ | `provider_stream` | `{ streamId, model: { provider, id, api? }, messages: AgentMessage[], options: { temperature?, maxTokens? } }` → `data: { ok: true, streamId }` | req/resp + event stream (v1) | invokes the extension-registered provider's `streamSimple` (WP-701): the sidecar acks, then emits one `provider_stream_event` line per upstream `AssistantMessageEvent` (`core/extensions/types.ts:818-848`), verbatim under `event`; the terminal `done`/`error` event ends the stream. Unknown provider/model, missing `streamSimple`, or an unresolvable `apiKey` (`!command` or unset `$ENV_VAR`) → error response, no stream. No abort signal in v1 (documented non-goal). |
 | core→ | `set_model` | `ModelSelectEvent` (`types.ts:1155`) | F&F | `emit()` |
@@ -123,7 +124,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":3,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
+{"id":"h1","type":"init","protocolVersion":4,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
 {"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
 ```
@@ -184,6 +185,14 @@ The sidecar hosts the **unmodified upstream built-in mcp extension** (`createMcp
 - **Transports**: stdio (`command`/`args`/`env`) and remote HTTP (`url` + `headers`) — both are the upstream `createDefaultTransport` code (NDJSON JSON-RPC stdio; streamable-HTTP with `application/json` and `text/event-stream` response assembly). `headers` and `env` values support `$ENV_VAR`/`${ENV_VAR}` expansion (upstream `resolveConfigValueOrThrow`); the secret value is resolved in the sidecar and never appears in core or sidecar logs.
 - **Timeouts**: the MCP client's per-request default (60 s) and the sidecar→core blocking-command timeout (`capabilities.timeoutMs`, default 30 s) are independent; a slow MCP tool call may outlive the core's `extension_tool_call` timeout, which degrades the bridge (Error & lifecycle model).
 - **Out of scope (WP-703+)**: OAuth sign-in (`/mcp login`, the `oauth` config fields are accepted by validation but no auth provider is wired — a 401 surfaces as the server error), dynamic client registration, the `/mcp` TUI manager, resource tools beyond registration, `toolExposure` per-tool overrides (accepted by validation, single exposure used).
+
+## Shortcuts (v4)
+
+Extension `registerShortcut` (upstream `types.ts:1729`) reaches the TUI:
+
+- **Resolution** (sidecar, at `ready`): the core sends its resolved keybinding table as `init.keybindings` (action → keys); the sidecar runs upstream `runner.getShortcuts(resolved)` — the exact upstream precedence: a **reserved** built-in on the key (the 18 editor-global ids, `runner.ts:98`) blocks the shortcut with a diagnostic ("conflicts with built-in shortcut. Skipping."); a **non-reserved** built-in is shadowed (extension wins, diagnostic); two extensions on one key → the later registration wins. `ready.shortcuts` carries the effective set; `ready.shortcutDiagnostics` the messages (the core logs them on stderr, upstream prints them at startup).
+- **Dispatch** (TUI): `process_key` checks the extension shortcuts **first** (upstream `custom-editor.handleInput` does the same, before any built-in binding); a match consumes the key and sends `shortcut { key }`; the sidecar invokes the registered handler (same bridge context stand-ins as `command`); a handler error renders through the command-result event (upstream `showError` equivalent).
+- **v0 non-goals**: post-ready `registerShortcut` (no upstream refresh hook exists either — ready-snapshot only), unregister (none upstream), the shortcut management UI, `/hotkeys` listing.
 
 ## Compaction (v3)
 

@@ -321,8 +321,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 3) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 3)`));
+		if (command.protocolVersion !== 4) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 4)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -463,11 +463,17 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// Pre-ready rebuild: no tools_changed (ready.tools is the initial snapshot).
 		rebuildTools();
 		state.commands = runner.getRegisteredCommands();
+		// WP-705: resolve the extension shortcuts against the core's resolved
+		// keybindings — upstream precedence for free: a reserved built-in
+		// blocks the shortcut (diagnostic), a non-reserved built-in is
+		// shadowed (extension wins, diagnostic), two extensions on one key ->
+		// the later registration wins.
+		state.shortcuts = runner.getShortcuts(command.keybindings ?? {});
+		state.shortcutDiagnostics = runner.getShortcutDiagnostics();
 
 		// TUI-only registrations: accepted by the loader, ignored by the bridge (log once per extension).
 		for (const ext of extensions) {
 			const ignored = [];
-			if (ext.shortcuts.size) ignored.push("registerShortcut");
 			if (ext.messageRenderers.size || ext.entryRenderers?.size || ext.toolRenderers?.length || ext.markdownTransformer)
 				ignored.push("renderers");
 			if (ignored.length) log(`ignoring ${ignored.join(", ")} from ${ext.path} (TUI-only in v0 bridge)`);
@@ -488,6 +494,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				parameters: t.parameters,
 			})),
 			commands: state.commands.map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}) })),
+			shortcuts: [...state.shortcuts.values()].map((sc) => ({
+				key: sc.shortcut,
+				...(sc.description ? { description: sc.description } : {}),
+				extensionPath: sc.extensionPath,
+			})),
+			shortcutDiagnostics: state.shortcutDiagnostics.map((d) => d.message),
 			flags: [...runner.getFlags().values()],
 			providers: providersPayload(),
 			events: [...new Set(extensions.flatMap((e) => [...e.handlers.keys()]))].sort(),
@@ -592,7 +604,17 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(result.compaction ? { compaction: result.compaction } : {}),
 				});
 			}
-			case "user_bash":
+			case "shortcut": {
+				// WP-705: the TUI dispatched a keypress to a resolved extension
+				// shortcut (upstream checks these before built-ins; a match
+				// consumes the key). The handler runs with the same bridge
+				// context stand-ins as `command`.
+				const sc = state.shortcuts.get((command.key ?? "").toLowerCase());
+				if (!sc) return response(id, type, false, undefined, `No extension shortcut for key: ${command.key}`);
+				const result = await sc.handler(runner.createCommandContext());
+				return response(id, type, true, result ?? null);
+			}
+						case "user_bash":
 				return decision(id, type, "user_bash", () => runner.emitUserBash(command.event));
 			case "command": {
 				// Bridge v0.1 addition (not in the protocol doc yet): invoke a registered extension command.

@@ -248,11 +248,12 @@ async function main() {
 	let child2 = null;
 	let child3 = null;
 	let child4 = null;
+	let child5 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 3,
+			protocolVersion: 4,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -523,7 +524,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 3,
+			protocolVersion: 4,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -566,7 +567,7 @@ async function main() {
 		const core3 = new FakeCore(child3);
 		const init3 = await core3.request({
 			type: "init",
-			protocolVersion: 3,
+			protocolVersion: 4,
 			capabilities: { ui: [], timeoutMs: 5000 },
 		});
 		check("gitlab-duo sidecar init", init3.success === true, init3);
@@ -602,7 +603,7 @@ async function main() {
 		const core4 = new FakeCore(child4);
 		const init4 = await core4.request({
 			type: "init",
-			protocolVersion: 3,
+			protocolVersion: 4,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			mcpConfig: {
 				mcpServers: {
@@ -622,6 +623,48 @@ async function main() {
 		core4.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
 		const code4 = await Promise.race([core4.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("mcp sidecar clean exit 0", code4 === 0, code4);
+
+		// (n) 705: extension shortcuts — the sidecar resolves them with the
+		// upstream precedence against the core's resolved keybindings: the
+		// reserved built-in (ctrl+c = app.clear) blocks the conflicting
+		// shortcut with a diagnostic; the clean one (ctrl+shift+x) is
+		// dispatched over the `shortcut` req/resp and its handler runs.
+		const agentDir5 = path.join(tmp, "agent5");
+		mkdirSync(agentDir5, { recursive: true });
+		child5 = spawn(
+			process.execPath,
+			[ENTRY, "--agent-dir", agentDir5, "--extension-dir", path.join(ROOT, "tests/fixtures/shortcut-reg.ts")],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child5.stderr.on("data", (d) => process.stderr.write(d));
+		const core5 = new FakeCore(child5);
+		const init5 = await core5.request({
+			type: "init",
+			protocolVersion: 4,
+			capabilities: { ui: [], timeoutMs: 5000 },
+			keybindings: { "app.clear": ["ctrl+c"] },
+		});
+		check("shortcut sidecar init (keybindings)", init5.success === true, init5);
+		const ready5 = await core5.nextEvent((e) => e.type === "ready", "ready (shortcut)");
+		const scKeys = (ready5.shortcuts ?? []).map((sc) => sc.key);
+		check("clean shortcut resolves, reserved conflict is skipped", scKeys.includes("ctrl+shift+x") && !scKeys.includes("ctrl+c"), scKeys);
+		const sc = (ready5.shortcuts ?? []).find((x) => x.key === "ctrl+shift+x");
+		check("shortcut carries description + extensionPath", sc?.description === "wp705 fixture action" && /shortcut-reg/.test(sc?.extensionPath ?? ""), sc);
+		check("conflict diagnostic (upstream text)", (ready5.shortcutDiagnostics ?? []).some((m) => m.includes("conflicts with built-in shortcut. Skipping.") && m.includes("ctrl+c")), ready5.shortcutDiagnostics);
+		core5.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
+		const shortResp = await core5.request({ type: "shortcut", key: "ctrl+shift+x" });
+		check("shortcut dispatch succeeds", shortResp.success === true, shortResp);
+		const fired = await core5.nextEvent(
+			(e) => e.type === "session_append_entry" && e.entry?.customType === "wp705-fired",
+			"appendEntry (shortcut handler)",
+			5000,
+		);
+		check("shortcut handler ran (appendEntry observed)", fired.entry?.customType === "wp705-fired", fired.entry);
+		const reservedResp = await core5.request({ type: "shortcut", key: "ctrl+c" });
+		check("reserved key is not dispatchable", reservedResp.success === false && /No extension shortcut/.test(reservedResp.error ?? ""), reservedResp);
+		core5.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("shortcut sidecar clean exit 0", code5 === 0, code5);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
@@ -630,6 +673,7 @@ async function main() {
 			child2?.kill("SIGKILL");
 			child3?.kill("SIGKILL");
 			child4?.kill("SIGKILL");
+			child5?.kill("SIGKILL");
 		} catch {}
 	}
 

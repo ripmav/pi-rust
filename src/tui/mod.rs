@@ -67,6 +67,9 @@ pub struct TuiApp {
     pub theme: theme::Theme,
     /// WP-608: extension `registerCommand` commands (from the ready payload).
     pub ext_commands: Vec<commands::Command>,
+    /// WP-705: (key, description) extension shortcuts from ready — the
+    /// sidecar already applied the upstream precedence resolution.
+    pub ext_shortcuts: Vec<(String, String)>,
     /// WP-608: prompt templates (WP-307 discovery).
     pub templates: Vec<crate::templates::Template>,
     /// WP-608: the open slash menu (matched commands + selection).
@@ -109,6 +112,9 @@ pub enum TuiAction {
     /// WP-609: `/resume` — the terminal loads the session list and opens
     /// the picker (it owns the agent dir).
     OpenSessionsPicker,
+    /// WP-705: a registered extension shortcut (ready.shortcuts); the key
+    /// string as registered (the terminal sends it back over the bridge).
+    BridgeShortcut { key: String },
 }
 
 impl TuiApp {
@@ -124,6 +130,12 @@ impl TuiApp {
 
     /// WP-608: set the extension commands and prompt templates that feed
     /// the slash menu and dispatch.
+    /// WP-705: the resolved extension shortcuts from `ready`.
+    pub fn with_shortcuts(mut self, ext_shortcuts: Vec<(String, String)>) -> Self {
+        self.ext_shortcuts = ext_shortcuts;
+        self
+    }
+
     pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
         self.ext_commands = ext_commands;
         self.templates = templates;
@@ -336,6 +348,7 @@ impl TuiApp {
             kb,
             theme: theme::Theme::builtin("dark").expect("built-in dark theme"),
             ext_commands: Vec::new(),
+            ext_shortcuts: Vec::new(),
             templates: Vec::new(),
             slash: None,
             picker: None,
@@ -817,6 +830,14 @@ impl TuiApp {
     }
 
     fn process_key(&mut self, k: crossterm::event::KeyEvent) -> Option<TuiAction> {
+        // WP-705: extension shortcuts dispatch before any built-in binding
+        // (upstream custom-editor.handleInput checks them first); a match
+        // consumes the key.
+        for (key, _) in &self.ext_shortcuts {
+            if keybindings::matches_event(&k, key) {
+                return Some(TuiAction::BridgeShortcut { key: key.clone() });
+            }
+        }
         {
             // WP-606: the keybinding manager (upstream schema + user
             // config) drives the wired actions; first match wins.
@@ -2141,5 +2162,28 @@ mod tests {
         app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
         let scrolled = app.render_string();
         assert!(!scrolled.contains("line-59"), "scrolling up moves the window: {scrolled}");
+    }
+
+    #[test]
+    fn wp705_extension_shortcut_dispatches_before_builtins() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app = app.with_shortcuts(vec![(
+            "ctrl+shift+x".to_string(),
+            "fixture action".to_string(),
+        )]);
+        // A registered extension shortcut dispatches over the bridge and
+        // consumes the key (upstream custom-editor.handleInput checks
+        // extension shortcuts before any built-in binding).
+        let action = app.handle_key(key_mod('x', KeyModifiers::CONTROL | KeyModifiers::SHIFT));
+        assert_eq!(
+            action,
+            Some(TuiAction::BridgeShortcut {
+                key: "ctrl+shift+x".to_string()
+            })
+        );
+        assert_eq!(app.input, "", "the matched key is consumed");
+        // A key without an extension shortcut still reaches the built-ins.
+        assert_eq!(app.handle_key(key('h')), None);
+        assert_eq!(app.input, "h");
     }
 }

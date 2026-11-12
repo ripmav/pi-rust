@@ -431,11 +431,29 @@ pub async fn run() -> Result<i32> {
     } else {
         json!([])
     };
-    let mut init = json!({"protocolVersion":3,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    // WP-705: the resolved keybinding table (upstream schema + user file)
+    // goes to the sidecar for the extension-shortcut precedence resolution
+    // and to the TUI for dispatch; an invalid file falls back to defaults
+    // (the TUI then shows the error in the status bar).
+    let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
+        Ok(kb) => (kb, None),
+        Err(e) => {
+            crate::corelog::line(&format!("[core] keybindings: {e}"));
+            (crate::tui::keybindings::KeybindingManager::default(), Some(e))
+        }
+    };
+    let mut init = json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
     }
+    // WP-705: resolved action -> keys (the sidecar runs upstream
+    // getShortcuts against this table).
+    let mut kb_map = serde_json::Map::new();
+    for a in crate::tui::keybindings::valid_actions() {
+        kb_map.insert(a.clone(), json!(kb.get_keys(&a)));
+    }
+    init["keybindings"] = Value::Object(kb_map);
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
         Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
@@ -517,6 +535,24 @@ pub async fn run() -> Result<i32> {
         }
     }
 
+    // WP-705: extension shortcuts (the sidecar applied the upstream
+    // precedence resolution) + its conflict diagnostics, which the core
+    // surfaces on stderr like upstream prints them.
+    let mut ext_shortcuts: Vec<(String, String)> = Vec::new();
+    for sc in ready.get("shortcuts").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(key) = sc.get("key").and_then(Value::as_str) {
+            ext_shortcuts.push((
+                key.to_string(),
+                sc.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
+            ));
+        }
+    }
+    for d in ready.get("shortcutDiagnostics").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(m) = d.as_str() {
+            crate::corelog::line(&format!("[core] {m}"));
+        }
+    }
+
     // --command: run each registered extension command after ready, before the
     // scenario. Unknown command or handler error logs ok:false + error and
     // continues (does not abort the run). TUI mode runs them on a task after
@@ -564,13 +600,6 @@ pub async fn run() -> Result<i32> {
         // WP-606: upstream keybinding schema + <agentDir>/keybindings.json.
         // An invalid file is logged (with the valid actions) and the TUI
         // starts on the defaults with the error in the status bar.
-        let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
-            Ok(kb) => (kb, None),
-            Err(e) => {
-                crate::corelog::line(&format!("[core] keybindings: {e}"));
-                (crate::tui::keybindings::KeybindingManager::default(), Some(e))
-            }
-        };
         // WP-608: the slash menu gets the extension commands (ready
         // payload) and the discovered prompt templates (WP-307).
         let mut ext_cmds: Vec<crate::tui::commands::Command> = Vec::new();
@@ -591,6 +620,7 @@ pub async fn run() -> Result<i32> {
             cwd.display().to_string(),
             session.id.lock().unwrap().clone(),
         )
+        .with_shortcuts(ext_shortcuts)
         .with_commands(ext_cmds, tui_templates);
         if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));

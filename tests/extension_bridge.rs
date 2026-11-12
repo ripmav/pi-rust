@@ -2159,3 +2159,41 @@ fn wp704_before_compact_cancel() {
     assert!(all.contains("WP704LONG"), "the long user message is still in context: {all}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// S7/WP-705: a fixture extension registers a clean shortcut plus one on a
+/// RESERVED built-in (ctrl+c). The sidecar resolves with the upstream
+/// precedence (reserved wins -> the conflicting shortcut is skipped with a
+/// diagnostic, which the core surfaces on stderr); the run itself is
+/// unaffected.
+#[test]
+fn wp705_shortcut_registration_and_conflict_diagnostic() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp705-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let scenario = json!({
+        "user_messages": ["shortcut check"],
+        "model_scripts": [[{ "text": "ok" }]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/shortcut-reg.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    // The reserved conflict is reported with the upstream diagnostic text
+    // (the core logs every shortcut diagnostic from the ready payload).
+    assert!(
+        stderr.contains("conflicts with built-in shortcut. Skipping."),
+        "reserved conflict diagnostic missing:\n{stderr}"
+    );
+    assert!(stderr.contains("ctrl+c"), "the conflicting key is named:\n{stderr}");
+}

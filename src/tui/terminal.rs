@@ -176,7 +176,14 @@ where
                                         }
                                     }
                                 }
-                                super::TuiAction::BridgeCommand { name, args } => {
+                                super::TuiAction::BridgeShortcut { key } => {
+                                    // WP-705: the sidecar resolves the key to the
+                                    // registered handler; a handler error renders
+                                    // through the same result event (upstream
+                                    // showError equivalent).
+                                    on_request(format!("shortcut {key}"), Value::Null, "shortcut", json!({ "key": key }));
+                                }
+                                                                super::TuiAction::BridgeCommand { name, args } => {
                                     on_request(format!("/{name}"), Value::Null, "command", json!({ "name": name, "args": args }));
                                 }
                                 super::TuiAction::SetThinking { level } => {
