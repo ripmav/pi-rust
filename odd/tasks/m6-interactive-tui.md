@@ -55,7 +55,7 @@ instruction 2026-11-11).
 | T4 | S5 | 604 | #50 | inline (TDD) | dce93b3/b7a850e/ec37517 on feat/wp-604-human-dialogs; PR #61 (stack #59) |
 | T5 | S6 | 605 | #51 | inline (TDD) | bf54d59/2781ec3 on feat/wp-605-editor-pane; PR #62 (stack #59) |
 | T6 | S7 | 606 | #52 | inline (TDD) | 0110479/d4488b2 on feat/wp-606-keybindings; PR #63 (stack #59) |
-| T7 | S8 | 607 | — | subagent or inline | — |
+| T7 | S8 | 607 | #53 | inline (TDD) | 4112ddd/c7f0deb on feat/wp-607-themes; PR (stack #59) |
 | T8 | S9 | 608 | — | subagent or inline | — |
 | T9 | S10 | 609 | — | subagent or inline | — |
 | T10 | S11 | 610 | — | subagent or inline | — |
@@ -122,3 +122,24 @@ instruction 2026-11-11).
   shift+enter); newLine is a general key check (ctrl+m / ctrl+j are
   not Enter). v0: picker/theme actions resolve but are unwired (their
   WPs). Suite: 115 in-crate + 19 e2e + 2 PTY; smoke 42/42.
+
+- L10: WP-607 delivered: T7 done, branch feat/wp-607-themes (base
+  feat/wp-606-keybindings). Upstream theme system ported: token table,
+  #hex/okhsl/oklch grammar (OKLab/OKHSL->sRGB ported from the pinned
+  upstream oklab.ts; golden RGB vectors generated from the upstream code
+  itself), built-in dark/light (verbatim from the pinned upstream JSON),
+  custom themes from <agentDir>/themes/ with per-token fallback,
+  settings.json `theme` (light/dark pairs take the dark side in v0).
+  Rendering: markdown + TuiApp chrome read colors from the active theme.
+  Switching: /theme <name> in the TUI; ctx.ui.setTheme round-trips a new
+  set_theme_request over the unchanged NDJSON bridge (core validates,
+  answers, applies in TUI mode via a TUI-only set_theme broadcast;
+  headless rejects {success:false,error} per upstream shape).
+  Root causes: pi.setTheme is ctx.ui.setTheme (ExtensionUIContext, not
+  the pi root — the smoke fixture first hit `pi.setTheme is not a
+  function`); the dialog manager needed sendRequest piped in from
+  bridge.mjs for the round-trip; setTheme is a synchronous contract
+  upstream (bridge makes it a Promise; upstream usage is
+  fire-and-forget, so that is safe). Golden buffer test asserts the
+  exact token colors per cell under both built-in themes. Suite:
+  125 in-crate + 19 e2e + 2 PTY; smoke 43/43.
