@@ -1,4 +1,4 @@
-# Extension Bridge Protocol v1
+# Extension Bridge Protocol v2
 
 Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` framing). S3 is the acceptance context: unmodified upstream example extensions must work "wie gewohnt" for the headless-safe API slice through this protocol.
 
@@ -29,18 +29,18 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 1` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout:
+2. Core sends `init`: `protocolVersion: 2` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
 
-   `{"id":"…","type":"init","protocolVersion":1,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000}}`
+   `{"id":"…","type":"init","protocolVersion":2,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-one `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-two `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
 
-`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
+`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON) — the **initial snapshot**; post-ready changes arrive as `tools_changed` (v2), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
 
 ## Message catalog
 
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 1, capabilities: { ui: string[], timeoutMs: number } }` → `data: { apiVersion: 0 }` | req/resp | new in v0 |
+| core→ | `init` | `{ protocolVersion: 2, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -85,6 +85,7 @@ Sidecar→core events:
 | ←sidecar | `set_model_request` | `{ modelId, provider }` → `data: { ok: boolean }` | req/resp | `pi.setModel` — core switches the active model (provider included: model ids are not unique across providers) |
 | ←sidecar | `set_thinking_level_request` | `{ level }` → `data: { ok: boolean }` | req/resp | `pi.setThinkingLevel` — core switches the level, then echoes `set_thinking_level` to subscribed extensions |
 | ←sidecar | `tool_call_request` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` | req/resp | nested `ctx.executeTool` — core executes the named tool (built-in or extension) with its normal hooks, including `tool_call`/`tool_result` decision events |
+| ←sidecar | `tools_changed` | `{ tools: [{ name, label, description, promptSnippet?, parameters }] }` (same shape as `ready.tools`) | event, F&F (v2) | the extension tool set changed post-ready (MCP tools register on connection / lazy reconnect / unregister); the core **replaces** its extension tool set from the payload. Coalesced: at most one per sidecar tick, carrying the final set. |
 | ←sidecar | `providers_changed` | `{ providers: [{ name, models: [{ provider, id, api?, name? }] }] }` (same shape as `ready.providers`) | event, F&F (v1) | a `registerProvider`/`unregisterProvider` call landed after `ready`; the core re-keys its per-turn provider routing and `set_model` validation from the payload |
 | ←sidecar | `provider_stream_event` | `{ streamId, event: AssistantMessageEvent }` (`core/extensions/types.ts:818-848`, verbatim upstream JSON) | event stream (v1) | one line per event of the `provider_stream` invocation; `done` or `error` is terminal for that `streamId` |
 
@@ -119,7 +120,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":1,"capabilities":{"ui":[],"timeoutMs":30000}}
+{"id":"h1","type":"init","protocolVersion":2,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
 {"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
 ```
@@ -132,6 +133,14 @@ Handshake:
 {"type":"provider_stream_event","streamId":"s-42","event":{"type":"start","partial":{"role":"assistant","content":[]}}}
 {"type":"provider_stream_event","streamId":"s-42","event":{"type":"text_delta","contentIndex":0,"delta":"Hello ","partial":{}}}
 {"type":"provider_stream_event","streamId":"s-42","event":{"type":"done","reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"stopReason":"stop","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0}}}}
+```
+
+MCP connection (v2: the server connects after `ready`; its tools arrive via the coalesced `tools_changed`):
+
+```json
+{"type":"ready","apiVersion":0,"extensions":[{"path":"builtin:mcp"}],"errors":[],"tools":[],"commands":[{"name":"/mcp"}],"flags":[],"providers":[],"events":["before_agent_start","mcp_servers_change","session_shutdown","session_start","tool_call","turn_start"]}
+{"type":"session_start","event":{"type":"session_start","reason":"startup"}}
+{"type":"tools_changed","tools":[{"name":"mcp__docs__search","label":"search","description":"Search the docs","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]}
 ```
 
 `tool_call` decision (handler blocks, input unchanged):
@@ -161,11 +170,22 @@ Handshake:
 {"type":"extension_error","extensionPath":"/home/u/proj/.pi/extensions/broken/index.ts","event":"tool_call","error":"Cannot read properties of undefined (reading 'input')"}
 ```
 
-## Out of scope for v1
+## MCP servers (v2)
+
+The sidecar hosts the **unmodified upstream built-in mcp extension** (`createMcpExtension`, `packages/coding-agent/src/extensions/mcp/`) on the shared runtime, so MCP behavior — client, naming, exposure, crash semantics — is the upstream code itself (`packages/mcp/`, NDJSON JSON-RPC over stdio, protocol 2025-11-25 negotiated against the server's supported list).
+
+- **Server sources**: (a) `pi.registerMcpServer(name, config)` from any loaded extension (validated by upstream `validateMcpServerConfig`, stored in the runtime `McpServerRegistry`); (b) the `mcpConfig` init field — the core reads `<agent-dir>/mcp.json` (upstream shape `{"mcpServers": {...}}`, same validation; a missing file is omitted) and passes it verbatim. Each entry is registered through the same registry path; upstream rule: an `mcp.json` entry takes precedence over a same-name extension registration (last write wins per name; `-`/`_` namespace clash → init error). Project `<cwd>/.pi/mcp.json`: documented v0 non-goal (agent-dir only, same rule as `settings.json`).
+- **Lifecycle**: the mcp extension connects on `session_start` (the core fires it after `ready`), lazily reconnects on the next call after a crash (upstream `McpServerConnection` state machine; no auto-restart), and disconnects on `session_shutdown`. Connection is asynchronous: MCP tools are **not** in the `ready.tools` snapshot and arrive via `tools_changed` once connected. The `before_agent_start` decision waits for servers whose configured exposure includes `direct` (upstream `startupWaitMs`, 10 s), so `direct` servers' tools are registered before the first turn's tool declarations are built.
+- **Naming & dispatch**: tools are declared `mcp__<server>__<tool>` (upstream `naming.ts`) and reach the core through the ordinary extension-tool path (`tools_changed` → `extension_tool_call` → the mcp extension's tool wrapper → the connected server). The core additionally routes `mcp__*` names to the bridge even when the tool is not (yet) in the extension set: the sidecar answers `Unknown extension tool` and the run records an error tool result instead of aborting as a model-script error.
+- **Exposure in v0**: all registered MCP tools are declared to the model regardless of the `exposure` field (the headless core has no codemode/tool_search; upstream's `codemode`/`deferred` discovery layers are unreachable). `exposure` still drives the upstream wait logic above.
+- **Timeouts**: the MCP client's per-request default (60 s) and the sidecar→core blocking-command timeout (`capabilities.timeoutMs`, default 30 s) are independent; a slow MCP tool call may outlive the core's `extension_tool_call` timeout, which degrades the bridge (Error & lifecycle model).
+- **Out of scope (WP-703+)**: HTTP/SSE transports, OAuth sign-in (`/mcp login`), the `/mcp` TUI manager, resource tools beyond registration, `toolExposure` per-tool overrides (accepted by validation, single exposure used).
+
+## Out of scope for the v0 bridge
 
 - **TUI renderers**: message/entry renderers, tool renderers, markdown transformers, themes, `ctx.ui` beyond the dialog subset (`select`, `confirm`, `input`, `editor`, `notify`, `setStatus`, `setTitle`, `set_editor_text`) — no `onTerminalInput`, working indicators, widget factories, footer/header, autocomplete, `custom()`, editor-text readback.
 - **`registerShortcut`**: accepted by the loader, ignored by the bridge.
 - **Compaction**: `session_before_compact` / `session_compact` / `session_compact_failed`, the `compact` command, and boundary mutation (`entries`/`continue` on `turn_end`, `agent_before_settle`); `turn_end`/`message_end` are delivered without their mutation results.
-- **MCP**: registration only — `registerMcpServer` is accepted and reported, but no MCP transport crosses the bridge and MCP-provided tools are not executable.
+- **MCP**: stdio transport, registration (config + extension), and tool execution are in (MCP §); HTTP/SSE, OAuth, and the `/mcp` TUI manager are not (WP-703).
 - **Provider invocation (v1 limitations)**: extension-registered providers are invoked by the core (WP-701) for the legacy config form (`registerProvider(name, config)` with `streamSimple`). Out of scope: the native `Provider` object form, `registerNativeProvider`, virtual models (`registerVirtualModel` is accepted and ignored), `oauth` refresh flows, `apiKey` `!command` values (typed error), `refreshModels`, and abort signals (no per-turn `AbortSignal` exists in the core loop yet).
 - Remaining upstream events not in the catalog (`project_trust`, `resources_discover`, `before_provider_request`/`before_provider_headers`/`after_provider_response`/`provider_stream_event`, `session_before_switch`/`session_before_fork`/`session_before_tree`, `ui_prompt_start`/`ui_prompt_end`, `tool_execution_*`, `agent_settled`) are not sent; extensions that need them load, but their handlers never fire.

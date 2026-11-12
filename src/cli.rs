@@ -258,6 +258,8 @@ pub async fn run() -> Result<i32> {
     }
 
     let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
+    // WP-702/702c: agent-dir MCP server config (absent file = no servers).
+    let mcp_config = crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
     let (provider_name, model_id) =
         crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
     // S3: provider credentials come from env only; the fake driver needs none.
@@ -389,6 +391,9 @@ pub async fn run() -> Result<i32> {
     // WP-604: blocking ui dialog requests for the TUI (headless: unused,
     // the default-answers path handles them in the event task).
     let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // WP-702: drain barrier between the agent loop and the event task
+    // (tools_changed must be applied before the tool set is read).
+    let (tools_sync_tx, tools_sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
     let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
@@ -405,7 +410,11 @@ pub async fn run() -> Result<i32> {
     } else {
         json!([])
     };
-    let init = json!({"protocolVersion":1,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    let mut init = json!({"protocolVersion":2,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
+    if let Some(cfg) = &mcp_config {
+        init["mcpConfig"] = cfg.clone();
+    }
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
         Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
@@ -430,6 +439,7 @@ pub async fn run() -> Result<i32> {
         cost_total: Arc::default(),
         tui: tui_mode,
         ui_tx,
+        tools_sync_tx,
         out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
         text_final: Arc::default(),
         json_tx: {
@@ -455,7 +465,7 @@ pub async fn run() -> Result<i32> {
             ctx.json_tx.as_ref().unwrap().send(h.to_string()).ok();
         }
     }
-    tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
+    tokio::spawn(crate::agent::event_task(events_rx, tools_sync_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
     let ready = tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), ready_rx)

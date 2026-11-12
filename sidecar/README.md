@@ -2,7 +2,7 @@
 
 Node sidecar that runs the **original, unmodified upstream extension loader**
 (`discoverAndLoadExtensions`) and `ExtensionRunner` from
-`@earendil-works/pi-coding-agent`, and serves the **bridge protocol v0**
+`@earendil-works/pi-coding-agent`, and serves the **bridge protocol v2**
 (see `docs/bridge-protocol.md`) as NDJSON on stdio. The Rust core (T4) is the
 RPC client; this process is the RPC server.
 
@@ -46,11 +46,14 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 
 ## What the sidecar does
 
-- `init` (protocolVersion 1) → loads extensions with the original loader,
-  binds `ExtensionRunner` (actions/context actions/provider actions), responds
-  `success`, emits `ready` (tools with TypeBox schemas via the
-  `extension.tools` → `wrapper.ts` → `tool-definition-wrapper.ts` path,
-  commands, flags, providers, subscribed event names).
+- `init` (protocolVersion 2) → loads extensions with the original loader,
+  hosts the built-in mcp extension on the shared runtime, binds
+  `ExtensionRunner` (actions/context actions/provider actions), registers
+  `mcpConfig` servers (v2), responds `success`, emits `ready` (tools with
+  TypeBox schemas via the `extension.tools` → `wrapper.ts` →
+  `tool-definition-wrapper.ts` path, commands, flags, providers, subscribed
+  event names). Post-ready tool-set changes (MCP connect/reconnect) are pushed
+  as `tools_changed` (v2).
 - F&F events dispatch to `runner.emit`; decision events
   (`tool_call`, `tool_result`, `context*`, `input`, `before_agent_start`,
   `user_bash`) run the upstream emitters and return combined results per the

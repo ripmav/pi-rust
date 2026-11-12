@@ -8,6 +8,7 @@
 //! Unknown keys are ignored (forward compat). Missing file = all defaults.
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -73,6 +74,31 @@ pub fn resolve_provider_flags(
 	}
 }
 
+/// Loads `<agent_dir>/mcp.json` (WP-702/702c) for the sidecar init payload.
+/// Upstream shape `{"mcpServers": {...}}` (the file `loadMcpConfig` reads);
+/// absent file → `Ok(None)` (no MCP servers). Malformed file, a non-object
+/// top level, or a non-object `mcpServers` → error naming the path (same
+/// rule as settings.json). Project `<cwd>/.pi/mcp.json` is a documented v0
+/// non-goal (agent-dir only, same rule as settings.json).
+pub fn load_mcp_config(agent_dir: &Path) -> Result<Option<Value>> {
+	let path = agent_dir.join("mcp.json");
+	if !path.exists() {
+		return Ok(None);
+	}
+	let raw = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+	let parsed: Value =
+		serde_json::from_str(&raw).with_context(|| format!("parsing agent mcp config {}", path.display()))?;
+	if !parsed.is_object() {
+		bail!("{}: expected a JSON object", path.display());
+	}
+	if let Some(servers) = parsed.get("mcpServers") {
+		if !servers.is_object() {
+			bail!("{}: mcpServers must be an object", path.display());
+		}
+	}
+	Ok(Some(parsed))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -116,6 +142,54 @@ mod tests {
 		std::fs::write(d.join("settings.json"), "{not json").unwrap();
 		let err = load(&d).unwrap_err().to_string();
 		assert!(err.contains("settings.json"), "{err}");
+	}
+
+	// --- WP-702/702c: agent-dir mcp.json ---
+
+	#[test]
+	fn mcp_config_missing_file_is_none() {
+		let d = tmpdir();
+		assert_eq!(load_mcp_config(&d).unwrap(), None);
+	}
+
+	#[test]
+	fn mcp_config_reads_upstream_shape() {
+		let d = tmpdir();
+		std::fs::write(
+			d.join("mcp.json"),
+			r#"{"mcpServers":{"fixture":{"command":"node","args":["x.mjs"]}},"other":1}"#,
+		)
+		.unwrap();
+		let cfg = load_mcp_config(&d).unwrap().expect("present");
+		assert_eq!(
+			cfg["mcpServers"]["fixture"]["command"],
+			"node",
+			"upstream shape passes through verbatim (the sidecar validates entries)"
+		);
+	}
+
+	#[test]
+	fn mcp_config_without_mcp_servers_key_is_valid() {
+		let d = tmpdir();
+		std::fs::write(d.join("mcp.json"), r#"{}"#).unwrap();
+		assert_eq!(load_mcp_config(&d).unwrap(), Some(serde_json::json!({})));
+	}
+
+	#[test]
+	fn mcp_config_malformed_errors_with_path() {
+		let d = tmpdir();
+		std::fs::write(d.join("mcp.json"), "{not json").unwrap();
+		let err = load_mcp_config(&d).unwrap_err().to_string();
+		assert!(err.contains("mcp.json"), "{err}");
+	}
+
+	#[test]
+	fn mcp_config_non_object_shapes_error_with_path() {
+		let d = tmpdir();
+		std::fs::write(d.join("mcp.json"), r#"[1,2]"#).unwrap();
+		assert!(load_mcp_config(&d).unwrap_err().to_string().contains("mcp.json"));
+		std::fs::write(d.join("mcp.json"), r#"{"mcpServers":[]}"#).unwrap();
+		assert!(load_mcp_config(&d).unwrap_err().to_string().contains("mcpServers"));
 	}
 
 	#[test]

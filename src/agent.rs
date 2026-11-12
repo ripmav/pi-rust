@@ -141,6 +141,12 @@ pub struct Core {
     pub tui: bool,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
+    /// WP-702: drain barrier for event_task — `sync_tool_set` sends a ping
+    /// and waits; the ping is answered only after every sidecar line that
+    /// reached the event channel earlier (in particular a `tools_changed`
+    /// emitted while the MCP extension's `tool_call` handler waited for a
+    /// server) has been applied.
+    pub tools_sync_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// WP-610: Json mode — write one upstream-shaped event line.
@@ -166,6 +172,20 @@ fn subscribed(ctx: &Core, name: &str) -> bool {
     ev.contains(name) || (name == "context_with_system" && ev.contains("context"))
 }
 
+/// WP-702: wait until `event_task` has applied every sidecar line that
+/// preceded the in-flight blocking command's response. The sidecar writes a
+/// `tools_changed` line and the decision response in that order on one pipe, and
+/// the demux delivers them in that order — but the decision response can wake
+/// the agent loop before `event_task` drains the earlier event, so the tool
+/// set must not be read without this barrier after a decision that may have
+/// connected an MCP server (`tool_call`, `before_agent_start`).
+async fn sync_tool_set(ctx: &Core) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if ctx.tools_sync_tx.send(tx).is_ok() {
+        let _ = rx.await;
+    }
+}
+
 /// Response `data` of a successful decision, else the protocol default
 /// (`fallback`); logs the decision event line either way.
 fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: &Value) -> Value {
@@ -184,181 +204,208 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// Sidecar→core event processor. Runs on its own task so a nested
 /// `tool_call_request` can be answered while the agent loop awaits a decision
 /// (bidirectional liveness, no head-of-line blocking).
-pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Core>) {
-    while let Some(ev) = events.recv().await {
-        match ev.get("type").and_then(Value::as_str).unwrap_or("") {
-            "ready" => {
-                let empty = Vec::new();
-                let names: Vec<String> = ev.get("events").and_then(Value::as_array).unwrap_or(&empty)
-                    .iter().filter_map(Value::as_str).map(str::to_string).collect();
-                ctx.events.lock().unwrap().extend(names.iter().cloned());
-                ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
-                // WP-701: extension-registered models become routable.
-                *ctx.ext_models.lock().unwrap() = parse_providers(&ev);
-                crate::corelog::line(&format!(
-                    "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
-                    ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-                    ctx.ext_tools.lock().unwrap().len()
-                ));
-                if let Some(r) = ctx.ready.lock().unwrap().take() {
-                    let _ = r.send(ev);
-                }
-            }
-            "extension_ui_request" => {
-                let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
-                if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
-                    // WP-604: the TUI renders the dialog and answers it over
-                    // the unchanged bridge protocol.
-                    if ctx.ui_tx.send(ev.clone()).is_err() {
-                        ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
+pub async fn event_task(
+    mut events: mpsc::UnboundedReceiver<Value>,
+    mut tools_sync: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
+    ctx: Arc<Core>,
+) {
+    loop {
+        // The events branch is listed FIRST: a queued sidecar event is
+        // processed before a drain ping is answered, which is what makes
+        // `sync_tool_set` a real "everything written before the ping is
+        // applied" barrier (WP-702).
+        tokio::select! {
+            ev = events.recv() => {
+                let Some(ev) = ev else { break };
+                match ev.get("type").and_then(Value::as_str).unwrap_or("") {
+                "ready" => {
+                    let empty = Vec::new();
+                    let names: Vec<String> = ev.get("events").and_then(Value::as_array).unwrap_or(&empty)
+                        .iter().filter_map(Value::as_str).map(str::to_string).collect();
+                    ctx.events.lock().unwrap().extend(names.iter().cloned());
+                    ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
+                    // WP-701: extension-registered models become routable.
+                    *ctx.ext_models.lock().unwrap() = parse_providers(&ev);
+                    crate::corelog::line(&format!(
+                        "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
+                        ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+                        ctx.ext_tools.lock().unwrap().len()
+                    ));
+                    if let Some(r) = ctx.ready.lock().unwrap().take() {
+                        let _ = r.send(ev);
                     }
-                } else if ctx.tui {
-                    // F&F UI channel: display-only, the TUI renders it.
-                    let kind = match method {
-                        "notify" => "notify",
-                        "setStatus" => "set_status",
-                        "setTitle" => "set_title",
-                        "set_editor_text" => "set_editor_text",
-                        _ => "extension_ui_request",
-                    };
-                    ctx.log.emit(json!({"kind":kind,
-                        "id":ev.get("id").cloned().unwrap_or(Value::Null),
-                        "method":method,
-                        "title":ev.get("title").cloned().unwrap_or(Value::Null),
-                        "message":ev.get("message").cloned().unwrap_or(Value::Null),
-                        "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
-                        "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
-                        "text":ev.get("text").cloned().unwrap_or(Value::Null),
-                        "response":Value::Null}));
-                } else {
-                    ui_default(&ctx, &ev);
                 }
-            }
-            "extension_error" => {
-                crate::corelog::line(&format!("[core] extension_error: {ev}"));
-                ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
-                    "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
-            }
-            "session_info_changed" => {
-                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
-                ctx.session.set_name(name.clone());
-                crate::corelog::line(&format!("[core] session name: {name:?}"));
-            }
-            "session_append_entry" => {
-                if let Some(entry) = ev.get("entry") {
-                    ctx.session.append_entry(entry.clone());
-                }
-            }
-            "user_message" => {
-                let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-                crate::corelog::line(&format!("[core] extension user_message: {text}"));
-                // Steer for v0 = append to the same queue (drained in order).
-                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
-            }
-            "providers_changed" => {
-                // WP-701: a registration arrived after ready; re-key routing.
-                let next = parse_providers(&ev);
-                crate::corelog::line(&format!("[core] providers_changed: {} extension model(s)", next.len()));
-                *ctx.ext_models.lock().unwrap() = next;
-            }
-            "set_model_request" => {
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
-                let provider = ev.get("provider").and_then(Value::as_str).map(str::to_string);
-                // WP-406: validate first (catalog + driver build), only then
-                // swap; declines leave the active model untouched. IMPORTANT:
-                // no `return` here — a return would exit event_task, not just
-                // this arm, and kill the sidecar->core event pump.
-                let reply = |success: bool, data: Value| {
-                    let mut line = json!({"id":id,"type":"response","command":"set_model_request","success":success});
-                    if success { line["data"] = data; } else { line["error"] = data; }
-                    ctx.client.send(line);
-                };
-                match (provider, model_id) {
-                    (Some(p), Some(m)) => {
-                        // WP-701: extension-registered model — routable via
-                        // the bridge stream; no bundled driver is built.
-                        let key = format!("{p}/{m}");
-                        if ctx.ext_models.lock().unwrap().contains_key(&key) {
-                            let prev = ctx.model.lock().unwrap().0.clone();
-                            let model = json!({"id":m,"provider":p});
-                            ctx.model.lock().unwrap().0 = model.clone();
-                            ctx.session.set_model(&p, &m);
-                            reply(true, json!({"ok":true}));
-                            if subscribed(&ctx, "model_select") {
-                                ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
-                            }
-                        } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
-                            reply(false, json!(format!("unknown model {p}/{m}")));
-                        } else {
-                            match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
-                                Ok(Some(drv)) => {
-                                    let prev = ctx.model.lock().unwrap().0.clone();
-                                    let model = json!({"id":m,"provider":p});
-                                    ctx.model.lock().unwrap().0 = model.clone();
-                                    ctx.session.set_model(&p, &m);
-                                    *ctx.provider.lock().unwrap() = Some(drv);
-                                    reply(true, json!({"ok":true}));
-                                    if subscribed(&ctx, "model_select") {
-                                        ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
-                                    }
-                                }
-                                Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
-                                Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
-                            }
+                "extension_ui_request" => {
+                    let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
+                    if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
+                        // WP-604: the TUI renders the dialog and answers it over
+                        // the unchanged bridge protocol.
+                        if ctx.ui_tx.send(ev.clone()).is_err() {
+                            ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
                         }
-                    }
-                    _ => reply(false, json!("setModel requires provider and modelId")),
-                }
-            }
-            "set_thinking_level_request" => {
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let level = ev.get("level").and_then(Value::as_str).map(str::to_string);
-                let prev = ctx.model.lock().unwrap().1.clone().unwrap_or_else(|| "off".into());
-                ctx.model.lock().unwrap().1 = level.clone();
-                if let Some(l) = &level {
-                    ctx.session.set_thinking_level(l);
-                }
-                ctx.client.send(json!({"id":id,"type":"response","command":"set_thinking_level_request","success":true,"data":{"ok":level.is_some()}}));
-                if subscribed(&ctx, "thinking_level_select") {
-                    ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
-                }
-            }
-            "set_theme_request" => {
-                // WP-607: pi.setTheme from an extension. The TUI applies the
-                // switch via the `set_theme` broadcast; headless runs reject
-                // (upstream theme switching is an interactive-mode feature).
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
-                let reply = |success: bool, data: Value| {
-                    let mut line =
-                        json!({"id":id,"type":"response","command":"set_theme_request","success":success});
-                    if success {
-                        line["data"] = data;
+                    } else if ctx.tui {
+                        // F&F UI channel: display-only, the TUI renders it.
+                        let kind = match method {
+                            "notify" => "notify",
+                            "setStatus" => "set_status",
+                            "setTitle" => "set_title",
+                            "set_editor_text" => "set_editor_text",
+                            _ => "extension_ui_request",
+                        };
+                        ctx.log.emit(json!({"kind":kind,
+                            "id":ev.get("id").cloned().unwrap_or(Value::Null),
+                            "method":method,
+                            "title":ev.get("title").cloned().unwrap_or(Value::Null),
+                            "message":ev.get("message").cloned().unwrap_or(Value::Null),
+                            "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
+                            "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
+                            "text":ev.get("text").cloned().unwrap_or(Value::Null),
+                            "response":Value::Null}));
                     } else {
-                        line["error"] = data;
+                        ui_default(&ctx, &ev);
                     }
-                    ctx.client.send(line);
-                };
-                match name {
-                    Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
-                        Ok(t) => {
-                            ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
-                            reply(true, json!({"ok":true}));
+                }
+                "extension_error" => {
+                    crate::corelog::line(&format!("[core] extension_error: {ev}"));
+                    ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
+                        "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
+                }
+                "session_info_changed" => {
+                    let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                    ctx.session.set_name(name.clone());
+                    crate::corelog::line(&format!("[core] session name: {name:?}"));
+                }
+                "session_append_entry" => {
+                    if let Some(entry) = ev.get("entry") {
+                        ctx.session.append_entry(entry.clone());
+                    }
+                }
+                "user_message" => {
+                    let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                    crate::corelog::line(&format!("[core] extension user_message: {text}"));
+                    // Steer for v0 = append to the same queue (drained in order).
+                    let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
+                }
+                "providers_changed" => {
+                    // WP-701: a registration arrived after ready; re-key routing.
+                    let next = parse_providers(&ev);
+                    crate::corelog::line(&format!("[core] providers_changed: {} extension model(s)", next.len()));
+                    *ctx.ext_models.lock().unwrap() = next;
+                }
+                "tools_changed" => {
+                    // WP-702: the extension tool set changed post-ready (MCP
+                    // tools register on connection, lazy reconnect, unregister)
+                    // — replace the ready.tools snapshot.
+                    let next = ev.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
+                    crate::corelog::line(&format!("[core] tools_changed: {} extension tool(s)", next.len()));
+                    ctx.ext_tools.lock().unwrap().clone_from(&next);
+                }
+                "set_model_request" => {
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
+                    let provider = ev.get("provider").and_then(Value::as_str).map(str::to_string);
+                    // WP-406: validate first (catalog + driver build), only then
+                    // swap; declines leave the active model untouched. IMPORTANT:
+                    // no `return` here — a return would exit event_task, not just
+                    // this arm, and kill the sidecar->core event pump.
+                    let reply = |success: bool, data: Value| {
+                        let mut line = json!({"id":id,"type":"response","command":"set_model_request","success":success});
+                        if success { line["data"] = data; } else { line["error"] = data; }
+                        ctx.client.send(line);
+                    };
+                    match (provider, model_id) {
+                        (Some(p), Some(m)) => {
+                            // WP-701: extension-registered model — routable via
+                            // the bridge stream; no bundled driver is built.
+                            let key = format!("{p}/{m}");
+                            if ctx.ext_models.lock().unwrap().contains_key(&key) {
+                                let prev = ctx.model.lock().unwrap().0.clone();
+                                let model = json!({"id":m,"provider":p});
+                                ctx.model.lock().unwrap().0 = model.clone();
+                                ctx.session.set_model(&p, &m);
+                                reply(true, json!({"ok":true}));
+                                if subscribed(&ctx, "model_select") {
+                                    ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                }
+                            } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                                reply(false, json!(format!("unknown model {p}/{m}")));
+                            } else {
+                                match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
+                                    Ok(Some(drv)) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
+                            }
                         }
-                        Err(e) => reply(false, json!(e)),
-                    },
-                    Some(n) => reply(
-                        false,
-                        json!(format!(
-                            "theme {n:?} cannot be switched outside interactive (TUI) mode"
-                        )),
-                    ),
-                    None => reply(false, json!("setTheme requires a theme name")),
+                        _ => reply(false, json!("setModel requires provider and modelId")),
+                    }
+                }
+                "set_thinking_level_request" => {
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let level = ev.get("level").and_then(Value::as_str).map(str::to_string);
+                    let prev = ctx.model.lock().unwrap().1.clone().unwrap_or_else(|| "off".into());
+                    ctx.model.lock().unwrap().1 = level.clone();
+                    if let Some(l) = &level {
+                        ctx.session.set_thinking_level(l);
+                    }
+                    ctx.client.send(json!({"id":id,"type":"response","command":"set_thinking_level_request","success":true,"data":{"ok":level.is_some()}}));
+                    if subscribed(&ctx, "thinking_level_select") {
+                        ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
+                    }
+                }
+                "set_theme_request" => {
+                    // WP-607: pi.setTheme from an extension. The TUI applies the
+                    // switch via the `set_theme` broadcast; headless runs reject
+                    // (upstream theme switching is an interactive-mode feature).
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                    let reply = |success: bool, data: Value| {
+                        let mut line =
+                            json!({"id":id,"type":"response","command":"set_theme_request","success":success});
+                        if success {
+                            line["data"] = data;
+                        } else {
+                            line["error"] = data;
+                        }
+                        ctx.client.send(line);
+                    };
+                    match name {
+                        Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
+                            Ok(t) => {
+                                ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
+                                reply(true, json!({"ok":true}));
+                            }
+                            Err(e) => reply(false, json!(e)),
+                        },
+                        Some(n) => reply(
+                            false,
+                            json!(format!(
+                                "theme {n:?} cannot be switched outside interactive (TUI) mode"
+                            )),
+                        ),
+                        None => reply(false, json!("setTheme requires a theme name")),
+                    }
+                }
+                "tool_call_request" => nested_tool(&ctx, &ev).await,
+                other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
                 }
             }
-            "tool_call_request" => nested_tool(&ctx, &ev).await,
-            other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
+            // WP-702 drain barrier: answer only after the events branch has
+            // had priority (select polls branches in order).
+            ping = tools_sync.recv() => {
+                let Some(tx) = ping else { break };
+                let _ = tx.send(());
+            }
         }
     }
 }
@@ -400,7 +447,7 @@ async fn nested_tool(ctx: &Core, ev: &Value) {
     let call_id = ev.get("toolCallId").and_then(Value::as_str).unwrap_or("nested").to_string();
     let name = ev.get("toolName").and_then(Value::as_str).unwrap_or_default().to_string();
     let input = ev.get("input").cloned().unwrap_or_else(|| json!({}));
-    let data = match execute_tool_call(ctx, &call_id, &name, &input).await {
+    let data = match execute_tool_call(ctx, &call_id, &name, &input, false).await {
         Ok((trm, _)) => {
             let mut d = json!({"content":trm.get("content").cloned().unwrap_or(json!([])),"isError":trm.get("isError").cloned().unwrap_or(json!(false))});
             if let Some(det) = trm.get("details") {
@@ -427,10 +474,19 @@ enum ToolFailure {
 /// `tool_call` decision (execute with the FINAL returned input) → execute
 /// (built-in locally / extension over the bridge) → `tool_result` decision.
 /// Returns (toolResult message, terminate hint).
-async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Result<(Value, bool), String> {
+async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value, barrier: bool) -> Result<(Value, bool), String> {
     let event = json!({"type":"tool_call","toolCallId":call_id,"toolName":name,"input":input});
     // Degraded default: no block, input unchanged.
     let data = decision_data(ctx, ctx.client.request("tool_call", json!({"event":event})).await, "tool_call", &event, &json!({"result":Value::Null,"input":input}));
+    // The MCP extension's tool_call handler waits for the server's readiness
+    // inside the decision; its `tools_changed` must be applied first. The
+    // barrier is only meaningful for the agent-loop caller: event_task runs
+    // events strictly in order, so its own queued `tools_changed` lines are
+    // already applied when it reaches this point (and it cannot answer its
+    // own ping — waiting here would self-deadlock the nested path).
+    if barrier {
+        sync_tool_set(ctx).await;
+    }
     let blocked = data.pointer("/result/block").and_then(Value::as_bool).unwrap_or(false);
     let final_input = data.get("input").cloned().filter(|v| v.is_object()).unwrap_or_else(|| input.clone());
     let (content, details, is_error, terminate) = if blocked {
@@ -452,10 +508,17 @@ async fn run_tool(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Resul
     // Upstream precedence: an extension tool shadows the built-in of the same name.
     let ext_hit = ctx.client.state() == State::Running
         && ctx.ext_tools.lock().unwrap().iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
-    if !ext_hit && tools::is_builtin(name) {
+    // WP-702: MCP tool names (upstream `mcp__<server>__<tool>` scheme and the
+    // resource tools) are bridge-routable even when the server never connected
+    // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
+    // the call records an error tool result instead of aborting the run as a
+    // model-script error.
+    let mcp_name = name.starts_with("mcp__")
+        || matches!(name, "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource");
+    if !ext_hit && !mcp_name && tools::is_builtin(name) {
         return Ok(tools::execute(name, input).await);
     }
-    if !ext_hit && !tools::is_builtin(name) {
+    if !ext_hit && !mcp_name && !tools::is_builtin(name) {
         return Err(ToolFailure::Unknown(name.to_string()));
     }
     // Extension tools are dropped from the model's tool set while degraded; a
@@ -628,6 +691,10 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         if let Some(p) = data.get("systemPrompt").and_then(Value::as_str) {
             system_prompt = p.to_string();
         }
+        // The MCP extension's before_agent_start handler waits for servers with
+        // `direct` tools; its `tools_changed` must be applied before the turn's
+        // tool declarations are built.
+        sync_tool_set(ctx).await;
     }
 
     if subscribed(ctx, "agent_start") { ctx.client.fire(json!({"type":"agent_start","event":{"type":"agent_start"}})); }
@@ -768,7 +835,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         for tc in &turn.tool_calls {
             // WP-610: upstream tool_execution_start before the run (args).
             jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
-            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input).await {
+            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {
                 Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
                     // WP-610: upstream tool_execution_end (result + isError).

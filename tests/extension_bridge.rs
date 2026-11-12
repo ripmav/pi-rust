@@ -1533,3 +1533,262 @@ fn wp701_unknown_extension_provider_is_typed_error() {
     assert!(stderr.contains("extension"), "typed error mentions the extension registry: {stderr}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// --- M7/WP-702: MCP transport (stdio) ---
+
+/// S4: an agent-dir mcp.json declares the fixture server; the run sees the
+/// `mcp__<server>__<tool>` tools (registered post-ready via `tools_changed`)
+/// and both calls round-trip bridge → fixture process → bridge with the
+/// correct results. Exit 0.
+#[test]
+fn wp702_mcp_config_stdio_round_trip() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp702a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        format!(r#"{{"mcpServers":{{"fixture":{{"command":"node","args":["{f}"],"exposure":"direct"}}}}}}"#, f = fixture.display().to_string().replace('"', "\\\"")),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["use the mcp tools"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__echo", "input": { "text": "bridge-mcp" } } },
+            { "tool_call": { "name": "mcp__fixture__counter", "input": {} } },
+            { "text": "mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // No handler errors.
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
+        "unexpected extension_error\n{stdout}",
+    );
+
+    // Both MCP tools executed with the fixture's results.
+    let execs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "tool_execution").collect();
+    assert_eq!(execs.len(), 2, "expected 2 tool executions\n{stdout}");
+    let echo = execs.iter().find(|t| t["name"] == "mcp__fixture__echo").expect("echo call missing\n{stdout}");
+    assert_eq!(echo["blocked"], json!(false));
+    assert_eq!(echo["result_summary"], "echo:bridge-mcp", "echo round-trip: {echo}");
+    let counter = execs.iter().find(|t| t["name"] == "mcp__fixture__counter").expect("counter call missing\n{stdout}");
+    assert_eq!(counter["result_summary"], "count:1", "counter round-trip: {counter}");
+
+    // Turn 0: the two MCP tool calls; turn 1: the final text.
+    let model_outputs: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "model_output").collect();
+    assert_eq!(model_outputs.len(), 2, "expected 2 model outputs\n{stdout}");
+    assert_eq!(model_outputs[0]["toolCalls"], json!(["mcp__fixture__echo", "mcp__fixture__counter"]));
+    assert_eq!(model_outputs[1]["text"], "mcp done");
+
+    // Final transcript: user + assistant(tool calls) + 2 toolResults + assistant.
+    let last = lines.last().expect("no stdout lines");
+    assert_eq!(last["kind"], "transcript");
+    let entries: Vec<&Value> = last["session"]["entries"].as_array().unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    let roles: Vec<&str> = entries.iter().map(|e| e["message"]["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "toolResult", "toolResult", "assistant"]);
+    for r in entries.iter().filter(|e| e["message"]["role"] == "toolResult") {
+        assert_eq!(r["message"]["isError"], json!(false));
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S4: registration through the normal `pi.registerMcpServer` path — a minimal
+/// fixture extension (no MCP logic; no unmodified upstream MCP-using example
+/// exists) points at the same fixture server. The tool name uses the upstream
+/// `mcp__<server>__<tool>` scheme with the server name sanitized.
+#[test]
+fn wp702_mcp_register_via_extension() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp702b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let scenario = json!({
+        "user_messages": ["echo via the registered server"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture_reg__echo", "input": { "text": "via-register" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/mcp-register-fixture.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
+        "unexpected extension_error\n{stdout}",
+    );
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__fixture_reg__echo")
+        .expect("mcp__fixture_reg__echo execution missing\n{stdout}");
+    assert_eq!(exec["result_summary"], "echo:via-register", "registerMcpServer round-trip: {exec}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S4: crash/restart semantics per upstream — the fixture server exits after
+/// the first successful call; there is NO auto-restart, the next call
+/// reconnects lazily and gets a fresh process (counter reset to 1, not 2).
+#[test]
+fn wp702_mcp_crash_lazy_reconnect() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp702c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        format!(r#"{{"mcpServers":{{"fixture":{{"command":"node","args":["{f}","--die-after-first-call"],"exposure":"direct"}}}}}}"#, f = fixture.display().to_string().replace('"', "\\\"")),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["count, let it die, count again"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__counter", "input": {} } },
+            { "tool_call": { "name": "bash", "input": { "command": "sleep 0.3" } } },
+            { "tool_call": { "name": "mcp__fixture__counter", "input": {} } },
+            { "text": "reconnect ok" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
+        "unexpected extension_error\n{stdout}",
+    );
+
+    // The sleep between calls gives the client time to observe the server exit
+    // (no auto-restart: the reconnect happens on the NEXT call).
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution")
+        .collect();
+    assert_eq!(execs.len(), 3, "expected 3 tool executions\n{stdout}");
+    let counters: Vec<&Value> = execs.iter().copied().filter(|t| t["name"] == "mcp__fixture__counter").collect();
+    assert_eq!(counters.len(), 2, "expected 2 counter calls\n{stdout}");
+    assert_eq!(counters[0]["result_summary"], "count:1", "first call: {}", counters[0]);
+    // The second call runs against a FRESH process (lazy reconnect): the
+    // counter restarted at 1.
+    assert_eq!(counters[1]["result_summary"], "count:1", "lazy reconnect must get a fresh process: {}", counters[1]);
+    let sleep_exec = execs.iter().find(|t| t["name"] == "bash").expect("bash sleep missing\n{stdout}");
+    assert_eq!(sleep_exec["blocked"], json!(false));
+
+    let last = lines.last().expect("no stdout lines");
+    let entries: Vec<&Value> = last["session"]["entries"].as_array().unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    assert_eq!(entries.last().unwrap()["message"]["content"][0]["text"], "reconnect ok");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S4: a dead/unreachable server (bad command) never connected, so it offers
+/// no tools — a scripted call to its (unregistered) tool name produces a tool
+/// ERROR RESULT, not a core crash or a model-script abort. The run finishes.
+#[test]
+fn wp702_mcp_dead_server_tool_error_not_crash() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp702d-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        r#"{"mcpServers":{"bad":{"command":"definitely-not-a-command-wp702"}}}"#,
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["try the broken server"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__bad__echo", "input": { "text": "x" } } },
+            { "text": "survived" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // The run completes (exit 0): the tool call is an error result, not a crash.
+    assert_eq!(out.status.code(), Some(0), "dead server must not abort the run\n{stderr}\n{}", String::from_utf8_lossy(&out.stdout));
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The call executed as an error result with the sidecar's typed message.
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__bad__echo")
+        .expect("mcp__bad__echo execution missing\n{stdout}");
+    assert_eq!(exec["blocked"], json!(false));
+    assert!(
+        exec["result_summary"].as_str().unwrap_or("").contains("Unknown extension tool"),
+        "error result must carry the sidecar's typed message: {exec}",
+    );
+
+    // The recorded toolResult is isError, and the run reached its final text.
+    let last = lines.last().expect("no stdout lines");
+    let entries: Vec<&Value> = last["session"]["entries"].as_array().unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    let roles: Vec<&str> = entries.iter().map(|e| e["message"]["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "toolResult", "assistant"]);
+    let tool_result = entries.iter().find(|e| e["message"]["role"] == "toolResult").unwrap();
+    assert_eq!(tool_result["message"]["isError"], json!(true), "tool result must be an error: {tool_result}");
+    assert_eq!(entries.last().unwrap()["message"]["content"][0]["text"], "survived");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

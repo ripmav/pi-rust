@@ -247,11 +247,12 @@ async function main() {
 
 	let child2 = null;
 	let child3 = null;
+	let child4 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 1,
+			protocolVersion: 2,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -269,7 +270,7 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 7 extensions, no errors", ready.extensions.length === 7 && ready.errors.length === 0, ready.errors);
+		check("ready lists 8 extensions (7 + builtin mcp), no errors", ready.extensions.length === 8 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
@@ -522,7 +523,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 1,
+			protocolVersion: 2,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -565,15 +566,15 @@ async function main() {
 		const core3 = new FakeCore(child3);
 		const init3 = await core3.request({
 			type: "init",
-			protocolVersion: 1,
+			protocolVersion: 2,
 			capabilities: { ui: [], timeoutMs: 5000 },
 		});
 		check("gitlab-duo sidecar init", init3.success === true, init3);
 		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
 		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
 		check(
-			"gitlab-duo loads unmodified (1 extension, no errors)",
-			ready3.extensions.length === 1 && ready3.errors.length === 0,
+			"gitlab-duo loads unmodified (1 user extension + builtin mcp, no errors)",
+			ready3.extensions.length === 2 && ready3.errors.length === 0,
 			ready3.errors,
 		);
 		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
@@ -585,6 +586,42 @@ async function main() {
 		core3.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
 		const code3 = await Promise.race([core3.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("gitlab-duo sidecar clean exit 0", code3 === 0, code3);
+
+		// (m) 702b: config-declared stdio MCP server — the sidecar hosts the
+		// built-in mcp extension, connects on session_start and pushes the new
+		// tools over the v2 `tools_changed` event (post-ready dynamic set).
+		const mcpFixture = path.join(ROOT, "tests/fixtures/mcp-server-fixture.mjs");
+		const agentDir4 = path.join(tmp, "agent4");
+		mkdirSync(agentDir4, { recursive: true });
+		child4 = spawn(
+			process.execPath,
+			[ENTRY, "--agent-dir", agentDir4],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child4.stderr.on("data", (d) => process.stderr.write(d));
+		const core4 = new FakeCore(child4);
+		const init4 = await core4.request({
+			type: "init",
+			protocolVersion: 2,
+			capabilities: { ui: [], timeoutMs: 5000 },
+			mcpConfig: {
+				mcpServers: {
+					fixture: { command: process.execPath, args: [mcpFixture], exposure: "direct" },
+				},
+			},
+		});
+		check("mcp sidecar init (mcpConfig)", init4.success === true, init4);
+		const ready4 = await core4.nextEvent((e) => e.type === "ready", "ready (mcp)");
+		check("mcp tools are not in the ready snapshot (pre-connection)", !ready4.tools.some((t) => t.name.startsWith("mcp__fixture__")), ready4.tools.map((t) => t.name));
+		core4.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
+		const changed = await core4.nextEvent((e) => e.type === "tools_changed", "tools_changed (mcp)");
+		const mcpTools = changed.tools.map((t) => t.name);
+		check("tools_changed carries the MCP tools (upstream naming)", mcpTools.includes("mcp__fixture__echo") && mcpTools.includes("mcp__fixture__counter"), mcpTools);
+		const echoTool = changed.tools.find((t) => t.name === "mcp__fixture__echo");
+		check("mcp tool keeps its server schema", echoTool?.parameters?.type === "object" && echoTool?.parameters?.properties?.text, echoTool?.parameters);
+		core4.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code4 = await Promise.race([core4.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("mcp sidecar clean exit 0", code4 === 0, code4);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
@@ -592,6 +629,7 @@ async function main() {
 			child.kill("SIGKILL");
 			child2?.kill("SIGKILL");
 			child3?.kill("SIGKILL");
+			child4?.kill("SIGKILL");
 		} catch {}
 	}
 
