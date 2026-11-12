@@ -124,6 +124,8 @@ pi-rust --extension-dir <path> (repeatable)
         [--resume <file|id>]          # continue an existing session
         [--fork <file|id>]            # branch a new session (parentSession header)
         [--list-sessions]             # NDJSON listing, then exit
+        [-p | --print]                # print mode: stdout = final assistant text only (WP-610)
+        [--mode text|json]            # text = --print; json = upstream-shaped event stream (WP-610)
         [--command <name> [args...]]  # repeatable; run after ready, before the runs
         [--provider <id>]                 # fake|anthropic|google|google-vertex|azure|cloudflare-workers-ai|cloudflare-ai-gateway|amazon-bedrock|openai|groq|cerebras|deepseek|
                                                  #   together|huggingface|openrouter (default: settings/fake)
@@ -218,6 +220,30 @@ command (the bridge `command` path, M1). The remaining built-ins report
 `not supported in v0`. An unknown command is an error listing the
 available ones. Command results render in the transcript (a set-model
 success also updates the status bar).
+
+#### Print / JSON output modes (M6, WP-610)
+
+One-shot runs can select the upstream stdout variants:
+
+- `pi-rust -p` / `--print` / `--mode text` — stdout is the final
+  assistant text only (one trailing newline); the NDJSON event log is
+  not written to stdout. Exit codes follow upstream print mode: `0`
+  clean, `1` on any run failure (the error goes to stderr).
+- `pi-rust --mode json` — stdout is the upstream-shaped
+  AgentSessionEvent stream: the session header line, then
+  `agent_start`, `turn_start`, `message_start` (user on prompt, then the
+  assistant skeleton per turn), `message_update` (`text_delta` per
+  streamed chunk, the cumulative `partial` snapshot dropped per upstream
+  `toJsonEvent`), `message_end` (final assistant message with usage),
+  `tool_execution_start`/`tool_execution_end` (toolCallId, toolName,
+  args / result + isError), and `agent_end` (`messages`,
+  `willRetry: false`). A failing run reports the failure in-stream as
+  an error `message_end` and exits `1`.
+- The default (no flag) keeps the pi-rust NDJSON event log on stdout
+  (the M1+ core contract, exit codes `0`/`2`/`3` unchanged).
+- stderr stays human-only in all modes.
+
+### Prompt templates (M3)
 
 #### Pickers (M6, WP-609)
 
