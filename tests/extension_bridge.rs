@@ -5,8 +5,10 @@
 //! permission-gate block on `sudo true`. Asserts on the NDJSON event log.
 
 use serde_json::{json, Value};
+
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 
 /// WP-610 golden: `--print` (text mode) — stdout is the final assistant
@@ -1790,5 +1792,96 @@ fn wp702_mcp_dead_server_tool_error_not_crash() {
     let tool_result = entries.iter().find(|e| e["message"]["role"] == "toolResult").unwrap();
     assert_eq!(tool_result["message"]["isError"], json!(true), "tool result must be an error: {tool_result}");
     assert_eq!(entries.last().unwrap()["message"]["content"][0]["text"], "survived");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S4/WP-703: a config-declared HTTP MCP server - the sidecar's upstream
+/// streamable-HTTP transport does initialize + tool calls against the local
+/// mock, assembles the SSE stream response, and the auth header (from the
+/// WP703_SECRET env expansion) reaches the server while the secret value
+/// stays out of every log line.
+#[test]
+fn wp703_mcp_http_round_trip() {
+    let secret = "wp703-secret-token-123";
+    // Mock server on an ephemeral 127.0.0.1 port; it reports the port on stdout.
+    let mut child = Command::new("node")
+        .arg(repo().join("tests/fixtures/mcp-http-fixture.mjs"))
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning mock MCP HTTP server");
+    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock server stdout"));
+    let mut port_line = String::new();
+    port_reader.read_line(&mut port_line).expect("mock server port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock server port");
+
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp703-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"httptest":{{"url":"http://127.0.0.1:{port}/m","exposure":"direct","headers":{{"Authorization":"${{WP703_SECRET}}"}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["call the http server"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "ping" } } },
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "sse" } } },
+            { "tool_call": { "name": "mcp__httptest__counter", "input": {} } },
+            { "text": "http mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .env("WP703_SECRET", secret)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}\n{stdout}");
+
+    // The secret never reaches any log line (sidecar stderr is inherited here).
+    assert!(!stderr.contains(secret), "secret leaked into stderr:\n{stderr}");
+
+    let lines = event_log(&stdout);
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__echo")
+        .collect();
+    assert_eq!(execs.len(), 2, "both echo calls executed\n{stdout}");
+    // Plain JSON response path: the server saw the expanded auth header.
+    let first = execs[0]["result_summary"].as_str().unwrap_or("").to_string();
+    assert!(first.contains("echo:ping auth:"), "first echo failed: {first}");
+    assert!(first.contains(secret), "auth header must reach the server: {first}");
+    // SSE stream response path: assembled from the event stream by the transport.
+    let second = execs[1]["result_summary"].as_str().unwrap_or("").to_string();
+    assert!(second.contains("echo:sse auth:"), "SSE stream response must assemble: {second}");
+    assert!(second.contains(secret), "auth header on the SSE path: {second}");
+    let counters: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__counter")
+        .collect();
+    assert_eq!(counters.len(), 1, "counter call executed\n{stdout}");
+    // Server-side state survived the calls (one live connection, not per-call).
+    let count_summary = counters[0]["result_summary"].as_str().unwrap_or("").to_string();
+    assert_eq!(count_summary, "count:1", "server-side counter state: {count_summary}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
