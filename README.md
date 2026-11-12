@@ -210,13 +210,27 @@ commit, the discovered prompt templates (WP-307) and the extension
 conflicts with a built-in is skipped (the built-in wins, upstream
 semantics).
 
-Wired in v0: `/theme <name>` (WP-607), `/thinking <level>` and
-`/model <provider/model>` (over the bridge, WP-406), `/session` and
+Wired in v0: `/theme <name>` (WP-607), `/thinking <level>`,
+`/model <provider/model>` (argument) and `/model` (picker, WP-609),
+`/resume` (session picker, WP-609), `/session` and
 `/hotkeys` (local info), `/quit`, and every prompt template + extension
 command (the bridge `command` path, M1). The remaining built-ins report
 `not supported in v0`. An unknown command is an error listing the
 available ones. Command results render in the transcript (a set-model
 success also updates the status bar).
+
+#### Pickers (M6, WP-609)
+
+`/model` (without an argument) opens the model picker over the bundled
+registry (`provider/model` labels); selecting one switches the model
+over the bridge (WP-406) and updates the status bar. `/resume` opens
+the session picker (the shared `<agentDir>/sessions/` listing behind
+`--list-sessions`); selecting a session resumes it in place (the core
+keeps the same session handle — `Session::resume_from` swaps the file
+and identity, the TUI transcript resets to the resumed messages). Both
+pickers use the `tui.select.*` keys with a typed prefix filter (fuzzy
+search is out of scope); Esc/ctrl+c cancel, an empty list renders a
+placeholder.
 
 ### Prompt templates (M3)
 

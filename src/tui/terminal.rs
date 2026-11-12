@@ -31,8 +31,11 @@ use tokio::sync::mpsc;
 ///   an invalid theme is shown in the status bar, the old theme stays.
 /// - `on_request`: WP-608 slash commands that need the bridge; the closure
 ///   sends the request and renders the result via a TUI-only event.
+/// - `on_resume`: WP-609 session resume — loads the file and swaps the
+///   core's active session; the return carries the loaded session for the
+///   TUI display reset.
 /// - `on_exit`: called once when the user quits.
-pub async fn run<F, G, H, I>(
+pub async fn run<F, G, H, I, J>(
     app: &mut super::TuiApp,
     mut events: tokio::sync::broadcast::Receiver<Value>,
     mut ui: mpsc::UnboundedReceiver<Value>,
@@ -40,6 +43,7 @@ pub async fn run<F, G, H, I>(
     mut on_dialog: H,
     agent_dir: std::path::PathBuf,
     mut on_request: I,
+    mut on_resume: J,
     mut on_exit: G,
 ) -> anyhow::Result<()>
 where
@@ -47,6 +51,7 @@ where
     G: FnMut() + Send,
     H: FnMut(super::dialog::DialogOutcome) + Send,
     I: FnMut(String, Value, &str, Value) + Send,
+    J: FnMut(&str) -> Result<(String, Vec<Value>), String> + Send,
 {
     // Stdin reader thread: crossterm's blocking poll+read into a channel.
     // The stop flag bounds the final join: without it the reader only
@@ -109,8 +114,49 @@ where
             tokio::select! {
                 ev = stdin_rx.recv() => match ev {
                     Some(e) => {
-                        // WP-604: an open dialog owns the keys.
-                        if let Some(outcome) = app.handle_dialog_key(&e) {
+                        // WP-609: an open picker owns the keys.
+                        if app.picker.is_some() {
+                            if let Some(outcome) = app.handle_picker_key(&e) {
+                                let kind = app.picker_kind;
+                                app.picker = None;
+                                match (kind, outcome) {
+                                    (super::PickerKind::Model, super::picker::PickerOutcome::Selected { value, .. }) => {
+                                        if let Some((provider, model)) = value.split_once('/') {
+                                            on_request(
+                                                format!("/model {value}"),
+                                                json!({ "model": value }),
+                                                "set_model_request",
+                                                json!({ "provider": provider, "modelId": model }),
+                                            );
+                                        }
+                                    }
+                                    (super::PickerKind::Session, super::picker::PickerOutcome::Selected { value, .. }) => {
+                                        match on_resume(&value) {
+                                            Ok((id, msgs)) => {
+                                                app.session = id;
+                                                let mut transcript = Vec::new();
+                                                for m in msgs {
+                                                    let text = crate::session::extract_text(&m);
+                                                    let role: &'static str =
+                                                        match m.get("role").and_then(Value::as_str) {
+                                                            Some("assistant") => "assistant",
+                                                            _ => "user",
+                                                        };
+                                                    transcript.push(super::Msg { role, text });
+                                                }
+                                                app.transcript = transcript;
+                                                app.scroll = 0;
+                                            }
+                                            Err(e) => {
+                                                crate::corelog::line(&format!("[core] resume: {e}"));
+                                                app.last_error = Some(format!("resume: {e}"));
+                                            }
+                                        }
+                                    }
+                                    (_, super::picker::PickerOutcome::Cancelled) => {}
+                                }
+                            }
+                        } else if let Some(outcome) = app.handle_dialog_key(&e) {
                             on_dialog(outcome);
                         } else if let Some(action) = app.handle_key(e) {
                             match action {
@@ -143,6 +189,29 @@ where
                                         "set_model_request",
                                         json!({ "provider": provider, "modelId": model }),
                                     );
+                                }
+                                super::TuiAction::OpenSessionsPicker => {
+                                    // WP-609: the session list (shared with
+                                    // --list-sessions) feeds the picker.
+                                    let infos = crate::session::list(&agent_dir);
+                                    if infos.is_empty() {
+                                        app.last_error =
+                                            Some("no sessions to resume under the agent dir".into());
+                                    } else {
+                                        let items = infos
+                                            .iter()
+                                            .map(|s| {
+                                                let label = s
+                                                    .name
+                                                    .clone()
+                                                    .unwrap_or_else(|| format!("session {}", &s.id[..s.id.len().min(8)]));
+                                                let display = format!("{label} \u{b7} {}", s.updated.as_deref().unwrap_or("-"));
+                                                super::picker::PickerItem { display, value: s.path.to_string_lossy().to_string() }
+                                            })
+                                            .collect();
+                                        app.picker_kind = super::PickerKind::Session;
+                                        app.picker = Some(super::picker::Picker::new("Resume session", items));
+                                    }
                                 }
                             }
                         }

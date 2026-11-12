@@ -57,7 +57,7 @@ instruction 2026-11-11).
 | T6 | S7 | 606 | #52 | inline (TDD) | 0110479/d4488b2 on feat/wp-606-keybindings; PR #63 (stack #59) |
 | T7 | S8 | 607 | #53 | inline (TDD) | 4112ddd/c7f0deb on feat/wp-607-themes; PR (stack #59) |
 | T8 | S9 | 608 | #54 | inline (TDD) | commits on feat/wp-608-slash-commands; PR (stack #59) |
-| T9 | S10 | 609 | — | subagent or inline | — |
+| T9 | S10 | 609 | #55 | inline (TDD) | commits on feat/wp-609-pickers; PR (stack #59) |
 | T10 | S11 | 610 | — | subagent or inline | — |
 
 ## Log
@@ -163,3 +163,21 @@ instruction 2026-11-11).
   must be reached by filtering (the PTY test types /echo first). Suite:
   133 in-crate + 19 e2e + 3 PTY (new slash-command round-trip); smoke
   43/43.
+
+- L12: WP-609 delivered: T9 done, branch feat/wp-609-pickers (base
+  feat/wp-608-slash-commands). Generic prefix-filter picker
+  (src/tui/picker.rs, tui.select.* keys, 8 visible rows, graceful
+  empty state) reused by both pickers: /model (no argument) opens the
+  model picker over the bundled registry (select -> the WP-406 bridge
+  set_model_request; the WP-608 argument form is unchanged), /resume
+  opens the session picker over the shared <agentDir>/sessions/ listing
+  (extracted to crate::session::list, now also serving --list-sessions
+  and --resume/--fork ref resolution). Selecting a session resumes in
+  place: Session::resume_from swaps file + identity inside the shared
+  Arc<Session> (identity fields became lock-protected; the turn loop is
+  untouched), the TUI transcript resets to the resumed user/assistant
+  messages and the status bar shows the new session id. Root causes:
+  the first picker item is amazon-bedrock (the bundled catalog is
+  alphabetical — the test asserted anthropic); Session is not Clone,
+  so the resume snapshots id+transcript and swaps in place instead of
+  replacing the Arc. Suite: 141 in-crate + 19 e2e + 3 PTY; smoke 43/43.

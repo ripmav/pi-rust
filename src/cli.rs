@@ -473,7 +473,7 @@ pub async fn run() -> Result<i32> {
             kb,
             model_label,
             cwd.display().to_string(),
-            session.id.clone(),
+            session.id.lock().unwrap().clone(),
         )
         .with_commands(ext_cmds, tui_templates);
         if let Some(e) = kb_error {
@@ -572,6 +572,25 @@ pub async fn run() -> Result<i32> {
                     });
                 }
             },
+            {
+                let resume_session = session.clone();
+                move |path: &str| -> Result<(String, Vec<serde_json::Value>), String> {
+                    // WP-609: resume the selected file in place (the core
+                    // keeps the same Arc<Session>; the identity/file
+                    // swap is inside Session::resume_from) and snapshot
+                    // id + transcript for the TUI display.
+                    resume_session
+                        .resume_from(std::path::Path::new(path))
+                        .map_err(|e| e.to_string())?;
+                    let id = resume_session.id.lock().unwrap().clone();
+                    let msgs = resume_session
+                        .transcript()
+                        .into_iter()
+                        .filter(|m| matches!(m.get("role").and_then(serde_json::Value::as_str), Some("user") | Some("assistant")))
+                        .collect();
+                    Ok((id, msgs))
+                }
+            },
             move || {
                 let _ = end_tx.send(Item::End);
             },
@@ -636,61 +655,19 @@ pub async fn run() -> Result<i32> {
 /// `--list-sessions`: one NDJSON line per session file under
 /// `<agentDir>/sessions/` (recursive): {file, id, cwd, name, updated, entries}.
 fn list_sessions_json(agent_dir: &Path) -> Result<()> {
-    let root = agent_dir.join("sessions");
-    if !root.exists() {
-        return Ok(());
-    }
-    let mut files = Vec::new();
-    collect_session_files(&root, &mut files);
-    files.sort_by(|a, b| b.cmp(a)); // most recently modified first
-    for f in &files {
-        let Ok(raw) = std::fs::read_to_string(f) else { continue };
-        let Some(first) = raw.lines().next() else { continue };
-        let Ok(h) = serde_json::from_str::<Value>(first) else { continue };
-        if h.get("type").and_then(Value::as_str) != Some("session") {
-            continue;
-        }
-        let mut name: Option<String> = None;
-        let mut entries = 0usize;
-        for line in raw.lines().skip(1) {
-            if line.trim().is_empty() {
-                continue;
-            }
-            entries += 1;
-            if let Ok(e) = serde_json::from_str::<Value>(line) {
-                if e.get("type").and_then(Value::as_str) == Some("session_info") {
-                    name = e.get("name").and_then(Value::as_str).map(str::to_string);
-                }
-            }
-        }
-        let updated = std::fs::metadata(f)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| crate::session::iso_from_secs(d.as_secs()));
+    // WP-609: the shared session listing (same source as the TUI picker).
+    for s in crate::session::list(agent_dir) {
         println!("{}", json!({
-            "file": f.to_string_lossy(),
-            "id": h.get("id"),
-            "cwd": h.get("cwd"),
-            "name": name,
-            "parentSession": h.get("parentSession"),
-            "updated": updated,
-            "entries": entries,
+            "file": s.path.to_string_lossy(),
+            "id": s.id,
+            "cwd": s.cwd,
+            "name": s.name,
+            "parentSession": s.parent_session,
+            "updated": s.updated,
+            "entries": s.entries,
         }));
     }
     Ok(())
-}
-
-fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_session_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
-            out.push(p);
-        }
-    }
 }
 
 /// Resolves a `--resume`/`--fork` reference: an existing file path wins;
@@ -700,11 +677,8 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
     if p.exists() {
         return Ok(p);
     }
-    let root = agent_dir.join("sessions");
-    let mut files = Vec::new();
-    collect_session_files(&root, &mut files);
-    for f in &files {
-        let Ok(raw) = std::fs::read_to_string(f) else { continue };
+    for f in crate::session::list(agent_dir).iter().map(|s| s.path.clone()) {
+        let Ok(raw) = std::fs::read_to_string(&f) else { continue };
         let Some(first) = raw.lines().next() else { continue };
         if let Ok(h) = serde_json::from_str::<Value>(first) {
             if h.get("type").and_then(Value::as_str) == Some("session")
@@ -714,7 +688,7 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", root.display())
+    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", agent_dir.join("sessions").display())
 }
 
 #[cfg(test)]
