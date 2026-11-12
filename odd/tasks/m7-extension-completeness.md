@@ -25,7 +25,7 @@ S10 (WP-708 acceptance): "Table in-file: per extension — loads? (matrix run), 
 - T5 / WP-705 — `registerShortcut` (TUI dispatch, upstream precedence) — S7 — issue #79 — branch `feat/wp-705-register-shortcut` — commit: 5466a08
 - T6 / WP-706 — Extension UI chrome (status/title render + clear, matrix re-run) — S8 — issue #80 — branch `feat/wp-706-extension-ui` — commit: 8beb14c
 - T7 / WP-707 — Evaluate `ctx.ui.custom` (decision memo in WP file, no code) — S9 — issue #81 — branch `feat/wp-707-ui-custom-eval` — commit: 4ffc696
-- T8 / WP-708 — Bundled extensions evaluation (table in WP file, no code) — S10 — issue #82 — branch `feat/wp-708-bundled-extensions` — commit: (pending)
+- T8 / WP-708 — Bundled extensions evaluation (table in WP file, no code) — S10 — issue #82 — branch `feat/wp-708-bundled-extensions` — commit: fb9050c
 
 ## Log
 L1 (user, session start 2026-11-07): "Ich möchte dass du von folgendem Projekt ein Rust-Port erstellst: `https://github.com/earendil-works/pi` Es soll eine kompatibiltätsschicht haben um Extensions usw. vom Original weiterhin wie gewohnt nutzen zu können"
