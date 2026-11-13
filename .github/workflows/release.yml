@@ -40,12 +40,18 @@ jobs:
 
       # The sidecar runs the ORIGINAL upstream loader: the package ships the
       # pinned, built upstream tree (dev deps pruned for size).
-      - name: Fetch + build pinned upstream
+      - name: Fetch pinned upstream
         run: |
           git init upstream
           git -C upstream remote add origin https://github.com/earendil-works/pi.git
           git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
           git -C upstream checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Upstream npm install + build
+        working-directory: upstream
+        run: |
           npm ci
           npm run build
           npm prune --omit=dev
