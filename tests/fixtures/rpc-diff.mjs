@@ -22,14 +22,19 @@ const turn2 = [
 	'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
 	"data: [DONE]",
 ];
-let req = 0;
+// Stateless per request: select the turn from the request body (turn 2's
+// conversation carries the tool result). Counting requests would desync
+// when the two processes' requests interleave or a client retries.
 const server = http.createServer((sreq, sres) => {
 	// SSE frames are blank-line separated (the pinned upstream parser is
 	// spec-strict; a single trailing newline merges the data lines).
-	const body = (req % 2 === 0 ? turn1 : turn2).join("\n\n") + "\n\n";
-	req += 1;
-	sres.writeHead(200, { "content-type": "text/event-stream" });
-	sres.end(body);
+	let body = "";
+	sreq.on("data", (d) => (body += d));
+	sreq.on("end", () => {
+		const frames = /"role":\s*"tool"/.test(body) ? turn2 : turn1;
+		sres.writeHead(200, { "content-type": "text/event-stream" });
+		sres.end(frames.join("\n\n") + "\n\n");
+	});
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;

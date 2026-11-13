@@ -53,7 +53,9 @@ impl EventLog {
                 use tokio::io::AsyncWriteExt;
                 let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
                 while let Some((v, ack)) = rx.recv().await {
-                    let _ = out.write_all(format!("{}\n", v.to_string().trim_end()).as_bytes()).await;
+                    let _ = out
+                        .write_all(format!("{}\n", v.to_string().trim_end()).as_bytes())
+                        .await;
                     let _ = out.flush().await;
                     if let Some(a) = ack {
                         let _ = a.send(());
@@ -79,7 +81,6 @@ impl EventLog {
             .take()
             .expect("the TUI event stream is subscribed exactly once")
     }
-
 
     /// TUI-only event (in-process broadcast only — never on the headless
     /// NDJSON stdout, so the machine output contract stays unchanged).
@@ -135,16 +136,17 @@ pub struct Core {
     /// WP-610: Json mode — upstream-shaped event lines to stdout.
     pub json_tx: Option<mpsc::UnboundedSender<(String, Option<tokio::sync::oneshot::Sender<()>>)>>,
     pub session: Arc<Session>,
-    pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
-    pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
+    pub events: Arc<Mutex<HashSet<String>>>, // ready.events (subscribed event names)
+    pub ext_tools: Arc<Mutex<Vec<Value>>>,   // ready.tools entries (pass-through schemas)
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
     /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
-    pub skills: Arc<Vec<crate::skills::Skill>>,    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
+    pub skills: Arc<Vec<crate::skills::Skill>>,
+    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
     pub log: EventLog,
-    pub fail: Arc<Mutex<Option<String>>>,               // first fatal scenario error
-    pub model: Arc<Mutex<(Value, Option<String>)>>,     // (active model, thinking level)
+    pub fail: Arc<Mutex<Option<String>>>, // first fatal scenario error
+    pub model: Arc<Mutex<(Value, Option<String>)>>, // (active model, thinking level)
     pub msg_tx: mpsc::UnboundedSender<Item>,
     pub done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Live provider driver (None = scripted fake driver per scenario run).
@@ -184,8 +186,11 @@ fn jemit(ctx: &Core, v: Value) {
 /// WP-610: Json mode — the streamed text delta as an upstream
 /// `message_update` (the `partial` snapshot is dropped, per toJsonEvent).
 fn json_delta(ctx: &Core, content_index: u32, delta: &str) {
-    jemit(ctx, json!({"type":"message_update","usage":json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}),
-        "assistantMessageEvent":{"type":"text_delta","contentIndex":content_index,"delta":delta}}));
+    jemit(
+        ctx,
+        json!({"type":"message_update","usage":json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}),
+        "assistantMessageEvent":{"type":"text_delta","contentIndex":content_index,"delta":delta}}),
+    );
 }
 
 /// True when the core may send the event: it must appear in `ready.events` and
@@ -215,9 +220,14 @@ async fn sync_tool_set(ctx: &Core) {
 /// (`fallback`); logs the decision event line either way.
 fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: &Value) -> Value {
     let data = match resp {
-        Decision::Response(r) if r.get("success") == Some(&json!(true)) => r.get("data").cloned().unwrap_or(Value::Null),
+        Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+            r.get("data").cloned().unwrap_or(Value::Null)
+        }
         Decision::Response(r) => {
-            crate::corelog::line(&format!("[core] {name} decision error: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")));
+            crate::corelog::line(&format!(
+                "[core] {name} decision error: {}",
+                r.get("error").and_then(Value::as_str).unwrap_or("?")
+            ));
             fallback.clone()
         }
         Decision::Unavailable => fallback.clone(),
@@ -442,11 +452,16 @@ pub async fn event_task(
 /// TUI mode (WP-604) does not use this path for dialogs: the TUI renders
 /// them and answers with the user's choice.
 fn ui_default(ctx: &Core, ev: &Value) {
-    let (Some(id), Some(method)) = (ev.get("id").and_then(Value::as_str), ev.get("method").and_then(Value::as_str)) else {
+    let (Some(id), Some(method)) = (
+        ev.get("id").and_then(Value::as_str),
+        ev.get("method").and_then(Value::as_str),
+    ) else {
         return;
     };
     let title = ev.get("title").and_then(Value::as_str).unwrap_or_default();
-    crate::corelog::line(&format!("[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)"));
+    crate::corelog::line(&format!(
+        "[core] extension ui '{method}' ({title}): upstream default applied (no human UI in v0)"
+    ));
     let resp = if method == "confirm" {
         json!({"type":"extension_ui_response","id":id,"confirmed":false})
     } else if matches!(method, "select" | "input" | "editor") {
@@ -457,10 +472,12 @@ fn ui_default(ctx: &Core, ev: &Value) {
     if !resp.is_null() {
         ctx.client.send(resp.clone());
     }
-    ctx.log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
+    ctx.log.emit(
+        json!({"kind":"extension_ui_request","id":id,"method":method,
         "title":ev.get("title").cloned().unwrap_or(Value::Null),
         "message":ev.get("message").cloned().unwrap_or(Value::Null),
-        "response":resp}));
+        "response":resp}),
+    );
 }
 
 /// Sidecar→core `tool_call_request` (nested `ctx.executeTool`): execute the
@@ -468,9 +485,21 @@ fn ui_default(ctx: &Core, ev: &Value) {
 /// The nested result is NOT appended to the main transcript (upstream: nested
 /// calls appear only in the parent result's nestedCalls).
 async fn nested_tool(ctx: &Core, ev: &Value) {
-    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let call_id = ev.get("toolCallId").and_then(Value::as_str).unwrap_or("nested").to_string();
-    let name = ev.get("toolName").and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = ev
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let call_id = ev
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .unwrap_or("nested")
+        .to_string();
+    let name = ev
+        .get("toolName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let input = ev.get("input").cloned().unwrap_or_else(|| json!({}));
     let data = match execute_tool_call(ctx, &call_id, &name, &input, false).await {
         Ok((trm, _)) => {
@@ -485,7 +514,9 @@ async fn nested_tool(ctx: &Core, ev: &Value) {
         }
         Err(msg) => json!({"content":[{"type":"text","text":msg}],"details":{},"isError":true}),
     };
-    ctx.client.send(json!({"id":id,"type":"response","command":"tool_call_request","success":true,"data":data}));
+    ctx.client.send(
+        json!({"id":id,"type":"response","command":"tool_call_request","success":true,"data":data}),
+    );
 }
 
 enum ToolFailure {
@@ -499,10 +530,24 @@ enum ToolFailure {
 /// `tool_call` decision (execute with the FINAL returned input) → execute
 /// (built-in locally / extension over the bridge) → `tool_result` decision.
 /// Returns (toolResult message, terminate hint).
-async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value, barrier: bool) -> Result<(Value, bool), String> {
+async fn execute_tool_call(
+    ctx: &Core,
+    call_id: &str,
+    name: &str,
+    input: &Value,
+    barrier: bool,
+) -> Result<(Value, bool), String> {
     let event = json!({"type":"tool_call","toolCallId":call_id,"toolName":name,"input":input});
     // Degraded default: no block, input unchanged.
-    let data = decision_data(ctx, ctx.client.request("tool_call", json!({"event":event})).await, "tool_call", &event, &json!({"result":Value::Null,"input":input}));
+    let data = decision_data(
+        ctx,
+        ctx.client
+            .request("tool_call", json!({"event":event}))
+            .await,
+        "tool_call",
+        &event,
+        &json!({"result":Value::Null,"input":input}),
+    );
     // The MCP extension's tool_call handler waits for the server's readiness
     // inside the decision; its `tools_changed` must be applied first. The
     // barrier is only meaningful for the agent-loop caller: event_task runs
@@ -512,34 +557,79 @@ async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value,
     if barrier {
         sync_tool_set(ctx).await;
     }
-    let blocked = data.pointer("/result/block").and_then(Value::as_bool).unwrap_or(false);
-    let final_input = data.get("input").cloned().filter(|v| v.is_object()).unwrap_or_else(|| input.clone());
+    let blocked = data
+        .pointer("/result/block")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let final_input = data
+        .get("input")
+        .cloned()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| input.clone());
     let (content, details, is_error, terminate) = if blocked {
-        let reason = data.pointer("/result/reason").and_then(Value::as_str).unwrap_or("no reason");
-        (json!([{"type":"text","text":format!("Blocked by extension: {reason}")}]), json!({}), true,
-         data.pointer("/result/terminate").and_then(Value::as_bool).unwrap_or(false))
+        let reason = data
+            .pointer("/result/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason");
+        (
+            json!([{"type":"text","text":format!("Blocked by extension: {reason}")}]),
+            json!({}),
+            true,
+            data.pointer("/result/terminate")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
     } else {
         match run_tool(ctx, call_id, name, &final_input).await {
             Ok(r) => (r.content, r.details, r.is_error, r.terminate),
-            Err(ToolFailure::Unknown(n)) => return Err(format!("model script calls unknown tool '{n}' (neither built-in nor in ready.tools)")),
-            Err(ToolFailure::Other(msg)) => (json!([{"type":"text","text":msg}]), json!({}), true, false),
+            Err(ToolFailure::Unknown(n)) => {
+                return Err(format!(
+                    "model script calls unknown tool '{n}' (neither built-in nor in ready.tools)"
+                ))
+            }
+            Err(ToolFailure::Other(msg)) => {
+                (json!([{"type":"text","text":msg}]), json!({}), true, false)
+            }
         }
     };
     ctx.log.emit(json!({"kind":"tool_execution","name":name,"input":final_input,"blocked":blocked,"result_summary":summarize(&content)}));
-    Ok(finalize_tool_result(ctx, call_id, name, &final_input, content, details, is_error, terminate).await)
+    Ok(finalize_tool_result(
+        ctx,
+        call_id,
+        name,
+        &final_input,
+        content,
+        details,
+        is_error,
+        terminate,
+    )
+    .await)
 }
 
-async fn run_tool(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Result<tools::ExecResult, ToolFailure> {
+async fn run_tool(
+    ctx: &Core,
+    call_id: &str,
+    name: &str,
+    input: &Value,
+) -> Result<tools::ExecResult, ToolFailure> {
     // Upstream precedence: an extension tool shadows the built-in of the same name.
     let ext_hit = ctx.client.state() == State::Running
-        && ctx.ext_tools.lock().unwrap().iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+        && ctx
+            .ext_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t.get("name").and_then(Value::as_str) == Some(name));
     // WP-702: MCP tool names (upstream `mcp__<server>__<tool>` scheme and the
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
     // model-script error.
     let mcp_name = name.starts_with("mcp__")
-        || matches!(name, "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource");
+        || matches!(
+            name,
+            "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+        );
     if !ext_hit && !mcp_name && tools::is_builtin(name) {
         return Ok(tools::execute(name, input).await);
     }
@@ -549,32 +639,72 @@ async fn run_tool(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Resul
     // Extension tools are dropped from the model's tool set while degraded; a
     // scripted call then records an error result instead of crossing the bridge.
     if ctx.client.state() != State::Running {
-        return Err(ToolFailure::Other(format!("extension tool '{name}' unavailable: bridge degraded")));
+        return Err(ToolFailure::Other(format!(
+            "extension tool '{name}' unavailable: bridge degraded"
+        )));
     }
-    match ctx.client.request("extension_tool_call", json!({"toolCallId":call_id,"toolName":name,"input":input})).await {
+    match ctx
+        .client
+        .request(
+            "extension_tool_call",
+            json!({"toolCallId":call_id,"toolName":name,"input":input}),
+        )
+        .await
+    {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
             let d = r.get("data").cloned().unwrap_or(Value::Null);
             Ok(tools::ExecResult {
-                content: d.get("content").cloned().filter(|v| v.is_array()).unwrap_or_else(|| json!([{"type":"text","text":"(no content)"}])),
+                content: d
+                    .get("content")
+                    .cloned()
+                    .filter(|v| v.is_array())
+                    .unwrap_or_else(|| json!([{"type":"text","text":"(no content)"}])),
                 details: d.get("details").cloned().unwrap_or(json!({})),
                 is_error: d.get("isError").and_then(Value::as_bool).unwrap_or(false),
                 terminate: d.get("terminate").and_then(Value::as_bool).unwrap_or(false),
             })
         }
-        Decision::Response(r) => Err(ToolFailure::Other(r.get("error").and_then(Value::as_str).unwrap_or("extension_tool_call failed").to_string())),
-        Decision::Unavailable => Err(ToolFailure::Other("extension_tool_call unanswered: bridge degraded".into())),
+        Decision::Response(r) => Err(ToolFailure::Other(
+            r.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("extension_tool_call failed")
+                .to_string(),
+        )),
+        Decision::Unavailable => Err(ToolFailure::Other(
+            "extension_tool_call unanswered: bridge degraded".into(),
+        )),
     }
 }
 
 /// `tool_result` decision; applies the returned mutation to the recorded
 /// result. Upstream rule: replacing `content` without `structuredContent`
 /// drops the structured content.
-async fn finalize_tool_result(ctx: &Core, call_id: &str, name: &str, input: &Value, content: Value, details: Value, is_error: bool, terminate: bool) -> (Value, bool) {
+// 8 flat args mirror the wire message fields; grouping them would fight
+// the event shape.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_tool_result(
+    ctx: &Core,
+    call_id: &str,
+    name: &str,
+    input: &Value,
+    content: Value,
+    details: Value,
+    is_error: bool,
+    terminate: bool,
+) -> (Value, bool) {
     let mut event = json!({"type":"tool_result","toolCallId":call_id,"toolName":name,"input":input,"content":content,"isError":is_error});
     if !details.is_null() {
         event["details"] = details.clone();
     }
-    let data = decision_data(ctx, ctx.client.request("tool_result", json!({"event":event.clone()})).await, "tool_result", &event, &Value::Null);
+    let data = decision_data(
+        ctx,
+        ctx.client
+            .request("tool_result", json!({"event":event.clone()}))
+            .await,
+        "tool_result",
+        &event,
+        &Value::Null,
+    );
     let mut result = json!({"role":"toolResult","toolCallId":call_id,"toolName":name,"content":content,"isError":is_error,"timestamp":now_ms()});
     if !details.is_null() {
         result["details"] = details.clone();
@@ -603,17 +733,18 @@ async fn finalize_tool_result(ctx: &Core, call_id: &str, name: &str, input: &Val
 
 /// WP-603: the per-turn streaming callback — each text chunk becomes a
 /// TUI-only `model_delta` event (never on the headless NDJSON stdout).
-fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32, rpc_skeleton: Arc<std::sync::Mutex<bool>>) -> Box<dyn FnMut(StreamDelta) + Send + 'c> {
+fn delta_emitter<'c>(
+    ctx: &'c Core,
+    turn_index: u32,
+    rpc_skeleton: Arc<std::sync::Mutex<bool>>,
+) -> Box<dyn FnMut(StreamDelta) + Send + 'c> {
     Box::new(move |ev: StreamDelta| {
-        match &ev {
-            StreamDelta::TextDelta { delta, .. } => {
-                ctx.log
-                    .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":delta}));
-                if ctx.out_mode == OutputMode::Json {
-                    json_delta(ctx, 0, delta);
-                }
+        if let StreamDelta::TextDelta { delta, .. } = &ev {
+            ctx.log
+                .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":delta}));
+            if ctx.out_mode == OutputMode::Json {
+                json_delta(ctx, 0, delta);
             }
-            _ => {}
         }
         // WP-802: Rpc mode carries the full upstream `message_update` event
         // set (text_start/delta/end, toolcall_start/delta/end); Json keeps
@@ -624,27 +755,57 @@ fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32, rpc_skeleton: Arc<std::sync
             if !*rpc_skeleton.lock().unwrap() {
                 let items: Vec<Value> = match &ev {
                     StreamDelta::TextStart { .. } => vec![json!({"type":"text","text":""})],
-                    StreamDelta::ToolCallStart { id, name, initial_args, .. } => {
-                        let args = if initial_args.is_object() { initial_args.clone() } else { json!({}) };
+                    StreamDelta::ToolCallStart {
+                        id,
+                        name,
+                        initial_args,
+                        ..
+                    } => {
+                        let args = if initial_args.is_object() {
+                            initial_args.clone()
+                        } else {
+                            json!({})
+                        };
                         vec![json!({"type":"toolCall","id":id,"name":name,"arguments":args})]
                     }
                     _ => Vec::new(),
                 };
                 let active = ctx.model.lock().unwrap().0.clone();
-                let m = rpc_assistant_message(&Value::Array(items), &active, "stop",
-                    &json!(crate::session::epoch_ms()), 0, true);
+                let m = rpc_assistant_message(
+                    &Value::Array(items),
+                    &active,
+                    "stop",
+                    &json!(crate::session::epoch_ms()),
+                    0,
+                    true,
+                );
                 jemit(ctx, json!({"type":"message_start","message":m}));
                 *rpc_skeleton.lock().unwrap() = true;
             }
             let ame = match &ev {
-                StreamDelta::TextStart { index } => json!({"type":"text_start","contentIndex":index}),
-                StreamDelta::TextDelta { index, delta } => json!({"type":"text_delta","contentIndex":index,"delta":delta}),
-                StreamDelta::TextEnd { index, content } => json!({"type":"text_end","contentIndex":index,"content":content}),
-                StreamDelta::ToolCallStart { index, id, name, .. } => json!({"type":"toolcall_start","contentIndex":index,"id":id,"toolName":name}),
-                StreamDelta::ToolCallDelta { index, delta } => json!({"type":"toolcall_delta","contentIndex":index,"delta":delta}),
-                StreamDelta::ToolCallEnd { index, tool_call } => json!({"type":"toolcall_end","contentIndex":index,"toolCall":tool_call}),
+                StreamDelta::TextStart { index } => {
+                    json!({"type":"text_start","contentIndex":index})
+                }
+                StreamDelta::TextDelta { index, delta } => {
+                    json!({"type":"text_delta","contentIndex":index,"delta":delta})
+                }
+                StreamDelta::TextEnd { index, content } => {
+                    json!({"type":"text_end","contentIndex":index,"content":content})
+                }
+                StreamDelta::ToolCallStart {
+                    index, id, name, ..
+                } => json!({"type":"toolcall_start","contentIndex":index,"id":id,"toolName":name}),
+                StreamDelta::ToolCallDelta { index, delta } => {
+                    json!({"type":"toolcall_delta","contentIndex":index,"delta":delta})
+                }
+                StreamDelta::ToolCallEnd { index, tool_call } => {
+                    json!({"type":"toolcall_end","contentIndex":index,"toolCall":tool_call})
+                }
             };
-            jemit(ctx, json!({"type":"message_update","usage":rpc_usage6(&crate::model::Usage::default()),"assistantMessageEvent":ame}));
+            jemit(
+                ctx,
+                json!({"type":"message_update","usage":rpc_usage6(&crate::model::Usage::default()),"assistantMessageEvent":ame}),
+            );
         }
     })
 }
@@ -660,19 +821,39 @@ fn rpc_usage6(u: &crate::model::Usage) -> Value {
 
 /// WP-802: upstream assistant-message wire shape (key structure matches the
 /// pinned upstream `AssistantMessage`; pi values where pi differs).
-fn rpc_assistant_message(content: &Value, active: &Value, stop_reason: &str, ts: &Value, duration_ms: u64, skeleton: bool) -> Value {
-    let usage = content.get("usage").cloned().unwrap_or(json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}));
-    let total = usage.get("input").and_then(Value::as_u64).unwrap_or(0) + usage.get("output").and_then(Value::as_u64).unwrap_or(0);
+fn rpc_assistant_message(
+    content: &Value,
+    active: &Value,
+    stop_reason: &str,
+    ts: &Value,
+    duration_ms: u64,
+    skeleton: bool,
+) -> Value {
+    let usage = content
+        .get("usage")
+        .cloned()
+        .unwrap_or(json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}));
+    let total = usage.get("input").and_then(Value::as_u64).unwrap_or(0)
+        + usage.get("output").and_then(Value::as_u64).unwrap_or(0);
     // The upstream wire tool-call items use {type,id,name,arguments}; the
     // stored compact form uses {id,input,name,type}.
     let content = match content {
-        Value::Array(items) => Value::Array(items.iter().map(|it| {
-            if it.get("type").and_then(Value::as_str) == Some("toolCall") && it.get("input").is_some() {
-                json!({"type":"toolCall","id":it.get("id").cloned().unwrap_or(Value::Null),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|it| {
+                    if it.get("type").and_then(Value::as_str) == Some("toolCall")
+                        && it.get("input").is_some()
+                    {
+                        json!({"type":"toolCall","id":it.get("id").cloned().unwrap_or(Value::Null),
                     "name":it.get("name").cloned().unwrap_or(Value::Null),
                     "arguments":it.get("input").cloned().unwrap_or(Value::Null)})
-            } else { it.clone() }
-        }).collect()),
+                    } else {
+                        it.clone()
+                    }
+                })
+                .collect(),
+        ),
         other => other.clone(),
     };
     let mut m = json!({"role":"assistant","content":content,"api":active.get("id").cloned().unwrap_or(Value::Null),
@@ -684,7 +865,11 @@ fn rpc_assistant_message(content: &Value, active: &Value, stop_reason: &str, ts:
     if !skeleton {
         // The upstream wire always carries the raw provider stop reason
         // (tool_calls -> toolUse is the only mapping pi v0 produces).
-        m["rawStopReason"] = json!(if stop_reason == "toolUse" {"tool_calls"} else {stop_reason});
+        m["rawStopReason"] = json!(if stop_reason == "toolUse" {
+            "tool_calls"
+        } else {
+            stop_reason
+        });
         m["thinkingLevel"] = json!("off");
         m["durationMs"] = json!(duration_ms);
     }
@@ -699,39 +884,51 @@ fn rpc_system_message(ctx: &Core) -> Value {
     if !ctx.skills.is_empty() {
         sections["skills"] = json!(crate::skills::format_for_prompt(&ctx.skills));
     }
-    let tools_added: Vec<Value> = merged_tool_defs(ctx).iter().map(|t| {
-        json!({"name":t.get("name").cloned().unwrap_or(Value::Null),
+    let tools_added: Vec<Value> = merged_tool_defs(ctx)
+        .iter()
+        .map(|t| {
+            json!({"name":t.get("name").cloned().unwrap_or(Value::Null),
             "description":t.get("description").cloned().unwrap_or(Value::Null),
             "parameters":t.get("parameters").cloned().unwrap_or(json!({})),
             "constrainedSampling":{"type":"json_schema","strict":"prefer"}})
-    }).collect();
+        })
+        .collect();
     json!({"role":"system","content":"","sections":sections,"timestamp":now_ms(),"toolsAdded":tools_added})
 }
 
 pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>) {
     let mut index = 0u32;
     loop {
-        let Some(item) = items.recv().await else { break };
+        let Some(item) = items.recv().await else {
+            break;
+        };
         match item {
             Item::End => break,
             Item::User(u) => {
                 index += 1;
-                ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
-                ctx.run_active.store(true, std::sync::atomic::Ordering::SeqCst);
-                let err = match run_agent(&ctx, &u).await {
-                    Ok(()) => None,
-                    Err(msg) => Some(msg),
-                };
-                ctx.run_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                ctx.log.emit(
+                    json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}),
+                );
+                ctx.run_active
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let err = run_agent(&ctx, &u).await.err();
+                ctx.run_active
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 if let Some(msg) = err {
                     crate::corelog::line(&format!("[core] agent run failed: {msg}"));
                     // WP-610: Json mode surfaces the failure in-stream (the
                     // upstream error assistant message); Text mode stays
                     // silent on stdout (the error goes to stderr + exit 1).
                     if ctx.out_mode == OutputMode::Json || ctx.out_mode == OutputMode::Rpc {
-                        jemit(&ctx, json!({"type":"message_end","message":{"role":"assistant","content":[],
-                            "stopReason":"error","errorMessage":msg,"timestamp":crate::session::now_iso()}}));
-                        jemit(&ctx, json!({"type":"agent_end","messages":[],"willRetry":false}));
+                        jemit(
+                            &ctx,
+                            json!({"type":"message_end","message":{"role":"assistant","content":[],
+                            "stopReason":"error","errorMessage":msg,"timestamp":crate::session::now_iso()}}),
+                        );
+                        jemit(
+                            &ctx,
+                            json!({"type":"agent_end","messages":[],"willRetry":false}),
+                        );
                         jemit(&ctx, json!({"type":"agent_settled","aborted":false}));
                     }
                     *ctx.fail.lock().unwrap() = Some(msg);
@@ -760,7 +957,10 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 // TUI messages alike; the fake driver is a test double).
                 Some(Box::new(FakeDriver::echo_mode(&u.compact_summary)))
             } else {
-                Some(Box::new(FakeDriver::from_steps(&u.steps, &u.compact_summary).map_err(|e| e.to_string())?))
+                Some(Box::new(
+                    FakeDriver::from_steps(&u.steps, &u.compact_summary)
+                        .map_err(|e| e.to_string())?,
+                ))
             }
         }
     };
@@ -769,10 +969,18 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     let mut text = u.text.clone();
     if subscribed(ctx, "input") {
         let event = json!({"type":"input","text":u.text,"source":u.source});
-        let data = decision_data(ctx, ctx.client.request("input", json!({"event":event.clone()})).await, "input", &event, &json!({"action":"continue"}));
+        let data = decision_data(
+            ctx,
+            ctx.client
+                .request("input", json!({"event":event.clone()}))
+                .await,
+            "input",
+            &event,
+            &json!({"action":"continue"}),
+        );
         match data.get("action").and_then(Value::as_str) {
             Some("handled") => {
-                crate::corelog::line(&format!("[core] input handled by extension; no agent turn"));
+                crate::corelog::line("[core] input handled by extension; no agent turn");
                 return Ok(());
             }
             Some("transform") => {
@@ -788,13 +996,17 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     for (mime, data) in &u.images {
         user_content.push(json!({"type":"image","mimeType":mime,"data":data}));
     }
-    let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
+    let user_msg =
+        json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
     let is_rpc = ctx.out_mode == OutputMode::Rpc;
     // WP-802: in Rpc mode the user message events follow agent_start +
     // turn_start (upstream order); other modes keep the early start.
     if !is_rpc {
-        jemit(ctx, json!({"type":"message_start","message":user_msg.clone()}));
+        jemit(
+            ctx,
+            json!({"type":"message_start","message":user_msg.clone()}),
+        );
     }
 
     // `before_agent_start`: prepend returned custom messages; a returned
@@ -818,8 +1030,15 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             "selectedTools": selected_tools,
             "sections": {},
         });
-        let req = json!({"event":event,"systemPrompt":system_prompt.clone(),"systemPromptOptions":spon});
-        let data = decision_data(ctx, ctx.client.request("before_agent_start", req.clone()).await, "before_agent_start", &req, &Value::Null);
+        let req =
+            json!({"event":event,"systemPrompt":system_prompt.clone(),"systemPromptOptions":spon});
+        let data = decision_data(
+            ctx,
+            ctx.client.request("before_agent_start", req.clone()).await,
+            "before_agent_start",
+            &req,
+            &Value::Null,
+        );
         if let Some(ms) = data.get("messages").and_then(Value::as_array) {
             custom = ms.to_vec();
         }
@@ -832,7 +1051,10 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         sync_tool_set(ctx).await;
     }
 
-    if subscribed(ctx, "agent_start") { ctx.client.fire(json!({"type":"agent_start","event":{"type":"agent_start"}})); }
+    if subscribed(ctx, "agent_start") {
+        ctx.client
+            .fire(json!({"type":"agent_start","event":{"type":"agent_start"}}));
+    }
     ctx.log.emit(json!({"kind":"agent_start"}));
     jemit(ctx, json!({"type":"agent_start"}));
     let run_start = ctx.session.transcript().len();
@@ -852,7 +1074,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             if crate::session::should_compact(context_tokens, window, reserve) {
                 let entries = ctx.session.entries();
                 if let Some(pre) = crate::session::prepare_compaction(&entries, &system_msg, keep) {
-                    run_compaction(ctx, fake_driver.as_ref(), &system_msg, &pre).await;
+                    run_compaction(ctx, fake_driver.as_deref(), &system_msg, &pre).await;
                 } else {
                     crate::corelog::line("[core] compaction threshold reached, nothing to summarize (session too small)");
                 }
@@ -864,7 +1086,15 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         let mut convo = build_conversation(ctx, &system_prompt, &custom);
         if subscribed(ctx, "context_with_system") {
             let event = json!({"type":"context_with_system","messages":convo.clone()});
-            let resp = decision_data(ctx, ctx.client.request("context_with_system", json!({"event":event.clone()})).await, "context_with_system", &event, &Value::Null);
+            let resp = decision_data(
+                ctx,
+                ctx.client
+                    .request("context_with_system", json!({"event":event.clone()}))
+                    .await,
+                "context_with_system",
+                &event,
+                &Value::Null,
+            );
             if let Some(ms) = resp.as_array() {
                 convo = ms.clone();
             }
@@ -872,8 +1102,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
         // WP-610: turn_start now precedes the model call (the upstream
         // order; the events carry the same payload).
-        if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
-        ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
+        if subscribed(ctx, "turn_start") {
+            ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}}));
+        }
+        ctx.log
+            .emit(json!({"kind":"turn_start","turnIndex":turn_index}));
         jemit(ctx, json!({"type":"turn_start"}));
         // WP-802: upstream order for the first turn — the run's initial
         // messages (system, user) stream after agent_start + turn_start.
@@ -884,18 +1117,24 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             // The wire user message uses the upstream epoch-ms timestamp.
             let user_wire = json!({"role":"user","content":user_msg.get("content").cloned().unwrap_or(Value::Null),
                 "timestamp":crate::session::epoch_ms()});
-            jemit(ctx, json!({"type":"message_start","message":user_wire.clone()}));
+            jemit(
+                ctx,
+                json!({"type":"message_start","message":user_wire.clone()}),
+            );
             jemit(ctx, json!({"type":"message_end","message":user_wire}));
         }
         // WP-610: the assistant message_start (skeleton) opens the stream
         // before the driver call — the deltas land between start and end.
         if ctx.out_mode == OutputMode::Json {
             let active = ctx.model.lock().unwrap().0.clone();
-            jemit(ctx, json!({"type":"message_start","message":{"role":"assistant",
+            jemit(
+                ctx,
+                json!({"type":"message_start","message":{"role":"assistant",
                 "content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
                 "api":active.get("id").cloned().unwrap_or(Value::Null),
                 "provider":active.get("provider").cloned().unwrap_or(Value::Null),
-                "model":active.get("id").cloned().unwrap_or(Value::Null)}}));
+                "model":active.get("id").cloned().unwrap_or(Value::Null)}}),
+            );
         }
         // WP-802: the RPC message_start lands with the first stream delta;
         // turns without deltas get it right before the message_end.
@@ -904,35 +1143,65 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
         // (the headless NDJSON contract keeps its single `model_output`).
-        let turn = model_call(ctx, fake_driver.as_ref(), &convo, delta_emitter(ctx, turn_index, rpc_skeleton.clone())).await?;
+        let turn = model_call(
+            ctx,
+            fake_driver.as_deref(),
+            &convo,
+            delta_emitter(ctx, turn_index, rpc_skeleton.clone()),
+        )
+        .await?;
 
         // Usage accounting (WP-407): per-turn session entry + cumulative
         // total; cost from the bundled registry (unknown model → 0).
         if turn.usage != crate::model::Usage::default() {
             let active = ctx.model.lock().unwrap().0.clone();
-            let p = active.get("provider").and_then(Value::as_str).unwrap_or("fake").to_string();
-            let m = active.get("id").and_then(Value::as_str).unwrap_or("fake").to_string();
-            let cost = turn
-                .usage
-                .cost_usd(crate::registry::ModelRegistry::bundled().resolve(&p, &m).map(|x| &x.cost));
+            let p = active
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("fake")
+                .to_string();
+            let m = active
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("fake")
+                .to_string();
+            let cost = turn.usage.cost_usd(
+                crate::registry::ModelRegistry::bundled()
+                    .resolve(&p, &m)
+                    .map(|x| &x.cost),
+            );
             ctx.session.set_usage(&turn.usage, cost);
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
         }
         // The fake model does not stream: message_start + message_end only.
         let assistant = assistant_message(&turn, &ctx.model.lock().unwrap().0);
-        if subscribed(ctx, "message_start") { ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}})); }
-        if subscribed(ctx, "message_end") { ctx.client.fire(json!({"type":"message_end","event":{"type":"message_end","message":assistant}})); }
+        if subscribed(ctx, "message_start") {
+            ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}}));
+        }
+        if subscribed(ctx, "message_end") {
+            ctx.client.fire(
+                json!({"type":"message_end","event":{"type":"message_end","message":assistant}}),
+            );
+        }
         // WP-610: message_end carries the final assistant message (the
         // skeleton message_start + the on_delta updates came first).
         let msg_id = ctx.session.append_message(&assistant);
         // WP-802: Rpc carries the upstream wire shape (full usage/cost,
         // thinkingLevel, durationMs); other modes keep the stored shape.
         let assistant_wire = if is_rpc {
-            let stop = assistant.get("stopReason").and_then(Value::as_str).unwrap_or("stop");
-            let wire = rpc_assistant_message(&assistant.get("content").cloned().unwrap_or(json!([])),
-                &ctx.model.lock().unwrap().0, stop, &json!(crate::session::epoch_ms()),
-                model_start.elapsed().as_millis() as u64, false);
+            let stop = assistant
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("stop");
+            let wire = rpc_assistant_message(
+                &assistant.get("content").cloned().unwrap_or(json!([])),
+                &ctx.model.lock().unwrap().0,
+                stop,
+                &json!(crate::session::epoch_ms()),
+                model_start.elapsed().as_millis() as u64,
+                false,
+            );
             // A turn without stream deltas never emitted the message_start:
             // it lands here (upstream emits a start at stream start).
             if !*rpc_skeleton.lock().unwrap() {
@@ -942,9 +1211,14 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         } else {
             assistant.clone()
         };
-        jemit(ctx, json!({"type":"message_end","message":assistant_wire.clone()}));
-        ctx.log.emit(json!({"kind":"model_output","turnIndex":turn_index,"text":turn.text.as_deref(),
-            "toolCalls":turn.tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()}));
+        jemit(
+            ctx,
+            json!({"type":"message_end","message":assistant_wire.clone()}),
+        );
+        ctx.log.emit(
+            json!({"kind":"model_output","turnIndex":turn_index,"text":turn.text.as_deref(),
+            "toolCalls":turn.tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()}),
+        );
         if ctx.out_mode == OutputMode::Text {
             if let Some(t) = &turn.text {
                 *ctx.text_final.lock().unwrap() = Some(t.clone());
@@ -958,28 +1232,40 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         let mut all_terminate = true;
         for tc in &turn.tool_calls {
             // WP-610: upstream tool_execution_start before the run (args).
-            jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
+            jemit(
+                ctx,
+                json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}),
+            );
             if is_rpc {
                 // WP-802: the execution stream opens with an empty partial
                 // result (upstream update parity for the v0 non-streaming
                 // tool surface).
-                jemit(ctx, json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
-                    "args":tc.input,"partialResult":{"content":[]}}));
+                jemit(
+                    ctx,
+                    json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
+                    "args":tc.input,"partialResult":{"content":[]}}),
+                );
             }
             let tool_start = Instant::now();
-            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {                Ok((trm, terminate)) => {
+            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {
+                Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
                     // WP-610: upstream tool_execution_end (result + isError);
                     // WP-802: Rpc carries the full result shape and the
                     // measured durationMs.
-                    let is_error = trm.get("content").and_then(Value::as_array)
+                    let is_error = trm
+                        .get("content")
+                        .and_then(Value::as_array)
                         .map(|c| c.iter().any(|x| x.get("isError") == Some(&json!(true))))
                         .unwrap_or(false);
                     let dur = tool_start.elapsed().as_millis() as u64;
                     let content = trm.get("content").cloned().unwrap_or(json!([]));
-                    let mut te = if is_rpc {
-                        jemit(ctx, json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
-                            "args":tc.input,"partialResult":{"content":content.clone(),"details":{}}}));
+                    let te = if is_rpc {
+                        jemit(
+                            ctx,
+                            json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
+                            "args":tc.input,"partialResult":{"content":content.clone(),"details":{}}}),
+                        );
                         json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
                             "result":{"content":content,
                                 "structuredContent":trm.get("details").cloned().unwrap_or(json!({}))},
@@ -1001,8 +1287,13 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                     } else {
                         trm.clone()
                     };
-                    if is_rpc { tool_result_wires.push(trm_wire.clone()); }
-                    jemit(ctx, json!({"type":"message_start","message":trm_wire.clone()}));
+                    if is_rpc {
+                        tool_result_wires.push(trm_wire.clone());
+                    }
+                    jemit(
+                        ctx,
+                        json!({"type":"message_start","message":trm_wire.clone()}),
+                    );
                     jemit(ctx, json!({"type":"message_end","message":trm_wire}));
                     tool_results.push(trm);
                     if !terminate {
@@ -1018,12 +1309,24 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 "messageEntryId":msg_id,"toolResultEntryIds":tool_result_ids,"entries":[],"continue":true,"outcome":"completed",
                 "context":{"contextEntries":[],"contextMessages":[],"llmMessages":[],"pendingMessages":[],"canContinue":false}}}));
         }
-        ctx.log.emit(json!({"kind":"turn_end","turnIndex":turn_index}));
+        ctx.log
+            .emit(json!({"kind":"turn_end","turnIndex":turn_index}));
         // WP-802: the json/rpc stream carries turn_end (upstream
         // AgentSessionEvent parity; Rpc uses the full wire shape).
-        let turn_msg = if is_rpc { assistant_wire.clone() } else { assistant.clone() };
-        let turn_results = if is_rpc { tool_result_wires.clone() } else { tool_results.clone() };
-        jemit(ctx, json!({"type":"turn_end","message":turn_msg,"toolResults":turn_results}));
+        let turn_msg = if is_rpc {
+            assistant_wire.clone()
+        } else {
+            assistant.clone()
+        };
+        let turn_results = if is_rpc {
+            tool_result_wires.clone()
+        } else {
+            tool_results.clone()
+        };
+        jemit(
+            ctx,
+            json!({"type":"turn_end","message":turn_msg,"toolResults":turn_results}),
+        );
 
         // A turn with no tool calls ends the run; `terminate` is honored only
         // when EVERY finalized result in the batch carried it (upstream rule).
@@ -1043,9 +1346,14 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     } else {
         run_messages.clone()
     };
-    if subscribed(ctx, "agent_end") { ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages.clone()}})); }
+    if subscribed(ctx, "agent_end") {
+        ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages.clone()}}));
+    }
     ctx.log.emit(json!({"kind":"agent_end"}));
-    jemit(ctx, json!({"type":"agent_end","messages":wire_messages,"willRetry":false}));
+    jemit(
+        ctx,
+        json!({"type":"agent_end","messages":wire_messages,"willRetry":false}),
+    );
     // WP-802: the client's idle gate (waitForIdle/promptAndWait) waits for
     // agent_settled after every run (Rpc only — the Json mode contract
     // ends at agent_end).
@@ -1060,7 +1368,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 /// loop (streaming deltas) and the WP-704 summary call (no-op deltas).
 async fn model_call<'a>(
     ctx: &'a Core,
-    fake_driver: Option<&'a Box<dyn ModelDriver>>,
+    fake_driver: Option<&'a dyn ModelDriver>,
     convo: &[Value],
     mut deltas: Box<dyn FnMut(crate::model::StreamDelta) + Send + 'a>,
 ) -> Result<AssistantTurn, String> {
@@ -1068,14 +1376,28 @@ async fn model_call<'a>(
     // bridge — an explicit provider selection wins over the scripted
     // fake driver and the live provider driver.
     let active = ctx.model.lock().unwrap().0.clone();
-    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
-    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let ext_model = ctx.ext_models.lock().unwrap().get(&format!("{p}/{mid}")).cloned();
+    let p = active
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mid = active
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let ext_model = ctx
+        .ext_models
+        .lock()
+        .unwrap()
+        .get(&format!("{p}/{mid}"))
+        .cloned();
     match ext_model {
         Some(model) => {
             let stream_id = uuid::Uuid::new_v4().to_string();
             let rx = ctx.client.attach_stream(&stream_id);
-            let resp = ctx.client
+            let resp = ctx
+                .client
                 .request(
                     "provider_stream",
                     json!({"streamId":stream_id,"model":model,"messages":convo,"options":{}}),
@@ -1098,16 +1420,23 @@ async fn model_call<'a>(
                                 deltas(crate::model::StreamDelta::TextStart { index: 0 });
                             }
                             text_full.push_str(delta);
-                            deltas(crate::model::StreamDelta::TextDelta { index: 0, delta: delta.to_string() });
+                            deltas(crate::model::StreamDelta::TextDelta {
+                                index: 0,
+                                delta: delta.to_string(),
+                            });
                         }
-                        let is_terminal = line.get("event")
+                        let is_terminal = line
+                            .get("event")
                             .and_then(|e| e.get("type"))
                             .and_then(Value::as_str)
                             .is_some_and(|t| t == "done" || t == "error");
                         events.push(line.get("event").cloned().unwrap_or(Value::Null));
                         if is_terminal {
                             if text_started {
-                                deltas(crate::model::StreamDelta::TextEnd { index: 0, content: text_full.clone() });
+                                deltas(crate::model::StreamDelta::TextEnd {
+                                    index: 0,
+                                    content: text_full.clone(),
+                                });
                             }
                             break;
                         }
@@ -1117,10 +1446,11 @@ async fn model_call<'a>(
                 }
                 Decision::Response(r) => {
                     ctx.client.detach_stream(&stream_id);
-                    Err(format!(
-                        "{}",
-                        r.get("error").and_then(Value::as_str).unwrap_or("provider_stream rejected")
-                    ))
+                    Err(r
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("provider_stream rejected")
+                        .to_string())
                 }
                 Decision::Unavailable => {
                     ctx.client.detach_stream(&stream_id);
@@ -1133,10 +1463,18 @@ async fn model_call<'a>(
             None => {
                 let drv = ctx.provider.lock().unwrap().clone();
                 match drv.as_ref() {
-                    Some(ProviderDriver::OpenAi(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
-                    Some(ProviderDriver::Anthropic(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
-                    Some(ProviderDriver::Google(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
-                    Some(ProviderDriver::Bedrock(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::OpenAi(d)) => {
+                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                    }
+                    Some(ProviderDriver::Anthropic(d)) => {
+                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                    }
+                    Some(ProviderDriver::Google(d)) => {
+                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                    }
+                    Some(ProviderDriver::Bedrock(d)) => {
+                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                    }
                     None => unreachable!("fake_driver is None only while a provider exists"),
                 }
             }
@@ -1153,10 +1491,24 @@ fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
         return Some(o);
     }
     let active = ctx.model.lock().unwrap().0.clone();
-    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
-    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let window = crate::registry::ModelRegistry::bundled().resolve(&p, &mid)?.context_window?;
-    Some((window, crate::session::DEFAULT_RESERVE_TOKENS, crate::session::DEFAULT_KEEP_RECENT_TOKENS))
+    let p = active
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mid = active
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let window = crate::registry::ModelRegistry::bundled()
+        .resolve(&p, &mid)?
+        .context_window?;
+    Some((
+        window,
+        crate::session::DEFAULT_RESERVE_TOKENS,
+        crate::session::DEFAULT_KEEP_RECENT_TOKENS,
+    ))
 }
 
 /// WP-704: the upstream Usage shape {input,output,cacheRead,cacheWrite} from
@@ -1169,13 +1521,23 @@ fn extract_compaction_usage(v: Option<&Value>) -> Option<crate::model::Usage> {
     else {
         return None;
     };
-    Some(crate::model::Usage { input, output, cache_read, cache_write })
+    Some(crate::model::Usage {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    })
 }
 
 /// WP-704: the `session_compact_failed` F&F event (gated on ready.events).
 /// v0: no AbortSignal exists, so `aborted` is always false; an extension
 /// cancel is reported without an `errorMessage`.
-fn fire_compact_failed(ctx: &Core, reason: &str, error_message: Option<&str>, from_extension: bool) {
+fn fire_compact_failed(
+    ctx: &Core,
+    reason: &str,
+    error_message: Option<&str>,
+    from_extension: bool,
+) {
     if !subscribed(ctx, "session_compact_failed") {
         return;
     }
@@ -1183,7 +1545,8 @@ fn fire_compact_failed(ctx: &Core, reason: &str, error_message: Option<&str>, fr
     if let Some(e) = error_message {
         event["errorMessage"] = json!(e);
     }
-    ctx.client.fire(json!({"type":"session_compact_failed","event":event}));
+    ctx.client
+        .fire(json!({"type":"session_compact_failed","event":event}));
 }
 
 /// WP-704: one compaction attempt. `session_before_compact` decision →
@@ -1195,7 +1558,7 @@ fn fire_compact_failed(ctx: &Core, reason: &str, error_message: Option<&str>, fr
 /// drivers do not surface stopReason, so a length stop is not detectable).
 async fn run_compaction(
     ctx: &Core,
-    fake_driver: Option<&Box<dyn ModelDriver>>,
+    fake_driver: Option<&dyn ModelDriver>,
     system_msg: &Value,
     pre: &crate::session::CompactionPreparation,
 ) {
@@ -1213,7 +1576,15 @@ async fn run_compaction(
                 "preparation":{"reason":reason,"willRetry":false},
                 "branchEntries":pre.messages_to_summarize});
             let req = json!({"event":event});
-            let data = decision_data(ctx, ctx.client.request("session_before_compact", req.clone()).await, "session_before_compact", &req, &Value::Null);
+            let data = decision_data(
+                ctx,
+                ctx.client
+                    .request("session_before_compact", req.clone())
+                    .await,
+                "session_before_compact",
+                &req,
+                &Value::Null,
+            );
             if data.get("cancel").and_then(Value::as_bool) == Some(true) {
                 // Abort compaction; the turn proceeds uncompacted.
                 crate::corelog::line("[core] compaction cancelled by session_before_compact");
@@ -1237,7 +1608,8 @@ async fn run_compaction(
                         usage = extract_compaction_usage(c.get("usage"));
                     }
                     None => {
-                        let err = "session_before_compact returned a compaction without a summary string";
+                        let err =
+                            "session_before_compact returned a compaction without a summary string";
                         crate::corelog::line(&format!("[core] {err}"));
                         ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":err,"fromExtension":true}));
                         fire_compact_failed(ctx, reason, Some(err), true);
@@ -1263,7 +1635,9 @@ async fn run_compaction(
                     crate::session::serialize_conversation(&pre.messages_to_summarize)
                 );
                 if let Some(prev) = &pre.previous_summary {
-                    prompt_text.push_str(&format!("<previous-summary>\n{prev}\n</previous-summary>\n\n"));
+                    prompt_text.push_str(&format!(
+                        "<previous-summary>\n{prev}\n</previous-summary>\n\n"
+                    ));
                 }
                 prompt_text.push_str(base_prompt);
                 let convo = vec![
@@ -1279,7 +1653,8 @@ async fn run_compaction(
                             fire_compact_failed(ctx, reason, Some(err), false);
                             return;
                         }
-                        usage = (turn.usage != crate::model::Usage::default()).then_some(turn.usage);
+                        usage =
+                            (turn.usage != crate::model::Usage::default()).then_some(turn.usage);
                         turn.text.unwrap_or_default()
                     }
                     Err(msg) => {
@@ -1293,17 +1668,24 @@ async fn run_compaction(
         };
 
         // Persist the upstream-shaped entry, then the events.
-        let entry_id = ctx
-            .session
-            .append_compaction(&summary, &first_kept, tokens_before, usage.as_ref(), from_hook, Some(system_msg));
+        let entry_id = ctx.session.append_compaction(
+            &summary,
+            &first_kept,
+            tokens_before,
+            usage.as_ref(),
+            from_hook,
+            Some(system_msg),
+        );
         let file_entry = ctx
             .session
             .entries()
             .into_iter()
             .find(|e| e.get("id").and_then(Value::as_str) == Some(entry_id.as_str()))
             .unwrap_or(Value::Null);
-        ctx.log.emit(json!({"kind":"compaction","summary":summary,"firstKeptEntryId":first_kept,
-            "tokensBefore":tokens_before,"fromExtension":from_hook,"reason":reason}));
+        ctx.log.emit(
+            json!({"kind":"compaction","summary":summary,"firstKeptEntryId":first_kept,
+            "tokensBefore":tokens_before,"fromExtension":from_hook,"reason":reason}),
+        );
         if subscribed(ctx, "session_compact") {
             ctx.client.fire(json!({"type":"session_compact","event":{"type":"session_compact",
                 "compactionEntry":file_entry,"fromExtension":from_hook,"reason":reason,"willRetry":false}}));
@@ -1313,10 +1695,6 @@ async fn run_compaction(
         ));
     }
 }
-
-/// Full transcript for `context_with_system`: leading system message (prompt +
-/// tool declarations), custom messages from before_agent_start, then the
-/// session transcript. Degraded: extension tools are dropped from the set.
 
 /// Full transcript for `context_with_system`: leading system message (prompt +
 /// tool declarations), custom messages from before_agent_start, then the
@@ -1334,7 +1712,9 @@ fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
 }
 fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<Value> {
     let tool_defs = merged_tool_defs(ctx);
-    let mut v = vec![json!({"role":"system","content":system_prompt,"toolsAdded":tool_defs,"timestamp":now_ms()})];
+    let mut v = vec![
+        json!({"role":"system","content":system_prompt,"toolsAdded":tool_defs,"timestamp":now_ms()}),
+    ];
     v.extend(custom.iter().cloned());
     v.extend(ctx.session.transcript().iter().cloned());
     v
@@ -1368,11 +1748,16 @@ pub(crate) fn parse_providers(payload: &Value) -> std::collections::BTreeMap<Str
     };
     for entry in providers {
         // Legacy name-only entries are not routable.
-        let (Some(name), Some(models)) = (entry.get("name").and_then(Value::as_str), entry.get("models").and_then(Value::as_array)) else {
+        let (Some(name), Some(models)) = (
+            entry.get("name").and_then(Value::as_str),
+            entry.get("models").and_then(Value::as_array),
+        ) else {
             continue;
         };
         for m in models {
-            let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = m.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             let provider = m.get("provider").and_then(Value::as_str).unwrap_or(name);
             let mut model = m.clone();
             model["provider"] = Value::String(provider.to_string());
@@ -1384,7 +1769,9 @@ pub(crate) fn parse_providers(payload: &Value) -> std::collections::BTreeMap<Str
 
 /// WP-701: token usage from an upstream `done` message (camelCase wire).
 fn usage_from_message(v: Option<&Value>) -> crate::model::Usage {
-    let Some(u) = v else { return crate::model::Usage::default() };
+    let Some(u) = v else {
+        return crate::model::Usage::default();
+    };
     crate::model::Usage {
         input: u.get("input").and_then(Value::as_u64).unwrap_or(0),
         output: u.get("output").and_then(Value::as_u64).unwrap_or(0),
@@ -1399,19 +1786,29 @@ fn usage_from_message(v: Option<&Value>) -> crate::model::Usage {
 /// `toolcall_end` state is the fallback when the done message carries no
 /// content. `error` is terminal; a run without a terminal event is an error.
 pub(crate) fn provider_events_to_turn(events: &[Value]) -> Result<AssistantTurn, String> {
-    use crate::model::{ToolCallSpec, Usage};
+    use crate::model::ToolCallSpec;
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCallSpec> = Vec::new();
     for ev in events {
         match ev.get("type").and_then(Value::as_str) {
             Some("text_delta") => {
-                if let Some(d) = ev.get("delta").and_then(Value::as_str) { text.push_str(d); }
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) {
+                    text.push_str(d);
+                }
             }
             Some("toolcall_end") => {
                 if let Some(tc) = ev.get("toolCall") {
                     tool_calls.push(ToolCallSpec {
-                        id: tc.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                        name: tc.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        id: tc
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: tc
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                         input: tc.get("arguments").cloned().unwrap_or(Value::Null),
                     });
                 }
@@ -1429,22 +1826,42 @@ pub(crate) fn provider_events_to_turn(events: &[Value]) -> Result<AssistantTurn,
                     for part in content.unwrap() {
                         match part.get("type").and_then(Value::as_str) {
                             Some("text") => {
-                                if let Some(t) = part.get("text").and_then(Value::as_str) { final_text.push_str(t); }
+                                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                    final_text.push_str(t);
+                                }
                             }
                             Some("toolCall") => final_tools.push(ToolCallSpec {
-                                id: part.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                                name: part.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                id: part
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                name: part
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
                                 input: part.get("arguments").cloned().unwrap_or(Value::Null),
                             }),
                             _ => {}
                         }
                     }
-                    return Ok(AssistantTurn { text: Some(final_text), tool_calls: final_tools, usage });
+                    return Ok(AssistantTurn {
+                        text: Some(final_text),
+                        tool_calls: final_tools,
+                        usage,
+                    });
                 }
-                return Ok(AssistantTurn { text: Some(text), tool_calls, usage });
+                return Ok(AssistantTurn {
+                    text: Some(text),
+                    tool_calls,
+                    usage,
+                });
             }
             Some("error") => {
-                let msg = ev.pointer("/error/errorMessage").and_then(Value::as_str)
+                let msg = ev
+                    .pointer("/error/errorMessage")
+                    .and_then(Value::as_str)
                     .unwrap_or("provider stream error");
                 return Err(msg.to_string());
             }
@@ -1454,14 +1871,38 @@ pub(crate) fn provider_events_to_turn(events: &[Value]) -> Result<AssistantTurn,
     Err("provider stream ended without a terminal event".into())
 }
 
+fn summarize(content: &Value) -> String {
+    let s = content
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let s = s.trim().to_string();
+    if s.chars().count() > 160 {
+        let mut out: String = s.chars().take(160).collect();
+        out.push('…');
+        out
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod provider_stream_tests {
     use super::{parse_providers, provider_events_to_turn, usage_from_message};
     use crate::model::Usage;
     use serde_json::json;
 
-    fn done_event(content: serde_json::Value, usage: Option<serde_json::Value>) -> serde_json::Value {
-        let mut message = json!({"role":"assistant","content":content,"stopReason":"stop","timestamp":1});
+    fn done_event(
+        content: serde_json::Value,
+        usage: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut message =
+            json!({"role":"assistant","content":content,"stopReason":"stop","timestamp":1});
         if let Some(u) = usage {
             message["usage"] = u;
         }
@@ -1486,20 +1927,33 @@ mod provider_stream_tests {
         assert_eq!(turn.tool_calls[0].id, "tc_1");
         assert_eq!(turn.tool_calls[0].name, "bash");
         assert_eq!(turn.tool_calls[0].input, json!({"command":"ls"}));
-        assert_eq!(turn.usage, Usage { input: 7, output: 11, cache_read: 3, cache_write: 4 });
+        assert_eq!(
+            turn.usage,
+            Usage {
+                input: 7,
+                output: 11,
+                cache_read: 3,
+                cache_write: 4
+            }
+        );
     }
 
     #[test]
     fn terminal_error_event_yields_the_error_message() {
-        let events = vec![json!({"type":"start","partial":{}}),
-            json!({"type":"error","reason":"error","error":{"role":"assistant","stopReason":"error","errorMessage":"boom from fake provider"}})];
+        let events = vec![
+            json!({"type":"start","partial":{}}),
+            json!({"type":"error","reason":"error","error":{"role":"assistant","stopReason":"error","errorMessage":"boom from fake provider"}}),
+        ];
         let err = provider_events_to_turn(&events).unwrap_err();
         assert_eq!(err, "boom from fake provider");
     }
 
     #[test]
     fn stream_without_terminal_event_is_an_error() {
-        let events = vec![json!({"type":"start","partial":{}}), json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":{}})];
+        let events = vec![
+            json!({"type":"start","partial":{}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":{}}),
+        ];
         let err = provider_events_to_turn(&events).unwrap_err();
         assert!(err.contains("terminal"), "{err}");
     }
@@ -1531,7 +1985,12 @@ mod provider_stream_tests {
         ]});
         let map = parse_providers(&payload);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("faketest/faketest/echo-1").expect("first model").get("api"), Some(&json!("faketest-api")));
+        assert_eq!(
+            map.get("faketest/faketest/echo-1")
+                .expect("first model")
+                .get("api"),
+            Some(&json!("faketest-api"))
+        );
         // A model entry without `provider` inherits the registered name.
         let m = map.get("other/other/m-1").expect("second model");
         assert_eq!(m.get("provider"), Some(&json!("other")));
@@ -1542,22 +2001,18 @@ mod provider_stream_tests {
 
     #[test]
     fn usage_from_message_maps_camel_case_fields() {
-        let u = usage_from_message(Some(&json!({"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10})));
-        assert_eq!(u, Usage { input: 1, output: 2, cache_read: 3, cache_write: 4 });
+        let u = usage_from_message(Some(
+            &json!({"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10}),
+        ));
+        assert_eq!(
+            u,
+            Usage {
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4
+            }
+        );
         assert_eq!(usage_from_message(None), Usage::default());
-    }
-}
-
-fn summarize(content: &Value) -> String {
-    let s = content.as_array()
-        .map(|a| a.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(" "))
-        .unwrap_or_default();
-    let s = s.trim().to_string();
-    if s.chars().count() > 160 {
-        let mut out: String = s.chars().take(160).collect();
-        out.push('…');
-        out
-    } else {
-        s
     }
 }

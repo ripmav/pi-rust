@@ -65,7 +65,12 @@ pub enum StreamDelta {
     /// Text block finished; `content` is the full block.
     TextEnd { index: u32, content: String },
     /// A tool call started (id + name known).
-    ToolCallStart { index: u32, id: String, name: String, initial_args: Value },
+    ToolCallStart {
+        index: u32,
+        id: String,
+        name: String,
+        initial_args: Value,
+    },
     /// Incremental tool-call argument JSON.
     ToolCallDelta { index: u32, delta: String },
     /// A tool call finished; `tool_call` is the upstream ToolCall shape
@@ -108,26 +113,49 @@ impl FakeDriver {
         let mut seq = 0;
         for s in steps {
             if let Some(tc) = s.get("tool_call") {
-                let name = tc.get("name").and_then(Value::as_str).context("tool_call step needs a string `name`")?;
+                let name = tc
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .context("tool_call step needs a string `name`")?;
                 let input = tc.get("input").cloned().unwrap_or_else(|| json!({}));
                 if !input.is_object() {
                     bail!("tool_call step `input` must be an object");
                 }
                 seq += 1;
-                cur.push(ToolCallSpec { id: format!("tc_{seq}"), name: name.to_string(), input });
+                cur.push(ToolCallSpec {
+                    id: format!("tc_{seq}"),
+                    name: name.to_string(),
+                    input,
+                });
             } else if let Some(text) = s.get("text").and_then(Value::as_str) {
                 if !cur.is_empty() {
-                    turns.push(AssistantTurn { text: None, tool_calls: std::mem::take(&mut cur), usage: Usage::default() });
+                    turns.push(AssistantTurn {
+                        text: None,
+                        tool_calls: std::mem::take(&mut cur),
+                        usage: Usage::default(),
+                    });
                 }
-                turns.push(AssistantTurn { text: Some(text.to_string()), tool_calls: Vec::new(), usage: Usage::default() });
+                turns.push(AssistantTurn {
+                    text: Some(text.to_string()),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                });
             } else {
                 bail!("model_script step must be {{\"text\": \"...\"}} or {{\"tool_call\": {{\"name\", \"input\"}}}}");
             }
         }
         if !cur.is_empty() {
-            turns.push(AssistantTurn { text: None, tool_calls: cur, usage: Usage::default() });
+            turns.push(AssistantTurn {
+                text: None,
+                tool_calls: cur,
+                usage: Usage::default(),
+            });
         }
-        Ok(Self { turns: Mutex::new(VecDeque::from(turns)), echo: false, compact_summary: compact_summary.to_string() })
+        Ok(Self {
+            turns: Mutex::new(VecDeque::from(turns)),
+            echo: false,
+            compact_summary: compact_summary.to_string(),
+        })
     }
 }
 
@@ -135,7 +163,11 @@ impl FakeDriver {
     /// Prompt-mode driver: no script; answers the last user message with a
     /// deterministic `echo: <text>` turn, then reports exhaustion.
     pub fn echo_mode(compact_summary: &str) -> Self {
-        Self { turns: Mutex::new(VecDeque::new()), echo: true, compact_summary: compact_summary.to_string() }
+        Self {
+            turns: Mutex::new(VecDeque::new()),
+            echo: true,
+            compact_summary: compact_summary.to_string(),
+        }
     }
 }
 
@@ -152,26 +184,49 @@ impl ModelDriver for FakeDriver {
             // consuming a scripted turn (turn slots stay stable).
             let is_summary_call = convo.iter().any(|m| {
                 m.get("role").and_then(Value::as_str) == Some("system")
-                    && m.get("content").and_then(Value::as_str)
+                    && m.get("content")
+                        .and_then(Value::as_str)
                         .is_some_and(|s| s.contains(SUMMARY_SYSTEM_MARKER))
             });
             if is_summary_call {
                 let text = self.compact_summary.clone();
-                on_delta(StreamDelta::TextDelta { index: 0, delta: text.clone() });
-                return Ok(AssistantTurn { text: Some(text), tool_calls: Vec::new(), usage: Usage::default() });
+                on_delta(StreamDelta::TextDelta {
+                    index: 0,
+                    delta: text.clone(),
+                });
+                return Ok(AssistantTurn {
+                    text: Some(text),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                });
             }
             if let Some(t) = self.turns.lock().unwrap().pop_front() {
                 if let Some(text) = &t.text {
-                    on_delta(StreamDelta::TextDelta { index: 0, delta: text.to_string() }); // single delta: the fake does not stream
+                    on_delta(StreamDelta::TextDelta {
+                        index: 0,
+                        delta: text.to_string(),
+                    }); // single delta: the fake does not stream
                 }
                 return Ok(t);
             }
             if self.echo {
-                let last_user = convo.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
-                let text = last_user.map(crate::session::extract_text).unwrap_or_default();
+                let last_user = convo
+                    .iter()
+                    .rev()
+                    .find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
+                let text = last_user
+                    .map(crate::session::extract_text)
+                    .unwrap_or_default();
                 let reply = format!("echo: {text}");
-                on_delta(StreamDelta::TextDelta { index: 0, delta: reply.clone() });
-                return Ok(AssistantTurn { text: Some(reply), tool_calls: Vec::new(), usage: Usage::default() });
+                on_delta(StreamDelta::TextDelta {
+                    index: 0,
+                    delta: reply.clone(),
+                });
+                return Ok(AssistantTurn {
+                    text: Some(reply),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                });
             }
             anyhow::bail!("model script exhausted before the run could finish")
         })
@@ -194,16 +249,22 @@ mod wp704_tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let driver = FakeDriver::from_steps(&[json!({"text": "scripted"})], "MY SUMMARY").unwrap();
         // The summary call answers with the scenario's compact_summary.
-        let t1 = rt.block_on(driver.complete(&summary_convo(), Box::new(|_| {}))).unwrap();
+        let t1 = rt
+            .block_on(driver.complete(&summary_convo(), Box::new(|_| {})))
+            .unwrap();
         assert_eq!(t1.text.as_deref(), Some("MY SUMMARY"));
         assert!(t1.tool_calls.is_empty(), "plain text, no tool calls");
         // The script is intact: the next ordinary call pops the scripted turn.
         let normal = vec![json!({"role":"user","content":[{"type":"text","text":"hi"}]})];
-        let t2 = rt.block_on(driver.complete(&normal, Box::new(|_| {}))).unwrap();
+        let t2 = rt
+            .block_on(driver.complete(&normal, Box::new(|_| {})))
+            .unwrap();
         assert_eq!(t2.text.as_deref(), Some("scripted"));
         // echo mode: the configured summary (cli passes the default marker).
         let echo = FakeDriver::echo_mode(DEFAULT_COMPACT_SUMMARY);
-        let t3 = rt.block_on(echo.complete(&summary_convo(), Box::new(|_| {}))).unwrap();
+        let t3 = rt
+            .block_on(echo.complete(&summary_convo(), Box::new(|_| {})))
+            .unwrap();
         assert_eq!(t3.text.as_deref(), Some(DEFAULT_COMPACT_SUMMARY));
     }
 }

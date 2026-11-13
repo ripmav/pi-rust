@@ -24,44 +24,55 @@ struct RunSpec {
 /// MIME detection by magic bytes (png/jpeg/gif/webp — the formats the
 /// upstream `@file` image path accepts).
 fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
-	if bytes.len() > 7 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-		Some("image/png")
-	} else if bytes.len() > 2 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-		Some("image/jpeg")
-	} else if bytes.len() > 3 && &bytes[..4] == b"GIF8" {
-		Some("image/gif")
-	} else if bytes.len() > 11 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-		Some("image/webp")
-	} else {
-		None
-	}
+    if bytes.len() > 7 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.len() > 2 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.len() > 3 && &bytes[..4] == b"GIF8" {
+        Some("image/gif")
+    } else if bytes.len() > 11 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 fn b64(data: &[u8]) -> String {
-	const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	let mut out = String::new();
-	for chunk in data.chunks(3) {
-		let b0 = chunk[0];
-		let b1 = *chunk.get(1).unwrap_or(&0);
-		let b2 = *chunk.get(2).unwrap_or(&0);
-		out.push(T[(b0 >> 2) as usize] as char);
-		out.push(T[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-		out.push(if chunk.len() > 1 { T[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
-		out.push(if chunk.len() > 2 { T[(b2 & 63) as usize] as char } else { '=' });
-	}
-	out
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(b2 & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Read + validate an `--image` attachment: typed errors for missing files
 /// and unsupported formats (S8).
 fn read_image_attachment(path: &Path) -> Result<(String, String)> {
-	let bytes = std::fs::read(path)
-		.with_context(|| format!("--image: cannot read file: {}", path.display()))?;
-	let mime = match detect_image_mime(&bytes) {
-		Some(m) => m,
-		None => bail!("--image: not a supported image format (png, jpeg, gif, webp): {}", path.display()),
-	};
-	Ok((mime.to_string(), b64(&bytes)))
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("--image: cannot read file: {}", path.display()))?;
+    let mime = match detect_image_mime(&bytes) {
+        Some(m) => m,
+        None => bail!(
+            "--image: not a supported image format (png, jpeg, gif, webp): {}",
+            path.display()
+        ),
+    };
+    Ok((mime.to_string(), b64(&bytes)))
 }
 
 /// Scenario JSON: `user_messages: [string]` plus per-message `model_scripts`
@@ -72,13 +83,22 @@ fn read_image_attachment(path: &Path) -> Result<(String, String)> {
 /// drives the auto trigger) and `compact_summary` (the fake's summary text).
 /// Returns (runs, the compact override).
 fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> {
-    let user_messages = v.get("user_messages").and_then(Value::as_array).context("scenario needs `user_messages: [string]`")?;
-    let scripts = v.get("model_scripts").and_then(Value::as_array).cloned().unwrap_or_default();
+    let user_messages = v
+        .get("user_messages")
+        .and_then(Value::as_array)
+        .context("scenario needs `user_messages: [string]`")?;
+    let scripts = v
+        .get("model_scripts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let compact = match v.get("compact") {
         None => None,
         Some(c) => {
             let field = |k: &str| -> Result<u64> {
-                c.get(k).and_then(Value::as_u64).with_context(|| format!("scenario compact.{k} must be a JSON number"))
+                c.get(k)
+                    .and_then(Value::as_u64)
+                    .with_context(|| format!("scenario compact.{k} must be a JSON number"))
             };
             Some((field("window")?, field("reserve")?, field("keep")?))
         }
@@ -90,11 +110,25 @@ fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> 
         .to_string();
     let mut runs = Vec::new();
     for (i, m) in user_messages.iter().enumerate() {
-        let text = m.as_str().with_context(|| format!("user_messages[{i}] must be a string"))?.to_string();
-        let steps = scripts.get(i).and_then(Value::as_array).cloned().unwrap_or_default();
-        runs.push(RunSpec { text, steps, images: Vec::new(), compact_summary: compact_summary.clone() });
+        let text = m
+            .as_str()
+            .with_context(|| format!("user_messages[{i}] must be a string"))?
+            .to_string();
+        let steps = scripts
+            .get(i)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        runs.push(RunSpec {
+            text,
+            steps,
+            images: Vec::new(),
+            compact_summary: compact_summary.clone(),
+        });
     }
-    if runs.is_empty() { bail!("scenario needs at least one user message"); }
+    if runs.is_empty() {
+        bail!("scenario needs at least one user message");
+    }
     Ok((runs, compact))
 }
 
@@ -122,7 +156,10 @@ fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
             }
         }
     }
-    bail!("sidecar/index.mjs not found from {} (set PI_RUST_SIDECAR)", cwd.display())
+    bail!(
+        "sidecar/index.mjs not found from {} (set PI_RUST_SIDECAR)",
+        cwd.display()
+    )
 }
 
 /// Non-interactive scenario runner (no REPL in v0).
@@ -211,9 +248,15 @@ pub async fn run() -> Result<i32> {
                 prompt.is_some() || scenario_path.is_some(),
                 "{m:?} mode requires --prompt <text> or --scenario <file>"
             );
-            anyhow::ensure!(!list_sessions, "print/json mode cannot be combined with --list-sessions");
+            anyhow::ensure!(
+                !list_sessions,
+                "print/json mode cannot be combined with --list-sessions"
+            );
         } else {
-            anyhow::ensure!(prompt.is_none() && scenario_path.is_none(), "rpc mode takes prompts over stdin (no --prompt/--scenario)");
+            anyhow::ensure!(
+                prompt.is_none() && scenario_path.is_none(),
+                "rpc mode takes prompts over stdin (no --prompt/--scenario)"
+            );
         }
     }
 
@@ -225,10 +268,17 @@ pub async fn run() -> Result<i32> {
     let agent_dir = if isolated {
         std::env::temp_dir().join(format!("pi-rust-agent-{}", uuid::Uuid::new_v4()))
     } else {
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-        crate::config::resolve_agent_dir(agent_dir.as_deref(), std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(), &home)
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        crate::config::resolve_agent_dir(
+            agent_dir.as_deref(),
+            std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
+            &home,
+        )
     };
-    std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+    std::fs::create_dir_all(&agent_dir)
+        .with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
 
     // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
     // skills are skipped with a core-log warning (upstream diagnostics).
@@ -256,16 +306,25 @@ pub async fn run() -> Result<i32> {
 
     let (runs, compact_override) = match (&scenario_path, &prompt) {
         (Some(p), None) => {
-            let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            let raw =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
         }
-        (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
-        (None, Some(text)) => (vec![RunSpec {
-            text: text.clone(),
-            steps: vec![],
-            images: image_paths.iter().map(|p| read_image_attachment(p)).collect::<Result<_>>()?,
-            compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
-        }], None),
+        (Some(_), Some(_)) => {
+            unreachable!("checked above: scenario + prompt/template are exclusive")
+        }
+        (None, Some(text)) => (
+            vec![RunSpec {
+                text: text.clone(),
+                steps: vec![],
+                images: image_paths
+                    .iter()
+                    .map(|p| read_image_attachment(p))
+                    .collect::<Result<_>>()?,
+                compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+            }],
+            None,
+        ),
         (None, None) => {
             if out_mode == Some(crate::agent::OutputMode::Rpc) {
                 (Vec::new(), None) // rpc: prompts arrive over stdin
@@ -282,21 +341,26 @@ pub async fn run() -> Result<i32> {
     // WP-801: /skill:<name> [args] in a positional prompt expands core-side
     // (upstream _expandSkillCommand runs in all modes); unknown skills pass
     // through unchanged.
-    let runs: Vec<RunSpec> = runs.into_iter().map(|mut r| {
-        if let Some(rest) = r.text.strip_prefix("/skill:") {
-            let (name, args) = match rest.find(char::is_whitespace) {
-                Some(i) => (rest[..i].to_string(), rest[i..].trim().to_string()),
-                None => (rest.to_string(), String::new()),
-            };
-            if let Some(sk) = skills.iter().find(|s| s.name == name) {
-                match crate::skills::expand_skill(sk, &args) {
-                    Ok(e) => r.text = e,
-                    Err(e) => crate::corelog::line(&format!("[core] skill expansion failed for {name}: {e}")),
+    let runs: Vec<RunSpec> = runs
+        .into_iter()
+        .map(|mut r| {
+            if let Some(rest) = r.text.strip_prefix("/skill:") {
+                let (name, args) = match rest.find(char::is_whitespace) {
+                    Some(i) => (rest[..i].to_string(), rest[i..].trim().to_string()),
+                    None => (rest.to_string(), String::new()),
+                };
+                if let Some(sk) = skills.iter().find(|s| s.name == name) {
+                    match crate::skills::expand_skill(sk, &args) {
+                        Ok(e) => r.text = e,
+                        Err(e) => crate::corelog::line(&format!(
+                            "[core] skill expansion failed for {name}: {e}"
+                        )),
+                    }
                 }
             }
-        }
-        r
-    }).collect();
+            r
+        })
+        .collect();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
@@ -313,9 +377,13 @@ pub async fn run() -> Result<i32> {
 
     let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
     // WP-702/702c: agent-dir MCP server config (absent file = no servers).
-    let mcp_config = crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
-    let (provider_name, model_id) =
-        crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
+    let mcp_config =
+        crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
+    let (provider_name, model_id) = crate::config::resolve_provider_flags(
+        provider_flag.as_deref(),
+        model_id.as_deref(),
+        &agent_config,
+    )?;
     // S3: provider credentials come from env only; the fake driver needs none.
     // WP-701: a name unknown to the bundled registry may be an
     // extension-registered provider — no driver is built at startup; the
@@ -337,20 +405,32 @@ pub async fn run() -> Result<i32> {
     };
     let model_label = format!(
         "{}/{}",
-        initial_model.get("provider").and_then(Value::as_str).unwrap_or("?"),
-        initial_model.get("id").and_then(Value::as_str).unwrap_or("?")
+        initial_model
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        initial_model
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
     );
 
     // S8: --image requires an image-capable registry model (openai/anthropic
     // drivers emit the wire parts; other drivers drop images).
     if !image_paths.is_empty() {
         if fake_mode {
-            anyhow::bail!("--image requires a provider model (the fake driver has no image support)");
+            anyhow::bail!(
+                "--image requires a provider model (the fake driver has no image support)"
+            );
         }
         let model_str = model_id.as_deref().unwrap_or_default();
         let m = crate::registry::ModelRegistry::bundled()
             .resolve(&provider_name, model_str)
-            .ok_or_else(|| anyhow::anyhow!("--image: model {provider_name}/{model_str} not in the bundled registry"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--image: model {provider_name}/{model_str} not in the bundled registry"
+                )
+            })?;
         if !m.input.iter().any(|i| i == "image") {
             anyhow::bail!("--image: model {provider_name}/{model_str} does not accept image input (input: {})", m.input.join(", "));
         }
@@ -362,7 +442,9 @@ pub async fn run() -> Result<i32> {
                 || provider_name == "azure"
                 || provider_name.starts_with("cloudflare");
             if !is_openai_wire {
-                anyhow::bail!("--image: provider {provider_name} does not support image input in v0");
+                anyhow::bail!(
+                    "--image: provider {provider_name} does not support image input in v0"
+                );
             }
         }
     }
@@ -377,25 +459,34 @@ pub async fn run() -> Result<i32> {
         (Some(r), _) => (resolve_session_ref(&agent_dir, r)?, true, None),
         (None, Some(r)) => {
             let old = resolve_session_ref(&agent_dir, r)?;
-            let dir = old.parent().context("forked session file has no parent dir")?;
+            let dir = old
+                .parent()
+                .context("forked session file has no parent dir")?;
             let ts = crate::session::now_iso().replace(":", "-");
-            (dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4())), false, Some(old))
+            (
+                dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4())),
+                false,
+                Some(old),
+            )
         }
         _ => {
             let sf = session_file.unwrap_or_else(|| {
-                let dir = agent_dir.join("sessions").join(crate::session::encode_cwd(&cwd.to_string_lossy()));
+                let dir = agent_dir
+                    .join("sessions")
+                    .join(crate::session::encode_cwd(&cwd.to_string_lossy()));
                 std::fs::create_dir_all(&dir).ok();
                 let ts = crate::session::now_iso().replace(":", "-");
                 dir.join(format!("{}_{}.jsonl", ts, uuid::Uuid::new_v4()))
             });
             let exists = sf.exists();
             (sf, exists, None)
-        },
+        }
     };
     let session = Arc::new(match fork_from {
         Some(old) => Session::fork(&old, &session_file).context("forking session")?,
         _ if existing => Session::load(&session_file).context("resuming session")?,
-        _ => Session::create(session_file.clone(), &cwd.to_string_lossy()).context("creating session file")?,
+        _ => Session::create(session_file.clone(), &cwd.to_string_lossy())
+            .context("creating session file")?,
     });
 
     let sidecar = find_sidecar(&cwd)?;
@@ -412,7 +503,10 @@ pub async fn run() -> Result<i32> {
     sidecar_args.push(agent_dir.to_string_lossy().into());
 
     // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
-    let tui_mode = scenario_path.is_none() && prompt.is_none() && !list_sessions && out_mode != Some(crate::agent::OutputMode::Rpc);
+    let tui_mode = scenario_path.is_none()
+        && prompt.is_none()
+        && !list_sessions
+        && out_mode != Some(crate::agent::OutputMode::Rpc);
 
     // TUI mode owns the terminal: the sidecar's stderr and the core's own
     // diagnostic lines must not corrupt the screen — both go to a log file
@@ -433,11 +527,19 @@ pub async fn run() -> Result<i32> {
     } else {
         Stdio::inherit() // sidecar logs pass through to the core's stderr
     };
-    crate::corelog::line(&format!("[core] spawning sidecar: {node} {}", sidecar.display()));
+    crate::corelog::line(&format!(
+        "[core] spawning sidecar: {node} {}",
+        sidecar.display()
+    ));
 
     // WP-610: the NDJSON-on-stdout contract applies to the default headless
     // mode only; --print/--mode json keep stdout clean (their own streams).
-    let log = EventLog::start(!tui_mode && out_mode != Some(crate::agent::OutputMode::Text) && out_mode != Some(crate::agent::OutputMode::Json) && out_mode != Some(crate::agent::OutputMode::Rpc));
+    let log = EventLog::start(
+        !tui_mode
+            && out_mode != Some(crate::agent::OutputMode::Text)
+            && out_mode != Some(crate::agent::OutputMode::Json)
+            && out_mode != Some(crate::agent::OutputMode::Rpc),
+    );
     let fail: Arc<Mutex<Option<String>>> = Arc::default();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -450,7 +552,8 @@ pub async fn run() -> Result<i32> {
     let (tools_sync_tx, tools_sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
-    let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
+    let (child, tx, rx) =
+        transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
     let (client, events_rx) = BridgeClient::connect(child, tx, rx);
     let client = Arc::new(client);
 
@@ -472,10 +575,14 @@ pub async fn run() -> Result<i32> {
         Ok(kb) => (kb, None),
         Err(e) => {
             crate::corelog::line(&format!("[core] keybindings: {e}"));
-            (crate::tui::keybindings::KeybindingManager::default(), Some(e))
+            (
+                crate::tui::keybindings::KeybindingManager::default(),
+                Some(e),
+            )
         }
     };
-    let mut init = json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    let mut init =
+        json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
@@ -489,7 +596,10 @@ pub async fn run() -> Result<i32> {
     init["keybindings"] = Value::Object(kb_map);
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
-        Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
+        Decision::Response(r) => bail!(
+            "init failed: {}",
+            r.get("error").and_then(Value::as_str).unwrap_or("?")
+        ),
         Decision::Unavailable => bail!("init unanswered: sidecar transport lost"),
     }
 
@@ -499,10 +609,14 @@ pub async fn run() -> Result<i32> {
         events: Arc::default(),
         ext_tools: Arc::default(),
         ext_models: Arc::default(),
-        skills: Arc::new(skills.clone()),        ready: Mutex::new(Some(ready_tx)),
+        skills: Arc::new(skills.clone()),
+        ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
-        model: Arc::new(Mutex::new((initial_model, agent_config.default_thinking_level.clone()))),
+        model: Arc::new(Mutex::new((
+            initial_model,
+            agent_config.default_thinking_level.clone(),
+        ))),
         msg_tx: msg_tx.clone(),
         done: Mutex::new(Some(done_tx)),
         provider: Arc::new(Mutex::new(provider)),
@@ -559,11 +673,17 @@ pub async fn run() -> Result<i32> {
                 .ok();
         }
     }
-    tokio::spawn(crate::agent::event_task(events_rx, tools_sync_rx, ctx.clone()));
+    tokio::spawn(crate::agent::event_task(
+        events_rx,
+        tools_sync_rx,
+        ctx.clone(),
+    ));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
     let ready = tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), ready_rx)
-        .await.context("sidecar did not send `ready` in time")?.context("sidecar event task exited before `ready`")?;
+        .await
+        .context("sidecar did not send `ready` in time")?
+        .context("sidecar event task exited before `ready`")?;
     if ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
         bail!("sidecar apiVersion != 0");
     }
@@ -577,7 +697,12 @@ pub async fn run() -> Result<i32> {
             bail!("provider {key} is not a built-in provider and was not registered by an extension (check --extension-dir)");
         }
     }
-    for e in ready.get("errors").and_then(Value::as_array).into_iter().flatten() {
+    for e in ready
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         crate::corelog::line(&format!("[core] extension load error: {e}"));
     }
     client.set_running();
@@ -585,7 +710,9 @@ pub async fn run() -> Result<i32> {
         let ev = ctx.events.lock().unwrap().clone();
         crate::corelog::line(&format!("[core] running: subscribed events {ev:?}"));
         if ev.contains("session_start") {
-            client.fire(json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}));
+            client.fire(
+                json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
+            );
         }
     }
 
@@ -593,15 +720,28 @@ pub async fn run() -> Result<i32> {
     // precedence resolution) + its conflict diagnostics, which the core
     // surfaces on stderr like upstream prints them.
     let mut ext_shortcuts: Vec<(String, String)> = Vec::new();
-    for sc in ready.get("shortcuts").and_then(Value::as_array).into_iter().flatten() {
+    for sc in ready
+        .get("shortcuts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         if let Some(key) = sc.get("key").and_then(Value::as_str) {
             ext_shortcuts.push((
                 key.to_string(),
-                sc.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
+                sc.get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             ));
         }
     }
-    for d in ready.get("shortcutDiagnostics").and_then(Value::as_array).into_iter().flatten() {
+    for d in ready
+        .get("shortcutDiagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         if let Some(m) = d.as_str() {
             crate::corelog::line(&format!("[core] {m}"));
         }
@@ -619,11 +759,18 @@ pub async fn run() -> Result<i32> {
         let c_commands = commands.clone();
         tokio::spawn(async move {
             for (name, cargs) in &c_commands {
-                let resp = c_client.request("command", json!({"name":name,"args":cargs})).await;
+                let resp = c_client
+                    .request("command", json!({"name":name,"args":cargs}))
+                    .await;
                 let (ok, error) = match resp {
                     Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
-                    Decision::Response(r) => (false, r.get("error").and_then(Value::as_str).map(str::to_string)),
-                    Decision::Unavailable => (false, Some("command unanswered: bridge not running".into())),
+                    Decision::Response(r) => (
+                        false,
+                        r.get("error").and_then(Value::as_str).map(str::to_string),
+                    ),
+                    Decision::Unavailable => {
+                        (false, Some("command unanswered: bridge not running".into()))
+                    }
                 };
                 let mut line = json!({"kind":"command","name":name,"ok":ok});
                 if let Some(e) = error {
@@ -634,17 +781,24 @@ pub async fn run() -> Result<i32> {
         });
     } else {
         for (name, cargs) in &commands {
-        let resp = client.request("command", json!({"name":name,"args":cargs})).await;
-        let (ok, error) = match resp {
-            Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
-            Decision::Response(r) => (false, r.get("error").and_then(Value::as_str).map(str::to_string)),
-            Decision::Unavailable => (false, Some("command unanswered: bridge not running".into())),
-        };
-        let mut line = json!({"kind":"command","name":name,"ok":ok});
-        if let Some(e) = error {
-            line["error"] = json!(e);
-        }
-        log.emit(line);
+            let resp = client
+                .request("command", json!({"name":name,"args":cargs}))
+                .await;
+            let (ok, error) = match resp {
+                Decision::Response(r) if r.get("success") == Some(&json!(true)) => (true, None),
+                Decision::Response(r) => (
+                    false,
+                    r.get("error").and_then(Value::as_str).map(str::to_string),
+                ),
+                Decision::Unavailable => {
+                    (false, Some("command unanswered: bridge not running".into()))
+                }
+            };
+            let mut line = json!({"kind":"command","name":name,"ok":ok});
+            if let Some(e) = error {
+                line["error"] = json!(e);
+            }
+            log.emit(line);
         }
     }
 
@@ -661,8 +815,16 @@ pub async fn run() -> Result<i32> {
         if let Some(arr) = ready.get("commands").and_then(serde_json::Value::as_array) {
             for c in arr {
                 ext_cmds.push(crate::tui::commands::Command {
-                    name: c.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-                    description: c.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    name: c
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    description: c
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     argument_hint: None,
                     source: crate::tui::commands::Source::Extension,
                 });
@@ -677,7 +839,8 @@ pub async fn run() -> Result<i32> {
         )
         .with_shortcuts(ext_shortcuts)
         .with_commands(ext_cmds, tui_templates)
-        .with_skills(skills);        if let Some(e) = kb_error {
+        .with_skills(skills);
+        if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
         // WP-607: the `theme` setting selects the starting theme (a
@@ -716,16 +879,31 @@ pub async fn run() -> Result<i32> {
             move |outcome| match outcome {
                 // WP-604: the answer flows back over the unchanged bridge
                 // protocol; the event log records the round trip.
-                crate::tui::dialog::DialogOutcome::Answered { id, method, title, message, response } => {
+                crate::tui::dialog::DialogOutcome::Answered {
+                    id,
+                    method,
+                    title,
+                    message,
+                    response,
+                } => {
                     dialog_client.send(response.clone());
-                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
-                        "title":title,"message":message,"response":response}));
+                    dialog_log.emit(
+                        json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":response}),
+                    );
                 }
                 // Timeout: the sidecar already resolved with its upstream
                 // default — the TUI only stops showing the dialog.
-                crate::tui::dialog::DialogOutcome::TimedOut { id, method, title, message } => {
-                    dialog_log.emit(json!({"kind":"extension_ui_request","id":id,"method":method,
-                        "title":title,"message":message,"response":Value::Null,"timedOut":true}));
+                crate::tui::dialog::DialogOutcome::TimedOut {
+                    id,
+                    method,
+                    title,
+                    message,
+                } => {
+                    dialog_log.emit(
+                        json!({"kind":"extension_ui_request","id":id,"method":method,
+                        "title":title,"message":message,"response":Value::Null,"timedOut":true}),
+                    );
                 }
             },
             agent_dir.clone(),
@@ -747,13 +925,18 @@ pub async fn run() -> Result<i32> {
                                 let text = if data == json!({ "ok": true }) {
                                     String::new()
                                 } else {
-                                    data.as_str().map(str::to_string).unwrap_or_else(|| data.to_string())
+                                    data.as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| data.to_string())
                                 };
                                 (true, text)
                             }
                             Decision::Response(r) => (
                                 false,
-                                r.get("error").and_then(Value::as_str).unwrap_or("failed").to_string(),
+                                r.get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("failed")
+                                    .to_string(),
                             ),
                             Decision::Unavailable => (false, "bridge not running".into()),
                         };
@@ -788,7 +971,12 @@ pub async fn run() -> Result<i32> {
                     let msgs = resume_session
                         .transcript()
                         .into_iter()
-                        .filter(|m| matches!(m.get("role").and_then(serde_json::Value::as_str), Some("user") | Some("assistant")))
+                        .filter(|m| {
+                            matches!(
+                                m.get("role").and_then(serde_json::Value::as_str),
+                                Some("user") | Some("assistant")
+                            )
+                        })
                         .collect();
                     Ok((id, msgs))
                 }
@@ -813,10 +1001,23 @@ pub async fn run() -> Result<i32> {
         // model_script up front; provider mode ignores scripts (real completions).
         for r in &runs {
             if fake_mode {
-                FakeDriver::from_steps(&r.steps, &r.compact_summary).with_context(|| "parsing model_script")?;
+                FakeDriver::from_steps(&r.steps, &r.compact_summary)
+                    .with_context(|| "parsing model_script")?;
             }
-            let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone(), compact_summary: r.compact_summary.clone() })).unwrap();
+            let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() {
+                "cli"
+            } else {
+                "rpc"
+            };
+            msg_tx
+                .send(Item::User(QueuedUser {
+                    text: r.text.clone(),
+                    source,
+                    steps: r.steps.clone(),
+                    images: r.images.clone(),
+                    compact_summary: r.compact_summary.clone(),
+                }))
+                .unwrap();
         }
         msg_tx.send(Item::End).unwrap();
         // Wait for the scenario (and any extension-injected user messages).
@@ -829,17 +1030,23 @@ pub async fn run() -> Result<i32> {
     // failure. A degraded bridge has no live sidecar to shut down: skip the
     // handshake and exit 3 below.
     if !client.degraded_seen() {
-        client.fire(json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}));
+        client.fire(
+            json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}),
+        );
         client.set_stopped();
         match tokio::time::timeout(Duration::from_secs(10), client.wait_exited()).await {
             Ok(Some(0)) => {}
             Ok(Some(c)) => {
-                fail.lock().unwrap().get_or_insert(format!("sidecar exited with {c} during shutdown"));
+                fail.lock()
+                    .unwrap()
+                    .get_or_insert(format!("sidecar exited with {c} during shutdown"));
             }
             Ok(None) => unreachable!("wait_exited resolves only on exit"),
             Err(_) => {
                 crate::corelog::line("[core] sidecar did not exit 10s after session_shutdown");
-                fail.lock().unwrap().get_or_insert("sidecar did not exit after session_shutdown".into());
+                fail.lock()
+                    .unwrap()
+                    .get_or_insert("sidecar did not exit after session_shutdown".into());
             }
         }
     } else {
@@ -861,7 +1068,8 @@ pub async fn run() -> Result<i32> {
             log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
                 "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
         }
-        log.emit_final(json!({"kind":"transcript","session":session.dump()})).await;
+        log.emit_final(json!({"kind":"transcript","session":session.dump()}))
+            .await;
     } else if ctx.out_mode == crate::agent::OutputMode::Text {
         // Upstream print mode: the final assistant text, one trailing newline.
         if let Some(t) = ctx.text_final.lock().unwrap().take() {
@@ -892,10 +1100,20 @@ pub async fn run() -> Result<i32> {
     // WP-610: print/json use the upstream exit codes (1 for any failure).
     Ok(match ctx.out_mode {
         crate::agent::OutputMode::Ndjson => {
-            if client.degraded_seen() { 3 } else if fail.lock().unwrap().is_some() { 2 } else { 0 }
+            if client.degraded_seen() {
+                3
+            } else if fail.lock().unwrap().is_some() {
+                2
+            } else {
+                0
+            }
         }
         _ => {
-            if client.degraded_seen() || fail.lock().unwrap().is_some() { 1 } else { 0 }
+            if client.degraded_seen() || fail.lock().unwrap().is_some() {
+                1
+            } else {
+                0
+            }
         }
     })
 }
@@ -946,9 +1164,14 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
         }
     };
     let id = v.get("id").cloned().unwrap_or(Value::Null);
-    let command = v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let command = v
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let respond = |success: bool, data: Option<Value>, error: Option<String>| {
-        let mut resp = json!({"id":id.clone(),"type":"response","command":command.clone(),"success":success});
+        let mut resp =
+            json!({"id":id.clone(),"type":"response","command":command.clone(),"success":success});
         if let Some(d) = data {
             resp["data"] = d;
         }
@@ -961,7 +1184,11 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
     };
     match command.as_str() {
         "prompt" => {
-            let message = v.get("message").and_then(Value::as_str).unwrap_or_default().to_string();
+            let message = v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             if v.get("images").is_some() {
                 crate::corelog::line("[core] rpc: `images` is accepted but unmapped in v0");
             }
@@ -984,9 +1211,15 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
                 // The response lands before the run's events (upstream
                 // writes it synchronously before the run starts).
                 respond(true, Some(json!({"disposition":"started"})), None);
-                let _ = ctx.msg_tx.send(crate::agent::Item::User(crate::agent::QueuedUser {
-                    text: message, source: "rpc", steps: Vec::new(), images: Vec::new(), compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
-                }));
+                let _ = ctx
+                    .msg_tx
+                    .send(crate::agent::Item::User(crate::agent::QueuedUser {
+                        text: message,
+                        source: "rpc",
+                        steps: Vec::new(),
+                        images: Vec::new(),
+                        compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+                    }));
             }
         }
         _ => respond(false, None, Some(format!("Unknown command: {command}"))),
@@ -998,15 +1231,18 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
 fn list_sessions_json(agent_dir: &Path) -> Result<()> {
     // WP-609: the shared session listing (same source as the TUI picker).
     for s in crate::session::list(agent_dir) {
-        println!("{}", json!({
-            "file": s.path.to_string_lossy(),
-            "id": s.id,
-            "cwd": s.cwd,
-            "name": s.name,
-            "parentSession": s.parent_session,
-            "updated": s.updated,
-            "entries": s.entries,
-        }));
+        println!(
+            "{}",
+            json!({
+                "file": s.path.to_string_lossy(),
+                "id": s.id,
+                "cwd": s.cwd,
+                "name": s.name,
+                "parentSession": s.parent_session,
+                "updated": s.updated,
+                "entries": s.entries,
+            })
+        );
     }
     Ok(())
 }
@@ -1018,9 +1254,16 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
     if p.exists() {
         return Ok(p);
     }
-    for f in crate::session::list(agent_dir).iter().map(|s| s.path.clone()) {
-        let Ok(raw) = std::fs::read_to_string(&f) else { continue };
-        let Some(first) = raw.lines().next() else { continue };
+    for f in crate::session::list(agent_dir)
+        .iter()
+        .map(|s| s.path.clone())
+    {
+        let Ok(raw) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let Some(first) = raw.lines().next() else {
+            continue;
+        };
         if let Ok(h) = serde_json::from_str::<Value>(first) {
             if h.get("type").and_then(Value::as_str) == Some("session")
                 && h.get("id").and_then(Value::as_str) == Some(ref_)
@@ -1029,52 +1272,55 @@ fn resolve_session_ref(agent_dir: &Path, ref_: &str) -> Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!("no session {ref_}: not an existing file and no session id match under {}", agent_dir.join("sessions").display())
+    anyhow::bail!(
+        "no session {ref_}: not an existing file and no session id match under {}",
+        agent_dir.join("sessions").display()
+    )
 }
 
 #[cfg(test)]
 mod image_tests {
-	use super::*;
+    use super::*;
 
-	const PNG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
-	const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2];
-	const GIF: &[u8] = b"GIF89a1234";
-	const WEBP: &[u8] = b"RIFF\x0c\x00\x00\x00WEBPVP8 ";
+    const PNG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2];
+    const GIF: &[u8] = b"GIF89a1234";
+    const WEBP: &[u8] = b"RIFF\x0c\x00\x00\x00WEBPVP8 ";
 
-	#[test]
-	fn detects_supported_mimes() {
-		assert_eq!(detect_image_mime(PNG), Some("image/png"));
-		assert_eq!(detect_image_mime(JPEG), Some("image/jpeg"));
-		assert_eq!(detect_image_mime(GIF), Some("image/gif"));
-		assert_eq!(detect_image_mime(WEBP), Some("image/webp"));
-		assert_eq!(detect_image_mime(b"plain text"), None);
-		assert_eq!(detect_image_mime(b"RIFFxxxxxxx"), None); // RIFF but not WEBP
-	}
+    #[test]
+    fn detects_supported_mimes() {
+        assert_eq!(detect_image_mime(PNG), Some("image/png"));
+        assert_eq!(detect_image_mime(JPEG), Some("image/jpeg"));
+        assert_eq!(detect_image_mime(GIF), Some("image/gif"));
+        assert_eq!(detect_image_mime(WEBP), Some("image/webp"));
+        assert_eq!(detect_image_mime(b"plain text"), None);
+        assert_eq!(detect_image_mime(b"RIFFxxxxxxx"), None); // RIFF but not WEBP
+    }
 
-	#[test]
-	fn b64_encodes_std_vectors() {
-		assert_eq!(b64(b""), "");
-		assert_eq!(b64(b"f"), "Zg==");
-		assert_eq!(b64(b"fo"), "Zm8=");
-		assert_eq!(b64(b"foo"), "Zm9v");
-		assert_eq!(b64(b"foob"), "Zm9vYg==");
-	}
+    #[test]
+    fn b64_encodes_std_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foob"), "Zm9vYg==");
+    }
 
-	#[test]
-	fn read_image_attachment_typed_errors() {
-		let dir = std::env::temp_dir().join(format!("pi-rust-img-{}", uuid::Uuid::new_v4()));
-		std::fs::create_dir_all(&dir).unwrap();
-		let png = dir.join("a.png");
-		std::fs::write(&png, PNG).unwrap();
-		let (mime, data) = read_image_attachment(&png).unwrap();
-		assert_eq!(mime, "image/png");
-		assert_eq!(data, b64(PNG));
-		let missing = dir.join("nope.png");
-		let err = read_image_attachment(&missing).unwrap_err().to_string();
-		assert!(err.contains("cannot read file"), "{err}");
-		let txt = dir.join("b.png");
-		std::fs::write(&txt, b"definitely not an image").unwrap();
-		let err = read_image_attachment(&txt).unwrap_err().to_string();
-		assert!(err.contains("not a supported image format"), "{err}");
-	}
+    #[test]
+    fn read_image_attachment_typed_errors() {
+        let dir = std::env::temp_dir().join(format!("pi-rust-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, PNG).unwrap();
+        let (mime, data) = read_image_attachment(&png).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(data, b64(PNG));
+        let missing = dir.join("nope.png");
+        let err = read_image_attachment(&missing).unwrap_err().to_string();
+        assert!(err.contains("cannot read file"), "{err}");
+        let txt = dir.join("b.png");
+        std::fs::write(&txt, b"definitely not an image").unwrap();
+        let err = read_image_attachment(&txt).unwrap_err().to_string();
+        assert!(err.contains("not a supported image format"), "{err}");
+    }
 }

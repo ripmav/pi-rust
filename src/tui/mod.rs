@@ -4,30 +4,30 @@
 //!
 //! Terminal-craft floor: one accent role, dense chrome, single-row status
 //! bar, no boxes-in-boxes, `…` truncation in the status bar.
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap, Widget};
 use ratatui::buffer::Buffer;
-use std::collections::BTreeMap;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
-pub mod dialog;
 pub mod commands;
+pub mod dialog;
 pub mod keybindings;
-pub mod picker;
 pub mod markdown;
-pub mod theme;
+pub mod picker;
 pub mod terminal;
+pub mod theme;
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyModifiers};
 
 /// WP-609: which picker is open (routes the selection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PickerKind {
-	#[default]
-	Model,
-	Session,
+    #[default]
+    Model,
+    Session,
 }
 
 /// One transcript line. Roles: `user`, `assistant`, `tool`, `system`.
@@ -122,11 +122,24 @@ pub enum TuiAction {
 }
 
 impl TuiApp {
-    pub fn new(model: impl Into<String>, cwd: impl Into<String>, session: impl Into<String>) -> Self {
-        Self::with_kb(keybindings::KeybindingManager::default(), model, cwd, session)
+    /// Constructed by the in-crate tests (production goes through `with_kb`).
+    #[allow(dead_code)]
+    pub fn new(
+        model: impl Into<String>,
+        cwd: impl Into<String>,
+        session: impl Into<String>,
+    ) -> Self {
+        Self::with_kb(
+            keybindings::KeybindingManager::default(),
+            model,
+            cwd,
+            session,
+        )
     }
 
-    /// WP-607: set the active theme (returns self for construction chains).
+    /// WP-607: set the active theme (returns self for construction chains);
+    /// exercised by the in-crate tests.
+    #[allow(dead_code)]
     pub fn with_theme(mut self, theme: theme::Theme) -> Self {
         self.theme = theme;
         self
@@ -148,7 +161,11 @@ impl TuiApp {
         self.title = None;
     }
 
-    pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
+    pub fn with_commands(
+        mut self,
+        ext_commands: Vec<commands::Command>,
+        templates: Vec<crate::templates::Template>,
+    ) -> Self {
         self.ext_commands = ext_commands;
         self.templates = templates;
         self
@@ -179,7 +196,10 @@ impl TuiApp {
         for p in reg.providers() {
             for m in reg.models_of(p) {
                 let label = format!("{}/{}", m.provider, m.id);
-                items.push(picker::PickerItem { display: label.clone(), value: label });
+                items.push(picker::PickerItem {
+                    display: label.clone(),
+                    value: label,
+                });
             }
         }
         items.sort_by(|a, b| a.display.cmp(&b.display));
@@ -202,7 +222,10 @@ impl TuiApp {
     /// WP-608: push one command result line to the transcript (dim system
     /// role).
     fn push_command_output(&mut self, text: String) {
-        self.transcript.push(Msg { role: "system", text });
+        self.transcript.push(Msg {
+            role: "system",
+            text,
+        });
         self.scroll = 0;
     }
 
@@ -217,12 +240,26 @@ impl TuiApp {
     fn hotkeys_text(&self) -> String {
         let mut out = String::from("Keybindings (v0 wired actions):\n");
         for action in [
-            "tui.input.submit", "tui.input.newLine", "app.clear", "app.exit",
-            "tui.select.up", "tui.select.down", "tui.select.confirm", "tui.select.cancel",
-            "tui.editor.cursorUp", "tui.editor.cursorDown", "tui.editor.cursorLeft",
+            "tui.input.submit",
+            "tui.input.newLine",
+            "app.clear",
+            "app.exit",
+            "tui.select.up",
+            "tui.select.down",
+            "tui.select.confirm",
+            "tui.select.cancel",
+            "tui.editor.cursorUp",
+            "tui.editor.cursorDown",
+            "tui.editor.cursorLeft",
             "tui.editor.cursorRight",
         ] {
-            let keys = self.kb.get_keys(action).iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(" / ");
+            let keys = self
+                .kb
+                .get_keys(action)
+                .iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(" / ");
             out.push_str(&format!("- {action}: {keys}\n"));
         }
         out
@@ -275,7 +312,9 @@ impl TuiApp {
                 self.input.clear();
                 self.cursor = (0, 0);
                 self.scroll = 0;
-                return Some(TuiAction::SetThinking { level: args.to_string() });
+                return Some(TuiAction::SetThinking {
+                    level: args.to_string(),
+                });
             }
             "model" => {
                 if args.is_empty() {
@@ -291,7 +330,10 @@ impl TuiApp {
                     self.input.clear();
                     self.cursor = (0, 0);
                     self.scroll = 0;
-                    return Some(TuiAction::SetModel { provider: provider.to_string(), model: model.to_string() });
+                    return Some(TuiAction::SetModel {
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                    });
                 }
                 self.set_cmd_error("usage: /model <provider/model>");
                 return None;
@@ -329,7 +371,8 @@ impl TuiApp {
         }
         // Prompt template (WP-307): expand and submit as a normal message.
         if let Some(t) = self.templates.iter().find(|t| t.name == name) {
-            let expanded = crate::templates::expand(&t.content, &crate::templates::parse_args(args));
+            let expanded =
+                crate::templates::expand(&t.content, &crate::templates::parse_args(args));
             self.history.push(format!("/{name} {args}"));
             self.history_idx = None;
             self.draft = None;
@@ -346,7 +389,10 @@ impl TuiApp {
             self.input.clear();
             self.cursor = (0, 0);
             self.scroll = 0;
-            return Some(TuiAction::BridgeCommand { name: name.to_string(), args: args.to_string() });
+            return Some(TuiAction::BridgeCommand {
+                name: name.to_string(),
+                args: args.to_string(),
+            });
         }
         // WP-609: /resume opens the session picker (the terminal loads the
         // list — it owns the agent dir).
@@ -359,14 +405,20 @@ impl TuiApp {
         }
         // Known built-in, not wired in v0 (upstream has a full
         // implementation; v0 says so explicitly).
-        if commands::BUILTIN_SLASH_COMMANDS.iter().any(|(n, _, _)| *n == name) {
+        if commands::BUILTIN_SLASH_COMMANDS
+            .iter()
+            .any(|(n, _, _)| *n == name)
+        {
             self.set_cmd_error(&format!("/{name} is not supported in v0"));
             return None;
         }
         // Unknown command: error listing the available ones (spec).
         let all = commands::collect_menu(&self.templates, &self.ext_commands);
         let names: Vec<String> = all.iter().map(|c| format!("/{}", c.name)).collect();
-        self.set_cmd_error(&format!("unknown command /{name}; available: {}", names.join(" ")));
+        self.set_cmd_error(&format!(
+            "unknown command /{name}; available: {}",
+            names.join(" ")
+        ));
         None
     }
 
@@ -447,7 +499,10 @@ impl TuiApp {
         if method != "editor" {
             return false;
         }
-        let prefill = req.get("prefill").and_then(Value::as_str).unwrap_or_default();
+        let prefill = req
+            .get("prefill")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let timeout_ms = req.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
         self.input = prefill.to_string();
         let (l, c) = self
@@ -469,8 +524,16 @@ impl TuiApp {
     /// Close a dialog (or editor session) whose sidecar-side timeout has
     /// expired (no response — the sidecar already resolved with its
     /// upstream default).
-    pub fn take_expired_dialog(&mut self, now: std::time::Instant) -> Option<dialog::DialogOutcome> {
-        if self.dialog.as_ref().map(|d| d.expired(now)).unwrap_or(false) {
+    pub fn take_expired_dialog(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<dialog::DialogOutcome> {
+        if self
+            .dialog
+            .as_ref()
+            .map(|d| d.expired(now))
+            .unwrap_or(false)
+        {
             let d = self.dialog.take().expect("expired check just matched");
             return Some(d.timed_out());
         }
@@ -480,7 +543,10 @@ impl TuiApp {
             .map(|e| e.deadline <= now)
             .unwrap_or(false)
         {
-            let es = self.editor_session.take().expect("expired check just matched");
+            let es = self
+                .editor_session
+                .take()
+                .expect("expired check just matched");
             return Some(dialog::DialogOutcome::TimedOut {
                 id: es.id,
                 method: "editor".into(),
@@ -529,7 +595,7 @@ impl TuiApp {
         self.leave_history();
         self.apply_edit(|lines, (l, col)| {
             let line = lines.get(*l).cloned().unwrap_or_default();
-            let mut chars: Vec<char> = line.chars().collect();
+            let chars: Vec<char> = line.chars().collect();
             let (head, tail) = chars.split_at(*col);
             let head: Vec<char> = head.to_vec();
             let tail: Vec<char> = tail.to_vec();
@@ -666,8 +732,6 @@ impl TuiApp {
             let mut new: Vec<String> = lines[..*l].to_vec();
             new.push(format!("{first}{rest}"));
             *lines = new;
-            *l = *l; // stays on the (now merged) first line
-            *col = *col;
         });
     }
 
@@ -697,12 +761,22 @@ impl TuiApp {
             self.cursor.1 -= 1;
         } else if self.cursor.0 > 0 {
             self.cursor.0 -= 1;
-            self.cursor.1 = self.input.split('\n').nth(self.cursor.0).map(|s| s.chars().count()).unwrap_or(0);
+            self.cursor.1 = self
+                .input
+                .split('\n')
+                .nth(self.cursor.0)
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
         }
     }
 
     fn move_cursor_right(&mut self) {
-        let len = self.input.split('\n').nth(self.cursor.0).map(|s| s.chars().count()).unwrap_or(0);
+        let len = self
+            .input
+            .split('\n')
+            .nth(self.cursor.0)
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
         if self.cursor.1 < len {
             self.cursor.1 += 1;
         } else if self.cursor.0 + 1 < self.input.lines().count().max(1) {
@@ -716,7 +790,12 @@ impl TuiApp {
     }
 
     fn move_cursor_end(&mut self) {
-        self.cursor.1 = self.input.split('\n').nth(self.cursor.0).map(|s| s.chars().count()).unwrap_or(0);
+        self.cursor.1 = self
+            .input
+            .split('\n')
+            .nth(self.cursor.0)
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
     }
 
     fn close_editor_session(&mut self, response: Value) -> TuiAction {
@@ -769,7 +848,10 @@ impl TuiApp {
                     new_lines.push(tail);
                 } else {
                     // The tail continues the last pasted line.
-                    new_lines.last_mut().expect("paste always has parts").push_str(&tail);
+                    new_lines
+                        .last_mut()
+                        .expect("paste always has parts")
+                        .push_str(&tail);
                 }
                 for (j, p) in new_lines.iter().enumerate() {
                     lines.insert(l + 1 + j, p.clone());
@@ -924,159 +1006,167 @@ impl TuiApp {
                     return None;
                 }
             }
-                if kb.matches(&k, "tui.editor.deleteWordBackward") {
-                    self.delete_word_backward();
+            if kb.matches(&k, "tui.editor.deleteWordBackward") {
+                self.delete_word_backward();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.deleteWordForward") {
+                self.delete_word_forward();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.deleteToLineStart") {
+                self.delete_to_line_start();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.deleteToLineEnd") {
+                self.delete_to_line_end();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.cursorLeft") {
+                self.move_cursor_left();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.cursorRight") {
+                self.move_cursor_right();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.cursorLineStart") {
+                self.move_cursor_home();
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.cursorLineEnd") {
+                self.move_cursor_end();
+                return None;
+            }
+            // User-bound history keys (unbound by default upstream; the
+            // bare up/down fallback below keeps the v0 behavior).
+            if self.editor_session.is_none() {
+                if kb.matches(&k, "tui.editor.historyPrevious") {
+                    self.history_prev();
                     return None;
                 }
-                if kb.matches(&k, "tui.editor.deleteWordForward") {
-                    self.delete_word_forward();
+                if kb.matches(&k, "tui.editor.historyNext") {
+                    self.history_next();
                     return None;
-                }
-                if kb.matches(&k, "tui.editor.deleteToLineStart") {
-                    self.delete_to_line_start();
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.deleteToLineEnd") {
-                    self.delete_to_line_end();
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.cursorLeft") {
-                    self.move_cursor_left();
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.cursorRight") {
-                    self.move_cursor_right();
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.cursorLineStart") {
-                    self.move_cursor_home();
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.cursorLineEnd") {
-                    self.move_cursor_end();
-                    return None;
-                }
-                // User-bound history keys (unbound by default upstream; the
-                // bare up/down fallback below keeps the v0 behavior).
-                if self.editor_session.is_none() {
-                    if kb.matches(&k, "tui.editor.historyPrevious") {
-                        self.history_prev();
-                        return None;
-                    }
-                    if kb.matches(&k, "tui.editor.historyNext") {
-                        self.history_next();
-                        return None;
-                    }
-                }
-                // ctrl+c: app.clear (dialogs consume their keys earlier).
-                if kb.matches(&k, "app.clear") {
-                    if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
-                        return Some(self.close_editor_session(Self::cancel_response(&id)));
-                    }
-                    if self.input.trim().is_empty() {
-                        self.exit = true;
-                    } else {
-                        self.input.clear();
-                        self.cursor = (0, 0);
-                        self.leave_history();
-                    }
-                    return None;
-                }
-                // ctrl+d: app.exit when the editor is empty, else
-                // deleteCharForward (inside editor sessions always).
-                if kb.matches(&k, "app.exit") && self.input.trim().is_empty() {
-                    self.exit = true;
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.deleteCharForward") {
-                    self.delete_char_forward();
-                    return None;
-                }
-                // Newline keys (default shift+enter / ctrl+j, rebindable):
-                // they win over submit for the same physical Enter.
-                if kb.matches(&k, "tui.input.newLine") {
-                    self.insert_newline();
-                    return None;
-                }
-                // Enter: in an editor session it answers the dialog, else
-                // it submits.
-                if k.code == KeyCode::Enter {
-                    if self.editor_session.is_some() {
-                        let value = self.input.clone();
-                        let id = self.editor_session.as_ref().unwrap().id.clone();
-                        let response = json!({"type":"extension_ui_response","id":id,"value":value});
-                        return Some(self.close_editor_session(response));
-                    }
-                    if kb.matches(&k, "tui.input.submit") {
-                        // WP-608: dispatch /commands before a normal submit
-                        // (local builtins, templates, extension commands).
-                        let text = self.input.trim().to_string();
-                        if let Some((name, args)) = commands::parse_invocation(&text) {
-                            return self.dispatch_command(name, args);
-                        }
-                        if let Some(t) = self.submit_text() {
-                            self.scroll = 0;
-                            return Some(TuiAction::Submit(t));
-                        }
-                    }
-                    return None;
-                }
-                // Esc: tui.select.cancel includes escape — closes an editor
-                // session; no running turn exists to interrupt in v0.
-                if k.code == KeyCode::Esc {
-                    if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
-                        if kb.matches(&k, "tui.select.cancel") {
-                            return Some(self.close_editor_session(Self::cancel_response(&id)));
-                        }
-                    }
-                    return None;
-                }
-                if kb.matches(&k, "tui.editor.deleteCharBackward") {
-                    self.backspace_at();
-                    return None;
-                }
-                // v0 fallback (upstream leaves history unbound by default):
-                // bare up/down walk the history, or scroll the transcript.
-                match k.code {
-                    KeyCode::Up
-                        if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
-                    {
-                        if !self.history_prev() {
-                            self.scroll += 1;
-                        }
-                        None
-                    }
-                    KeyCode::Down
-                        if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
-                    {
-                        if !self.history_next() {
-                            self.scroll = self.scroll.saturating_sub(1);
-                        }
-                        None
-                    }
-                    KeyCode::Char(c)
-                        if !k.modifiers.contains(KeyModifiers::CONTROL)
-                            && !k.modifiers.contains(KeyModifiers::ALT) =>
-                    {
-                        self.insert_char_at(c);
-                        self.scroll = 0;
-                        None
-                    }
-                    _ => None,
                 }
             }
+            // ctrl+c: app.clear (dialogs consume their keys earlier).
+            if kb.matches(&k, "app.clear") {
+                if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
+                    return Some(self.close_editor_session(Self::cancel_response(&id)));
+                }
+                if self.input.trim().is_empty() {
+                    self.exit = true;
+                } else {
+                    self.input.clear();
+                    self.cursor = (0, 0);
+                    self.leave_history();
+                }
+                return None;
+            }
+            // ctrl+d: app.exit when the editor is empty, else
+            // deleteCharForward (inside editor sessions always).
+            if kb.matches(&k, "app.exit") && self.input.trim().is_empty() {
+                self.exit = true;
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.deleteCharForward") {
+                self.delete_char_forward();
+                return None;
+            }
+            // Newline keys (default shift+enter / ctrl+j, rebindable):
+            // they win over submit for the same physical Enter.
+            if kb.matches(&k, "tui.input.newLine") {
+                self.insert_newline();
+                return None;
+            }
+            // Enter: in an editor session it answers the dialog, else
+            // it submits.
+            if k.code == KeyCode::Enter {
+                if self.editor_session.is_some() {
+                    let value = self.input.clone();
+                    let id = self.editor_session.as_ref().unwrap().id.clone();
+                    let response = json!({"type":"extension_ui_response","id":id,"value":value});
+                    return Some(self.close_editor_session(response));
+                }
+                if kb.matches(&k, "tui.input.submit") {
+                    // WP-608: dispatch /commands before a normal submit
+                    // (local builtins, templates, extension commands).
+                    let text = self.input.trim().to_string();
+                    if let Some((name, args)) = commands::parse_invocation(&text) {
+                        return self.dispatch_command(name, args);
+                    }
+                    if let Some(t) = self.submit_text() {
+                        self.scroll = 0;
+                        return Some(TuiAction::Submit(t));
+                    }
+                }
+                return None;
+            }
+            // Esc: tui.select.cancel includes escape — closes an editor
+            // session; no running turn exists to interrupt in v0.
+            if k.code == KeyCode::Esc {
+                if let Some(id) = self.editor_session.as_ref().map(|e| e.id.clone()) {
+                    if kb.matches(&k, "tui.select.cancel") {
+                        return Some(self.close_editor_session(Self::cancel_response(&id)));
+                    }
+                }
+                return None;
+            }
+            if kb.matches(&k, "tui.editor.deleteCharBackward") {
+                self.backspace_at();
+                return None;
+            }
+            // v0 fallback (upstream leaves history unbound by default):
+            // bare up/down walk the history, or scroll the transcript.
+            match k.code {
+                KeyCode::Up
+                    if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
+                {
+                    if !self.history_prev() {
+                        self.scroll += 1;
+                    }
+                    None
+                }
+                KeyCode::Down
+                    if k.modifiers == KeyModifiers::NONE && self.editor_session.is_none() =>
+                {
+                    if !self.history_next() {
+                        self.scroll = self.scroll.saturating_sub(1);
+                    }
+                    None
+                }
+                KeyCode::Char(c)
+                    if !k.modifiers.contains(KeyModifiers::CONTROL)
+                        && !k.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.insert_char_at(c);
+                    self.scroll = 0;
+                    None
+                }
+                _ => None,
+            }
         }
+    }
 
     /// Apply one core event (the broadcast EventLog stream) to the app state.
     pub fn apply_event(&mut self, ev: &Value) {
         match ev.get("kind").and_then(Value::as_str) {
             Some("user_input") => {
-                let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                let text = ev
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 self.transcript.push(Msg { role: "user", text });
                 self.scroll = 0;
             }
             Some("model_output") => {
-                let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                let text = ev
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 // WP-603: streamed deltas already built this message — the
                 // final event must not duplicate it (non-streaming drivers
                 // emit no deltas and push the full text here).
@@ -1088,7 +1178,10 @@ impl TuiApp {
                     self.scroll = 0;
                     return;
                 }
-                self.transcript.push(Msg { role: "assistant", text });
+                self.transcript.push(Msg {
+                    role: "assistant",
+                    text,
+                });
                 self.scroll = 0;
             }
             Some("model_delta") => {
@@ -1116,7 +1209,10 @@ impl TuiApp {
                 } else {
                     format!("{label} — {text}")
                 };
-                self.transcript.push(Msg { role: "system", text: line });
+                self.transcript.push(Msg {
+                    role: "system",
+                    text: line,
+                });
                 self.scroll = 0;
                 if ok {
                     if let Some(model) = ev.get("model").and_then(Value::as_str) {
@@ -1145,10 +1241,7 @@ impl TuiApp {
             Some("agent_start") => self.pending = true,
             Some("agent_end") => {
                 self.pending = false;
-                self.last_error = ev
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                self.last_error = ev.get("error").and_then(Value::as_str).map(str::to_string);
             }
             Some("extension_error") => {
                 self.last_error = ev
@@ -1160,7 +1253,10 @@ impl TuiApp {
             // WP-604: fire-and-forget UI channel (dialogs arrive over the ui
             // channel, not the broadcast).
             Some("notify") => {
-                let message = ev.get("message").and_then(Value::as_str).unwrap_or_default();
+                let message = ev
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 self.transcript.push(Msg {
                     role: "system",
                     text: format!("ℹ {message}"),
@@ -1208,8 +1304,13 @@ impl TuiApp {
         let input_rows = self.input.matches('\n').count() + 1;
         let editor_chrome = if self.editor_session.is_some() { 2 } else { 0 };
         // WP-608: the slash menu (up to 8 rows) grows the input pane.
-        let menu_rows = self.slash.as_ref().map(|(items, _)| items.len().min(8)).unwrap_or(0);
-        let input_h = (input_rows + editor_chrome + menu_rows).min(h.saturating_sub(status_h).max(1));
+        let menu_rows = self
+            .slash
+            .as_ref()
+            .map(|(items, _)| items.len().min(8))
+            .unwrap_or(0);
+        let input_h =
+            (input_rows + editor_chrome + menu_rows).min(h.saturating_sub(status_h).max(1));
         let transcript_h = h.saturating_sub(status_h).saturating_sub(input_h);
 
         let chunks = Layout::default()
@@ -1252,7 +1353,7 @@ impl TuiApp {
                 };
                 for (i, bl) in body.into_iter().enumerate() {
                     if i == 0 && !prefix.is_empty() {
-                        let mut spans = vec![Span::styled(prefix, style.clone())];
+                        let mut spans = vec![Span::styled(prefix, style)];
                         spans.extend(bl.spans);
                         lines.push(Line::from(spans));
                     } else {
@@ -1272,7 +1373,9 @@ impl TuiApp {
             lines.push(Line::from(Span::styled("● ", self.theme.fg("accent"))));
         }
         let total = lines.len();
-        let start = total.saturating_sub(transcript_h).saturating_sub(self.scroll);
+        let start = total
+            .saturating_sub(transcript_h)
+            .saturating_sub(self.scroll);
         let visible: Vec<Line> = lines[start..total.min(start + transcript_h)].to_vec();
         Paragraph::new(visible)
             .wrap(Wrap { trim: true })
@@ -1284,7 +1387,7 @@ impl TuiApp {
             let accent_bold = self.theme.fg_bold("accent");
             let mut pane: Vec<Line> = Vec::new();
             if let Some(es) = &self.editor_session {
-                pane.push(Line::from(Span::styled(es.title.clone(), accent_bold.clone())));
+                pane.push(Line::from(Span::styled(es.title.clone(), accent_bold)));
             }
             // WP-608: the slash menu (selected row in the accent role).
             if let Some((items, sel)) = &self.slash {
@@ -1308,12 +1411,12 @@ impl TuiApp {
             let text_lines: Vec<String> = self.input.split('\n').map(String::from).collect();
             for (i, line) in text_lines.iter().take(visible).enumerate() {
                 let prompt = if i == 0 { "> " } else { "  " };
-                let mut spans = vec![Span::styled(prompt.to_string(), accent_bold.clone())];
+                let mut spans = vec![Span::styled(prompt.to_string(), accent_bold)];
                 if i == self.cursor.0 {
                     let chars: Vec<char> = line.chars().collect();
                     let c = self.cursor.1.min(chars.len());
                     spans.push(Span::raw(chars[..c].iter().collect::<String>()));
-                    spans.push(Span::styled("\u{258c}".to_string(), accent_bold.clone()));
+                    spans.push(Span::styled("\u{258c}".to_string(), accent_bold));
                     spans.push(Span::raw(chars[c..].iter().collect::<String>()));
                 } else {
                     spans.push(Span::raw(line.clone()));
@@ -1335,13 +1438,20 @@ impl TuiApp {
         // Status bar: model · cwd · session (+ pending + last error), `…`
         // truncated, one row.
         if status_h > 0 {
-            let mut segs: Vec<String> = vec![self.model.clone(), self.cwd.clone(), self.session.clone()];
+            let mut segs: Vec<String> =
+                vec![self.model.clone(), self.cwd.clone(), self.session.clone()];
             if let Some(t) = &self.title {
                 segs.push(t.clone());
             }
             if !self.statuses.is_empty() {
                 // BTreeMap iterates sorted by key (upstream footer order).
-                segs.push(self.statuses.values().cloned().collect::<Vec<_>>().join(" "));
+                segs.push(
+                    self.statuses
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
             }
             if self.pending {
                 segs.push("● working".into());
@@ -1382,6 +1492,8 @@ impl TuiApp {
 
     /// Convenience for tests: render at the app's current size and return the
     /// buffer as one string (rows joined with newlines, trailing blanks trimmed).
+    /// Render to a throwaway buffer (in-crate test helper).
+    #[allow(dead_code)]
     pub fn render_string(&self) -> String {
         let mut buf = Buffer::empty(Rect::new(0, 0, self.size.0, self.size.1));
         self.render_to(&mut buf, Rect::new(0, 0, self.size.0, self.size.1));
@@ -1445,7 +1557,9 @@ mod tests {
     #[test]
     fn wp605_paste_50_line_block_no_corruption() {
         let mut app = TuiApp::new("m", "cwd", "s");
-        let block: Vec<String> = (1..=50).map(|i| format!("line {:02} with some text", i)).collect();
+        let block: Vec<String> = (1..=50)
+            .map(|i| format!("line {:02} with some text", i))
+            .collect();
         app.handle_key(paste(&block.join("\n")));
         let lines: Vec<&str> = app.input.split('\n').collect();
         assert_eq!(lines.len(), 50, "paste must keep every line");
@@ -1463,9 +1577,15 @@ mod tests {
     fn wp605_history_recall_up_down() {
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "first");
-        assert!(is_submit(app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)), "first"));
+        assert!(is_submit(
+            app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)),
+            "first"
+        ));
         type_str(&mut app, "second");
-        assert!(is_submit(app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)), "second"));
+        assert!(is_submit(
+            app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)),
+            "second"
+        ));
         assert_eq!(app.input, "");
         app.handle_key(key_code(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.input, "second", "up recalls the newest");
@@ -1481,13 +1601,20 @@ mod tests {
     fn wp605_multiline_submit_and_shift_enter_newline() {
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "one");
-        assert!(app.handle_key(key_code(KeyCode::Enter, KeyModifiers::SHIFT)).is_none());
+        assert!(app
+            .handle_key(key_code(KeyCode::Enter, KeyModifiers::SHIFT))
+            .is_none());
         assert!(app.input.contains('\n'), "shift+enter inserts a newline");
         type_str(&mut app, "two");
-        assert!(is_submit(app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)), "one\ntwo"));
+        assert!(is_submit(
+            app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)),
+            "one\ntwo"
+        ));
         assert_eq!(app.input, "");
         // Empty submit stays a no-op.
-        assert!(app.handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+        assert!(app
+            .handle_key(key_code(KeyCode::Enter, KeyModifiers::NONE))
+            .is_none());
     }
 
     #[test]
@@ -1514,7 +1641,9 @@ mod tests {
         // ctrl+u / ctrl+k (cursor left of the 'z')
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "xy z");
-        for _ in 0..2 { app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE)); }
+        for _ in 0..2 {
+            app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
+        }
         app.handle_key(key_code(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.input, " z");
         app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
@@ -1526,11 +1655,19 @@ mod tests {
     fn wp605_cursor_line_movement() {
         let mut app = TuiApp::new("m", "cwd", "s");
         app.handle_key(paste("ab\ncd"));
-        assert_eq!((app.cursor.0, app.cursor.1), (1, 2), "caret at end after paste");
+        assert_eq!(
+            (app.cursor.0, app.cursor.1),
+            (1, 2),
+            "caret at end after paste"
+        );
         app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
-        assert_eq!((app.cursor.0, app.cursor.1), (0, 2), "left wraps to previous line end");
+        assert_eq!(
+            (app.cursor.0, app.cursor.1),
+            (0, 2),
+            "left wraps to previous line end"
+        );
         app.handle_key(key_code(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!((app.cursor.0, app.cursor.1), (0, 0));
         app.handle_key(key_code(KeyCode::End, KeyModifiers::NONE));
@@ -1541,9 +1678,17 @@ mod tests {
         assert_eq!(app.input, "ab\ncd");
         assert_eq!((app.cursor.0, app.cursor.1), (0, 2));
         // Backspace at a line start merges with the previous line.
-        for _ in 0..2 { app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE)); }
-        for _ in 0..3 { app.handle_key(key_code(KeyCode::Right, KeyModifiers::NONE)); }
-        assert_eq!((app.cursor.0, app.cursor.1), (1, 0), "caret at line-1 start");
+        for _ in 0..2 {
+            app.handle_key(key_code(KeyCode::Left, KeyModifiers::NONE));
+        }
+        for _ in 0..3 {
+            app.handle_key(key_code(KeyCode::Right, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            (app.cursor.0, app.cursor.1),
+            (1, 0),
+            "caret at line-1 start"
+        );
         app.handle_key(key_code(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(app.input, "abcd", "lines merged");
         assert_eq!((app.cursor.0, app.cursor.1), (0, 2));
@@ -1552,7 +1697,8 @@ mod tests {
     #[test]
     fn wp605_editor_dialog_reuses_pane() {
         let mut app = TuiApp::new("m", "cwd", "s");
-        let req = json!({"id":"e1","method":"editor","title":"Note","prefill":"l1\nl2","timeout":60000});
+        let req =
+            json!({"id":"e1","method":"editor","title":"Note","prefill":"l1\nl2","timeout":60000});
         assert!(app.open_editor_session(&req));
         // The editor pane holds the prefilled lines; typing appends.
         assert_eq!(app.input, "l1\nl2");
@@ -1570,19 +1716,23 @@ mod tests {
         // Esc cancels.
         let mut app = TuiApp::new("m", "cwd", "s");
         app.open_editor_session(&req);
-        let action = app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        let action = app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
         let outcome = editor_outcome(action).expect("editor close");
         match outcome {
-            dialog::DialogOutcome::Answered { response, .. } => assert_eq!(response["cancelled"], json!(true)),
+            dialog::DialogOutcome::Answered { response, .. } => {
+                assert_eq!(response["cancelled"], json!(true))
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[test]
     fn wp606_rebind_changes_tui_behavior() {
-        let user: keybindings::KeybindingsConfig = BTreeMap::from([
-            ("tui.input.newLine".to_string(), vec!["ctrl+m".to_string()]),
-        ]);
+        let user: keybindings::KeybindingsConfig =
+            BTreeMap::from([("tui.input.newLine".to_string(), vec!["ctrl+m".to_string()])]);
         let kb = keybindings::KeybindingManager::new(&user).unwrap();
         let mut app = TuiApp::with_kb(kb, "m", "cwd", "s");
         type_str(&mut app, "hi");
@@ -1601,7 +1751,10 @@ mod tests {
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "x");
         app.handle_key(key_code(KeyCode::Up, KeyModifiers::CONTROL));
-        assert_eq!(app.input, "x", "ctrl+up is previousPrompt, not history, in v0");
+        assert_eq!(
+            app.input, "x",
+            "ctrl+up is previousPrompt, not history, in v0"
+        );
     }
 
     /// WP-609: `/model` without args opens the model picker (bundled
@@ -1616,20 +1769,35 @@ mod tests {
         assert!(!items.is_empty(), "bundled registry is not empty");
         assert!(items.iter().all(|i| i.display.contains('/')), "{items:?}");
         // First provider alphabetically in the bundled catalog.
-        assert!(items.first().is_some_and(|i| i.display.starts_with("amazon-bedrock/")), "{:?}", items.first());
+        assert!(
+            items
+                .first()
+                .is_some_and(|i| i.display.starts_with("amazon-bedrock/")),
+            "{:?}",
+            items.first()
+        );
         // The picker renders in the transcript area.
-        assert!(app.render_string().contains("Select model"), "picker renders");
+        assert!(
+            app.render_string().contains("Select model"),
+            "picker renders"
+        );
         // /resume routes to the terminal (session list load).
         app.picker = None;
         app.input.clear();
         app.cursor = (0, 0);
-        assert_eq!(submit_cmd(&mut app, "/resume"), Some(TuiAction::OpenSessionsPicker));
+        assert_eq!(
+            submit_cmd(&mut app, "/resume"),
+            Some(TuiAction::OpenSessionsPicker)
+        );
         // /model with args still switches directly (no picker).
         app.input.clear();
         app.cursor = (0, 0);
         assert_eq!(
             submit_cmd(&mut app, "/model fake/echo"),
-            Some(TuiAction::SetModel { provider: "fake".into(), model: "echo".into() })
+            Some(TuiAction::SetModel {
+                provider: "fake".into(),
+                model: "echo".into()
+            })
         );
     }
 
@@ -1643,13 +1811,21 @@ mod tests {
         app.picker = Some(picker::Picker::new(
             "Resume session",
             vec![
-                PickerItem { display: "alpha · 2026-01-01T00:00:00Z".into(), value: "/s/a.jsonl".into() },
-                PickerItem { display: "beta · 2026-01-02T00:00:00Z".into(), value: "/s/b.jsonl".into() },
+                PickerItem {
+                    display: "alpha · 2026-01-01T00:00:00Z".into(),
+                    value: "/s/a.jsonl".into(),
+                },
+                PickerItem {
+                    display: "beta · 2026-01-02T00:00:00Z".into(),
+                    value: "/s/b.jsonl".into(),
+                },
             ],
         ));
         // Filter to "be".
         app.handle_picker_key(&TermEvent::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('b'), crossterm::event::KeyModifiers::NONE)));
+            crossterm::event::KeyCode::Char('b'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
         assert_eq!(app.picker.as_ref().unwrap().visible().len(), 1);
         // Enter selects the filtered item.
         match app.handle_picker_key(&enter()) {
@@ -1658,12 +1834,26 @@ mod tests {
         }
         assert!(app.picker.is_some(), "picker closes via the terminal");
         // Escape cancels.
-        app.picker = Some(picker::Picker::new("Resume session", vec![PickerItem { display: "x".into(), value: "y".into() }]));
-        assert_eq!(app.handle_picker_key(&TermEvent::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE))), Some(picker::PickerOutcome::Cancelled));
+        app.picker = Some(picker::Picker::new(
+            "Resume session",
+            vec![PickerItem {
+                display: "x".into(),
+                value: "y".into(),
+            }],
+        ));
+        assert_eq!(
+            app.handle_picker_key(&TermEvent::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE
+            ))),
+            Some(picker::PickerOutcome::Cancelled)
+        );
         // An empty list renders gracefully.
         app.picker = Some(picker::Picker::new("Resume session", vec![]));
-        assert!(app.render_string().contains("no matches"), "empty picker renders a placeholder");
+        assert!(
+            app.render_string().contains("no matches"),
+            "empty picker renders a placeholder"
+        );
     }
 
     /// WP-608: the slash menu opens on "/" and shows built-ins, the
@@ -1681,23 +1871,39 @@ mod tests {
                 argument_hint: None,
                 source: crate::tui::commands::Source::Extension,
             }],
-            vec![Template { name: "fix".into(), content: "fix $1".into(), path: PathBuf::from("prompts/fix.md") }],
+            vec![Template {
+                name: "fix".into(),
+                content: "fix $1".into(),
+                path: PathBuf::from("prompts/fix.md"),
+            }],
         );
         type_str(&mut app, "/");
         let items = app.slash.as_ref().expect("menu open on /").0.clone();
         let names: Vec<&str> = items.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"settings"), "builtins in menu: {names:?}");
         assert!(names.contains(&"fix"), "template in menu: {names:?}");
-        assert!(names.contains(&"deploy"), "extension command in menu: {names:?}");
+        assert!(
+            names.contains(&"deploy"),
+            "extension command in menu: {names:?}"
+        );
         // The menu renders above the input pane (8 visible rows).
         let rendered = app.render_string();
-        assert!(rendered.contains("/settings"), "menu rows rendered: {rendered:?}");
+        assert!(
+            rendered.contains("/settings"),
+            "menu rows rendered: {rendered:?}"
+        );
         // A prefix filters to the matching commands — the extension row is
         // then visible (no truncation).
         type_str(&mut app, "de");
         let items = app.slash.as_ref().expect("menu still open").0.clone();
-        assert_eq!(items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["deploy"]);
-        assert!(app.render_string().contains("/deploy"), "extension row rendered");
+        assert_eq!(
+            items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["deploy"]
+        );
+        assert!(
+            app.render_string().contains("/deploy"),
+            "extension row rendered"
+        );
     }
 
     /// WP-608: the select keys navigate the menu; Enter completes the name
@@ -1766,32 +1972,57 @@ mod tests {
                 argument_hint: None,
                 source: crate::tui::commands::Source::Extension,
             }],
-            vec![Template { name: "fix".into(), content: "fix: $@".into(), path: PathBuf::from("prompts/fix.md") }],
+            vec![Template {
+                name: "fix".into(),
+                content: "fix: $@".into(),
+                path: PathBuf::from("prompts/fix.md"),
+            }],
         );
         // Extension command: the M1 bridge `command` path.
         assert_eq!(
             submit_cmd(&mut app, "/deploy prod"),
-            Some(TuiAction::BridgeCommand { name: "deploy".into(), args: "prod".into() })
+            Some(TuiAction::BridgeCommand {
+                name: "deploy".into(),
+                args: "prod".into()
+            })
         );
         assert_eq!(app.input, "");
         // Template: expanded and submitted as a normal user message.
-        assert_eq!(submit_cmd(&mut app, "/fix the bug"), Some(TuiAction::Submit("fix: the bug".into())));
+        assert_eq!(
+            submit_cmd(&mut app, "/fix the bug"),
+            Some(TuiAction::Submit("fix: the bug".into()))
+        );
         // Local builtins.
         assert_eq!(submit_cmd(&mut app, "/session"), None);
-        assert!(app.transcript.last().unwrap().text.contains("session: s"), "{:?}", app.transcript.last());
+        assert!(
+            app.transcript.last().unwrap().text.contains("session: s"),
+            "{:?}",
+            app.transcript.last()
+        );
         assert_eq!(submit_cmd(&mut app, "/hotkeys"), None);
-        assert!(app.transcript.last().unwrap().text.contains("tui.input.submit"));
+        assert!(app
+            .transcript
+            .last()
+            .unwrap()
+            .text
+            .contains("tui.input.submit"));
         // Unknown command: error listing the available ones, input kept.
         assert_eq!(submit_cmd(&mut app, "/zzz"), None);
         let err = app.last_error.clone().expect("error set");
         assert!(err.starts_with("unknown command /zzz"), "{err}");
-        assert!(err.contains("/settings") && err.contains("/deploy") && err.contains("/fix"), "{err}");
+        assert!(
+            err.contains("/settings") && err.contains("/deploy") && err.contains("/fix"),
+            "{err}"
+        );
         assert_eq!(app.input, "/zzz");
         // Known builtin, not wired in v0.
         app.input.clear();
         app.cursor = (0, 0);
         assert_eq!(submit_cmd(&mut app, "/export"), None);
-        assert_eq!(app.last_error.as_deref(), Some("/export is not supported in v0"));
+        assert_eq!(
+            app.last_error.as_deref(),
+            Some("/export is not supported in v0")
+        );
         // /quit exits.
         app.last_error = None;
         app.input.clear();
@@ -1812,7 +2043,10 @@ mod tests {
         app.apply_event(&serde_json::json!({
             "kind": "bridge_cmd_result", "label": "/model", "ok": false, "text": "unknown model x/y"
         }));
-        assert_eq!(app.transcript.last().unwrap().text, "/model: unknown model x/y");
+        assert_eq!(
+            app.transcript.last().unwrap().text,
+            "/model: unknown model x/y"
+        );
         app.apply_event(&serde_json::json!({
             "kind": "bridge_cmd_result", "label": "/model", "ok": true, "text": "", "model": "openai/gpt-x"
         }));
@@ -1827,8 +2061,18 @@ mod tests {
         use ratatui::style::Color;
         // (theme, mdHeading, mdListBullet, userMessageText)
         let cases: &[(&str, Color, Color, Color)] = &[
-            ("dark", Color::Rgb(205, 154, 34), Color::Rgb(167, 152, 215), Color::Rgb(222, 224, 225)),
-            ("light", Color::Rgb(143, 104, 2), Color::Rgb(116, 89, 180), Color::Rgb(59, 63, 65)),
+            (
+                "dark",
+                Color::Rgb(205, 154, 34),
+                Color::Rgb(167, 152, 215),
+                Color::Rgb(222, 224, 225),
+            ),
+            (
+                "light",
+                Color::Rgb(143, 104, 2),
+                Color::Rgb(116, 89, 180),
+                Color::Rgb(59, 63, 65),
+            ),
         ];
         for (name, heading, bullet, user_text) in cases {
             let theme = keybindings_dummy_theme(name);
@@ -1838,7 +2082,10 @@ mod tests {
                 role: "assistant",
                 text: "# Head\n- item\nsee [docs](https://x)".to_string(),
             });
-            app.transcript.push(Msg { role: "user", text: "hello".to_string() });
+            app.transcript.push(Msg {
+                role: "user",
+                text: "hello".to_string(),
+            });
             let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, app.size.0, app.size.1));
             app.render_to(&mut buf, Rect::new(0, 0, app.size.0, app.size.1));
             let cell = |needle: &str| -> Option<ratatui::buffer::Cell> {
@@ -1872,11 +2119,17 @@ mod tests {
         type_str(&mut app, "/theme light");
         // WP-608: the slash menu is open while a bare name is typed — the
         // first Enter completes it, the second submits.
-        assert_eq!(submit_cmd(&mut app, ""), Some(TuiAction::SwitchTheme("light".into())));
+        assert_eq!(
+            submit_cmd(&mut app, ""),
+            Some(TuiAction::SwitchTheme("light".into()))
+        );
         assert_eq!(app.input, "");
         let mut app = TuiApp::new("m", "cwd", "s");
         type_str(&mut app, "/theme");
-        assert_eq!(submit_cmd(&mut app, ""), Some(TuiAction::SwitchTheme(" ".trim().to_string())));
+        assert_eq!(
+            submit_cmd(&mut app, ""),
+            Some(TuiAction::SwitchTheme(" ".trim().to_string()))
+        );
         // The loader rejects unknown themes with the available list.
         let dir = std::env::temp_dir().join(format!("pi-rust-theme-cmd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1889,7 +2142,10 @@ mod tests {
     /// WP-607: the settings `theme` value resolves per upstream semantics.
     #[test]
     fn wp607_theme_setting_resolves() {
-        assert_eq!(theme::resolve_theme_setting(Some("light")), Some("light".into()));
+        assert_eq!(
+            theme::resolve_theme_setting(Some("light")),
+            Some("light".into())
+        );
         assert_eq!(theme::resolve_theme_setting(Some("a/b")), Some("b".into()));
         assert_eq!(theme::resolve_theme_setting(Some("a/b/c")), None);
     }
@@ -1929,14 +2185,16 @@ mod tests {
     #[test]
     fn dialog_owns_keys_until_it_closes() {
         let mut app = TuiApp::new("m", "cwd", "s");
-        let req = json!({"id":"d1","method":"select","title":"Pick","options":["a","b"],"timeout":60000});
+        let req =
+            json!({"id":"d1","method":"select","title":"Pick","options":["a","b"],"timeout":60000});
         assert!(app.open_dialog(&req));
         // Typed characters do not leak into the editor.
         let _ = app.handle_key(key('x'));
         assert_eq!(app.input, "");
         // The dialog gets the keys: down + enter answers "b".
         let _ = app.handle_dialog_key(&key_code(KeyCode::Down, KeyModifiers::NONE));
-        let Some(outcome) = app.handle_dialog_key(&key_code(KeyCode::Enter, KeyModifiers::NONE)) else {
+        let Some(outcome) = app.handle_dialog_key(&key_code(KeyCode::Enter, KeyModifiers::NONE))
+        else {
             panic!("expected dialog answer");
         };
         assert!(app.dialog.is_none(), "dialog must close after answering");
@@ -1958,7 +2216,9 @@ mod tests {
         let req = json!({"id":"d2","method":"confirm","title":"t","message":"m","timeout":1});
         app.open_dialog(&req);
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let outcome = app.take_expired_dialog(std::time::Instant::now()).expect("expired");
+        let outcome = app
+            .take_expired_dialog(std::time::Instant::now())
+            .expect("expired");
         assert!(app.dialog.is_none());
         match outcome {
             dialog::DialogOutcome::TimedOut { id, method, .. } => {
@@ -2015,7 +2275,10 @@ mod tests {
             assert_eq!(app.handle_key(key(c)), None);
         }
         assert_eq!(app.input, "hi");
-        assert_eq!(app.handle_key(enter()), Some(TuiAction::Submit("hi".into())));
+        assert_eq!(
+            app.handle_key(enter()),
+            Some(TuiAction::Submit("hi".into()))
+        );
         assert_eq!(app.input, "");
         assert!(!app.exit);
     }
@@ -2025,9 +2288,15 @@ mod tests {
         let mut app = TuiApp::new("m", "/w", "s");
         app.handle_key(key('a'));
         app.handle_key(key('b'));
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
         assert_eq!(app.input, "a");
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
         assert_eq!(app.input, "");
         assert_eq!(app.handle_key(enter()), None, "empty submit yields nothing");
     }
@@ -2036,7 +2305,10 @@ mod tests {
     fn q_is_a_plain_character() {
         let mut app = TuiApp::new("m", "/w", "s");
         app.handle_key(key('q'));
-        assert_eq!(app.input, "q", "upstream has no bare-q exit; WP-606 formalizes bindings");
+        assert_eq!(
+            app.input, "q",
+            "upstream has no bare-q exit; WP-606 formalizes bindings"
+        );
         assert!(!app.exit);
     }
 
@@ -2058,8 +2330,14 @@ mod tests {
         let mut app = TuiApp::new("m", "/w", "s");
         app.handle_key(key('x'));
         app.handle_key(ctrl_d());
-        assert!(!app.exit, "ctrl+d with text does not exit (upstream app.exit)");
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert!(
+            !app.exit,
+            "ctrl+d with text does not exit (upstream app.exit)"
+        );
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
         app.handle_key(ctrl_d());
         assert!(app.exit, "ctrl+d with empty editor exits");
     }
@@ -2070,7 +2348,9 @@ mod tests {
         app.apply_event(&json!({"kind":"user_input","text":"hello"}));
         app.apply_event(&json!({"kind":"agent_start"}));
         assert!(app.pending);
-        app.apply_event(&json!({"kind":"tool_execution","name":"bash","blocked":false,"result_summary":"out"}));
+        app.apply_event(
+            &json!({"kind":"tool_execution","name":"bash","blocked":false,"result_summary":"out"}),
+        );
         app.apply_event(&json!({"kind":"model_output","text":"echo: hello"}));
         app.apply_event(&json!({"kind":"agent_end"}));
         assert!(!app.pending);
@@ -2094,7 +2374,10 @@ mod tests {
         app.apply_event(&json!({"kind":"user_input","text":"x"}));
         assert!(!app.render_string().contains("● working"));
         app.apply_event(&json!({"kind":"agent_start"}));
-        assert!(app.render_string().contains("● working"), "status bar shows working");
+        assert!(
+            app.render_string().contains("● working"),
+            "status bar shows working"
+        );
         app.apply_event(&json!({"kind":"agent_end"}));
         assert!(!app.render_string().contains("● working"));
     }
@@ -2112,10 +2395,17 @@ mod tests {
 
     #[test]
     fn status_bar_truncates_with_ellipsis() {
-        let mut app = TuiApp::new("m", "/a/very/long/cwd/path/that/goes/on/and/on", "s".repeat(50));
+        let app = TuiApp::new(
+            "m",
+            "/a/very/long/cwd/path/that/goes/on/and/on",
+            "s".repeat(50),
+        );
         let screen = app.render_string();
         let last = screen.lines().last().unwrap();
-        assert!(last.chars().count() <= 80, "status row within width: {last}");
+        assert!(
+            last.chars().count() <= 80,
+            "status row within width: {last}"
+        );
         assert!(last.contains('…'), "truncated with ellipsis: {last}");
     }
 
@@ -2134,9 +2424,18 @@ mod tests {
         app.statuses.insert("e2e".into(), "status-ok".into());
         let screen = app.render_string();
         let last = screen.lines().last().unwrap();
-        assert!(last.chars().count() <= 120, "status row within width: {last}");
-        assert!(last.contains("dialog-ok"), "title survives truncation: {last}");
-        assert!(last.contains("status-ok"), "status survives truncation: {last}");
+        assert!(
+            last.chars().count() <= 120,
+            "status row within width: {last}"
+        );
+        assert!(
+            last.contains("dialog-ok"),
+            "title survives truncation: {last}"
+        );
+        assert!(
+            last.contains("status-ok"),
+            "status survives truncation: {last}"
+        );
     }
 
     #[test]
@@ -2149,7 +2448,10 @@ mod tests {
         for c in "hello".chars() {
             app.handle_key(key(c));
         }
-        assert_eq!(app.handle_key(enter()), Some(TuiAction::Submit("hello".into())));
+        assert_eq!(
+            app.handle_key(enter()),
+            Some(TuiAction::Submit("hello".into()))
+        );
 
         // What the core would emit for a fake-echo run:
         app.apply_event(&json!({"kind":"user_input","index":0,"source":"tui","text":"hello"}));
@@ -2175,9 +2477,16 @@ mod tests {
         app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":"Hel"}));
         app.apply_event(&json!({"kind":"model_delta","turnIndex":0,"text":"lo"}));
         let screen = app.render_string();
-        assert_eq!(app.transcript.len(), 2, "one user + one streaming assistant msg");
-        assert!(app.transcript[1].role == "assistant" && app.transcript[1].text == "Hello",
-            "{:?}", app.transcript);
+        assert_eq!(
+            app.transcript.len(),
+            2,
+            "one user + one streaming assistant msg"
+        );
+        assert!(
+            app.transcript[1].role == "assistant" && app.transcript[1].text == "Hello",
+            "{:?}",
+            app.transcript
+        );
         assert!(screen.contains("Hello"), "{screen}");
     }
 
@@ -2186,7 +2495,12 @@ mod tests {
         let mut app = TuiApp::new("m", "/w", "s");
         app.apply_event(&json!({"kind":"model_delta","text":"echo: hi"}));
         app.apply_event(&json!({"kind":"model_output","text":"echo: hi"}));
-        assert_eq!(app.transcript.len(), 1, "streamed text is not repeated: {:?}", app.transcript);
+        assert_eq!(
+            app.transcript.len(),
+            1,
+            "streamed text is not repeated: {:?}",
+            app.transcript
+        );
         // Non-streaming driver (no deltas before): the full text is pushed.
         let mut app2 = TuiApp::new("m", "/w", "s");
         app2.apply_event(&json!({"kind":"model_output","text":"echo: hi"}));
@@ -2204,8 +2518,10 @@ mod tests {
         let screen = app.render_string();
         let elapsed = t0.elapsed();
         assert!(screen.contains("first"), "{screen}");
-        assert!(elapsed < std::time::Duration::from_millis(100),
-            "first token render took {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "first token render took {elapsed:?}"
+        );
     }
 
     #[test]
@@ -2223,17 +2539,24 @@ mod tests {
         let screen = app.render_string();
         assert!(screen.contains("tok0"), "first token kept: {screen}");
         assert!(screen.contains("tok99"), "last token present: {screen}");
-        assert!(total < std::time::Duration::from_secs(1),
-            "100-token stream rendered in {total:?}");
+        assert!(
+            total < std::time::Duration::from_secs(1),
+            "100-token stream rendered in {total:?}"
+        );
     }
 
     #[test]
     fn markdown_renders_in_pane() {
         let mut app = TuiApp::new("m", "/w", "s");
-        app.apply_event(&json!({"kind":"model_output","text":"# Plan\n- do `x` **now**\n```sh\necho hi\n```"}));
+        app.apply_event(
+            &json!({"kind":"model_output","text":"# Plan\n- do `x` **now**\n```sh\necho hi\n```"}),
+        );
         let screen = app.render_string();
         assert!(screen.contains("1 Plan"), "heading in pane: {screen}");
-        assert!(screen.contains("- do `x` now"), "list+inline in pane: {screen}");
+        assert!(
+            screen.contains("- do `x` now"),
+            "list+inline in pane: {screen}"
+        );
         assert!(screen.contains("sh"), "code label in pane: {screen}");
         assert!(screen.contains("echo hi"), "code line in pane: {screen}");
     }
@@ -2242,12 +2565,21 @@ mod tests {
     fn long_code_block_scrolls_within_pane() {
         let mut app = TuiApp::new("m", "/w", "s");
         app.size = (20, 6); // tiny pane: 3 transcript rows
-        let code: String = (0..40).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+        let code: String = (0..40)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         app.apply_event(&json!({"kind":"model_output","text":format!("```\n{code}\n```")}));
         let screen = app.render_string();
-        assert!(!screen.contains("line-0"), "oldest code scrolled away: {screen}");
+        assert!(
+            !screen.contains("line-0"),
+            "oldest code scrolled away: {screen}"
+        );
         assert!(screen.contains("line-39"), "newest code pinned: {screen}");
-        assert!(!screen.contains("line-20"), "middle scrolled away: {screen}");
+        assert!(
+            !screen.contains("line-20"),
+            "middle scrolled away: {screen}"
+        );
     }
 
     #[test]
@@ -2257,9 +2589,18 @@ mod tests {
         app.apply_event(&json!({"kind":"model_output","text":"aaaa bbbb cccc dddd eeee"}));
         let screen = app.render_string();
         let rows: Vec<&str> = screen.lines().collect();
-        assert!(rows.iter().any(|r| r.contains("aaaa bbbb")), "first wrap row: {screen}");
-        assert!(rows.iter().any(|r| r.contains("cccc")), "wrapped continuation: {screen}");
-        assert!(rows.iter().all(|r| r.chars().count() <= 20), "no row overflows width: {screen}");
+        assert!(
+            rows.iter().any(|r| r.contains("aaaa bbbb")),
+            "first wrap row: {screen}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("cccc")),
+            "wrapped continuation: {screen}"
+        );
+        assert!(
+            rows.iter().all(|r| r.chars().count() <= 20),
+            "no row overflows width: {screen}"
+        );
     }
 
     #[test]
@@ -2272,11 +2613,23 @@ mod tests {
         assert!(!screen.contains("line-0"), "oldest line scrolled away");
         assert!(screen.contains("line-59"), "newest line pinned: {screen}");
 
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
-        app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        app.handle_key(TermEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
         let scrolled = app.render_string();
-        assert!(!scrolled.contains("line-59"), "scrolling up moves the window: {scrolled}");
+        assert!(
+            !scrolled.contains("line-59"),
+            "scrolling up moves the window: {scrolled}"
+        );
     }
 
     #[test]
@@ -2310,7 +2663,10 @@ mod tests {
         app.apply_event(&json!({"kind":"set_status","statusKey":"zeta","statusText":"zz"}));
         app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"aa"}));
         let s = app.render_string();
-        assert!(s.contains("aa zz"), "sorted + space-joined in the status bar:\n{s}");
+        assert!(
+            s.contains("aa zz"),
+            "sorted + space-joined in the status bar:\n{s}"
+        );
         // Overwrite + delete (undefined text removes the key).
         app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"ab"}));
         app.apply_event(&json!({"kind":"set_status","statusKey":"zeta"}));
@@ -2327,9 +2683,17 @@ mod tests {
 
     #[test]
     fn wp801_skill_command_dispatch() {
-        let d = std::env::temp_dir().join(format!("pi-rust-sktui-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!(
+            "pi-rust-sktui-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(d.join("greet")).unwrap();
-        std::fs::write(d.join("greet/SKILL.md"), "---\nname: greet\ndescription: g\n---\nDo the thing.").unwrap();
+        std::fs::write(
+            d.join("greet/SKILL.md"),
+            "---\nname: greet\ndescription: g\n---\nDo the thing.",
+        )
+        .unwrap();
         let skills = crate::skills::load_from_dir(&d, &mut Vec::new());
         assert_eq!(skills.len(), 1);
         let mut app = TuiApp::new("m", "/a/b", "s").with_skills(skills);
@@ -2339,10 +2703,20 @@ mod tests {
             d.join("greet").display()
         );
         // Expanded: the skill body is submitted as a normal message.
-        assert_eq!(submit_cmd(&mut app, "/skill:greet"), Some(TuiAction::Submit(expected.clone())));
+        assert_eq!(
+            submit_cmd(&mut app, "/skill:greet"),
+            Some(TuiAction::Submit(expected.clone()))
+        );
         // With args: appended after the block.
-        assert_eq!(submit_cmd(&mut app, "/skill:greet extra"), Some(TuiAction::Submit(format!("{expected}\n\nextra"))));
+        assert_eq!(
+            submit_cmd(&mut app, "/skill:greet extra"),
+            Some(TuiAction::Submit(format!("{expected}\n\nextra")))
+        );
         // Unknown skill: the original text is submitted unchanged (upstream pass-through).
-        assert_eq!(submit_cmd(&mut app, "/skill:nope x"), Some(TuiAction::Submit("/skill:nope x".into())));
-        let _ = std::fs::remove_dir_all(&d);    }
+        assert_eq!(
+            submit_cmd(&mut app, "/skill:nope x"),
+            Some(TuiAction::Submit("/skill:nope x".into()))
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

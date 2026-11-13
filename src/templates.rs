@@ -7,7 +7,7 @@
 //! - expansion: `$1`..`$9`, `$@`/`$ARGUMENTS`, `${N:-default}`,
 //!   `${ARGUMENTS:-default}` / `${@:-default}`; one pass, no recursion,
 //!   no `${@:N:M}` slicing (upstream has it; not needed by v0 templates)
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 pub struct Template {
@@ -20,18 +20,32 @@ pub struct Template {
 pub fn discover(agent_dir: &Path, cwd: &Path) -> Vec<Template> {
     let mut map: std::collections::BTreeMap<String, Template> = std::collections::BTreeMap::new();
     for dir in [agent_dir.join("prompts"), cwd.join(".pi").join("prompts")] {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if !p.is_file() || p.extension().is_some_and(|x| x != "md") {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&p) else { continue };
-            let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let Ok(content) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.is_empty() {
                 continue;
             }
-            map.insert(name.clone(), Template { name, content, path: p });
+            map.insert(
+                name.clone(),
+                Template {
+                    name,
+                    content,
+                    path: p,
+                },
+            );
         }
     }
     map.into_values().collect()
@@ -44,7 +58,7 @@ pub fn parse_args(s: &str) -> Vec<String> {
     let mut current = String::new();
     let mut has_token = false;
     let mut in_quote: Option<char> = None;
-    let mut chars = s.chars().peekable();
+    let chars = s.chars().peekable();
     let bytes: Vec<char> = s.chars().collect();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -126,9 +140,9 @@ pub fn expand(content: &str, args: &[String]) -> String {
                                 Some(all.as_str())
                             }
                         }
-                        d if d.chars().all(|c| c.is_ascii_digit()) && !d.is_empty() => {
-                            args.get(d.parse::<usize>().unwrap() - 1).map(String::as_str)
-                        }
+                        d if d.chars().all(|c| c.is_ascii_digit()) && !d.is_empty() => args
+                            .get(d.parse::<usize>().unwrap() - 1)
+                            .map(String::as_str),
                         _ => None,
                     };
                     match (value, default) {
@@ -152,7 +166,11 @@ pub fn apply(agent_dir: &Path, cwd: &Path, name: &str, arg_string: &str) -> Resu
     let t = discover(agent_dir, cwd)
         .into_iter()
         .find(|t| t.name == name)
-        .ok_or_else(|| anyhow::anyhow!("unknown prompt template {name} (looked in <agentDir>/prompts and .pi/prompts)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown prompt template {name} (looked in <agentDir>/prompts and .pi/prompts)"
+            )
+        })?;
     Ok(expand(&t.content, &parse_args(arg_string)))
 }
 
@@ -161,13 +179,17 @@ mod tests {
     use super::*;
 
     fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pi-rust-tpl-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!(
+            "pi-rust-tpl-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
     #[test]
-	fn discovers_agent_and_project_with_project_winning() {
+    fn discovers_agent_and_project_with_project_winning() {
         let d = dir();
         let agent = d.join("agent");
         std::fs::create_dir_all(agent.join("prompts")).unwrap();
@@ -185,7 +207,7 @@ mod tests {
     }
 
     #[test]
-	fn expands_positional_all_and_defaults() {
+    fn expands_positional_all_and_defaults() {
         let a = vec!["x".into(), "y".into()];
         assert_eq!(expand("hi $1 $2", &a), "hi x y");
         assert_eq!(expand("all: $@", &a), "all: x y");
@@ -201,7 +223,7 @@ mod tests {
     }
 
     #[test]
-	fn parse_args_respects_quotes() {
+    fn parse_args_respects_quotes() {
         assert_eq!(parse_args("a b"), vec!["a", "b"]);
         assert_eq!(parse_args("\"two words\" c"), vec!["two words", "c"]);
         assert_eq!(parse_args("'q' d"), vec!["q", "d"]);
@@ -210,7 +232,7 @@ mod tests {
     }
 
     #[test]
-	fn apply_unknown_template_is_typed_error() {
+    fn apply_unknown_template_is_typed_error() {
         let d = dir();
         let err = apply(&d, &d, "nope", "").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");

@@ -53,10 +53,10 @@ fn extract_frontmatter(content: &str) -> (Option<String>, String) {
 
 fn unquote(v: &str) -> String {
     let b = v.as_bytes();
-    if b.len() >= 2 {
-        if (b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\'') {
-            return v[1..v.len() - 1].to_string();
-        }
+    if b.len() >= 2
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+    {
+        return v[1..v.len() - 1].to_string();
     }
     v.to_string()
 }
@@ -65,7 +65,10 @@ fn unquote(v: &str) -> String {
 /// `name` / `description` / `disable-model-invocation`; unknown fields
 /// ignored. Any indented line or missing colon = unparseable.
 fn parse_frontmatter(yaml: &str) -> Frontmatter {
-    let mut fm = Frontmatter { ok: true, ..Default::default() };
+    let mut fm = Frontmatter {
+        ok: true,
+        ..Default::default()
+    };
     for line in yaml.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
@@ -106,10 +109,19 @@ fn parse_frontmatter(yaml: &str) -> Frontmatter {
 fn validate_name(name: &str) -> Vec<String> {
     let mut e = Vec::new();
     if name.len() > MAX_NAME_LENGTH {
-        e.push(format!("name exceeds {MAX_NAME_LENGTH} characters ({})", name.len()));
+        e.push(format!(
+            "name exceeds {MAX_NAME_LENGTH} characters ({})",
+            name.len()
+        ));
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        e.push("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)".to_string());
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        e.push(
+            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+                .to_string(),
+        );
     }
     if name.starts_with('-') || name.ends_with('-') {
         e.push("name must not start or end with a hyphen".to_string());
@@ -126,7 +138,10 @@ fn validate_description(d: Option<&str>) -> Vec<String> {
     match d {
         Some(s) if !s.trim().is_empty() => {
             if s.len() > MAX_DESCRIPTION_LENGTH {
-                e.push(format!("description exceeds {MAX_DESCRIPTION_LENGTH} characters ({})", s.len()));
+                e.push(format!(
+                    "description exceeds {MAX_DESCRIPTION_LENGTH} characters ({})",
+                    s.len()
+                ));
             }
         }
         _ => e.push("description is required".to_string()),
@@ -144,7 +159,10 @@ fn load_skill_from_file(path: &Path, warnings: &mut Vec<String>) -> Option<Skill
     let raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            warnings.push(format!("failed to read skill file: {e} ({})", path.display()));
+            warnings.push(format!(
+                "failed to read skill file: {e} ({})",
+                path.display()
+            ));
             return None;
         }
     };
@@ -160,10 +178,16 @@ fn load_skill_from_file(path: &Path, warnings: &mut Vec<String>) -> Option<Skill
             }
             f
         }
-        None => Frontmatter { ok: true, ..Default::default() },
+        None => Frontmatter {
+            ok: true,
+            ..Default::default()
+        },
     };
     let description = fm.description.clone();
-    let has_description = description.as_deref().map(str::trim).is_some_and(|t| !t.is_empty());
+    let has_description = description
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|t| !t.is_empty());
     if !is_declared && !has_description {
         return None;
     }
@@ -200,7 +224,11 @@ fn load_skill_from_file(path: &Path, warnings: &mut Vec<String>) -> Option<Skill
 /// skill root (no deeper recursion); otherwise direct root `.md` children
 /// (top level only) plus recursion into subdirectories. Dot-dirs and
 /// `node_modules` are skipped.
-fn load_from_dir_internal(dir: &Path, include_root_files: bool, warnings: &mut Vec<String>) -> Vec<Skill> {
+fn load_from_dir_internal(
+    dir: &Path,
+    include_root_files: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<Skill> {
     let mut skills = Vec::new();
     if !dir.is_dir() {
         return skills;
@@ -218,7 +246,10 @@ fn load_from_dir_internal(dir: &Path, include_root_files: bool, warnings: &mut V
         }
     }
     for p in &entries {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if name.starts_with('.') || name == "node_modules" {
             continue;
         }
@@ -245,7 +276,11 @@ pub fn load(agent_dir: &Path, cwd: &Path, warnings: &mut Vec<String>) -> Vec<Ski
     for dir in [agent_dir.join("skills"), cwd.join(".pi").join("skills")] {
         for s in load_from_dir(&dir, warnings) {
             if !names.insert(s.name.clone()) {
-                warnings.push(format!("name \"{}\" collision ({})", s.name, s.file_path.display()));
+                warnings.push(format!(
+                    "name \"{}\" collision ({})",
+                    s.name,
+                    s.file_path.display()
+                ));
                 continue;
             }
             out.push(s);
@@ -266,7 +301,10 @@ fn escape_xml(s: &str) -> String {
 /// `read` tool, so the reader hint is fixed to `read`). `SKILL.md`
 /// locations are absolute paths as discovered.
 pub fn format_for_prompt(skills: &[Skill]) -> String {
-    let visible: Vec<&Skill> = skills.iter().filter(|s| !s.disable_model_invocation).collect();
+    let visible: Vec<&Skill> = skills
+        .iter()
+        .filter(|s| !s.disable_model_invocation)
+        .collect();
     if visible.is_empty() {
         return String::new();
     }
@@ -330,7 +368,11 @@ mod tests {
     use super::*;
 
     fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pi-rust-sk-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!(
+            "pi-rust-sk-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -348,9 +390,15 @@ mod tests {
             extract_frontmatter("---\nname: x\n---\nbody"),
             (Some("name: x".to_string()), "body".to_string())
         );
-        assert_eq!(extract_frontmatter("no fm here"), (None, "no fm here".to_string()));
+        assert_eq!(
+            extract_frontmatter("no fm here"),
+            (None, "no fm here".to_string())
+        );
         // Unterminated block: no frontmatter (upstream indexOf -1).
-        assert_eq!(extract_frontmatter("---\nname: x"), (None, "---\nname: x".to_string()));
+        assert_eq!(
+            extract_frontmatter("---\nname: x"),
+            (None, "---\nname: x".to_string())
+        );
         // CRLF + BOM normalization.
         assert_eq!(
             extract_frontmatter("\u{feff}---\r\nname: x\r\n---\r\nb"),
@@ -360,7 +408,9 @@ mod tests {
 
     #[test]
     fn frontmatter_scalars_quotes_and_unknown() {
-        let fm = parse_frontmatter("name: \"a-b\"\ndescription: 'd 1'\nunknown: [1, 2]\ndisable-model-invocation: true");
+        let fm = parse_frontmatter(
+            "name: \"a-b\"\ndescription: 'd 1'\nunknown: [1, 2]\ndisable-model-invocation: true",
+        );
         assert!(fm.ok);
         assert_eq!(fm.name.as_deref(), Some("a-b"));
         assert_eq!(fm.description.as_deref(), Some("d 1"));
@@ -378,21 +428,36 @@ mod tests {
     fn validate_name_messages_verbatim() {
         assert_eq!(validate_name("ok-name"), Vec::<String>::new());
         let long = "a".repeat(65);
-        assert_eq!(validate_name(&long), vec![format!("name exceeds 64 characters (65)")]);
+        assert_eq!(
+            validate_name(&long),
+            vec!["name exceeds 64 characters (65)".to_string()]
+        );
         assert_eq!(
             validate_name("Bad_Name"),
             vec!["name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"]
         );
-        assert_eq!(validate_name("-x"), vec!["name must not start or end with a hyphen"]);
-        assert_eq!(validate_name("a--b"), vec!["name must not contain consecutive hyphens"]);
+        assert_eq!(
+            validate_name("-x"),
+            vec!["name must not start or end with a hyphen"]
+        );
+        assert_eq!(
+            validate_name("a--b"),
+            vec!["name must not contain consecutive hyphens"]
+        );
     }
 
     #[test]
     fn validate_description_messages_verbatim() {
         assert_eq!(validate_description(None), vec!["description is required"]);
-        assert_eq!(validate_description(Some("  ")), vec!["description is required"]);
+        assert_eq!(
+            validate_description(Some("  ")),
+            vec!["description is required"]
+        );
         let long = "x".repeat(1025);
-        assert_eq!(validate_description(Some(&long)), vec!["description exceeds 1024 characters (1025)"]);
+        assert_eq!(
+            validate_description(Some(&long)),
+            vec!["description exceeds 1024 characters (1025)"]
+        );
         assert_eq!(validate_description(Some("fine")), Vec::<String>::new());
     }
 
@@ -401,10 +466,26 @@ mod tests {
         let d = dir();
         let agent = d.join("agent");
         let cwd = d.join("cwd");
-        skill(&agent, "skills/greet/SKILL.md", "---\nname: greet\ndescription: agent greet\n---\nbody");
-        skill(&agent, "skills/loose.md", "---\ndescription: loose agent md\n---\nbody");
-        skill(&agent, "skills/nested/deep/SKILL.md", "---\nname: deep\ndescription: nested\n---\nbody");
-        skill(&cwd, ".pi/skills/proj/SKILL.md", "---\nname: proj\ndescription: project skill\n---\nbody");
+        skill(
+            &agent,
+            "skills/greet/SKILL.md",
+            "---\nname: greet\ndescription: agent greet\n---\nbody",
+        );
+        skill(
+            &agent,
+            "skills/loose.md",
+            "---\ndescription: loose agent md\n---\nbody",
+        );
+        skill(
+            &agent,
+            "skills/nested/deep/SKILL.md",
+            "---\nname: deep\ndescription: nested\n---\nbody",
+        );
+        skill(
+            &cwd,
+            ".pi/skills/proj/SKILL.md",
+            "---\nname: proj\ndescription: project skill\n---\nbody",
+        );
         let mut w = Vec::new();
         let s = load(&agent, &cwd, &mut w);
         // `loose.md` (root .md, no name field) falls back to the parent dir
@@ -412,7 +493,11 @@ mod tests {
         // is filesystem-dependent, so compare as a set.
         let mut names: Vec<&str> = s.iter().map(|x| x.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, vec!["deep", "greet", "proj", "skills"], "{names:?} warnings: {w:?}");
+        assert_eq!(
+            names,
+            vec!["deep", "greet", "proj", "skills"],
+            "{names:?} warnings: {w:?}"
+        );
         assert!(w.is_empty(), "{w:?}");
     }
 
@@ -420,8 +505,16 @@ mod tests {
     fn skill_md_root_stops_recursion() {
         let d = dir();
         let agent = d.join("agent");
-        skill(&agent, "skills/root/SKILL.md", "---\nname: root\ndescription: root skill\n---\nbody");
-        skill(&agent, "skills/root/sub/inner.md", "---\nname: inner\ndescription: hidden\n---\nbody");
+        skill(
+            &agent,
+            "skills/root/SKILL.md",
+            "---\nname: root\ndescription: root skill\n---\nbody",
+        );
+        skill(
+            &agent,
+            "skills/root/sub/inner.md",
+            "---\nname: inner\ndescription: hidden\n---\nbody",
+        );
         let mut w = Vec::new();
         let s = load_from_dir(&agent.join("skills"), &mut w);
         assert_eq!(s.len(), 1, "SKILL.md root must not recurse: {s:?}");
@@ -431,9 +524,21 @@ mod tests {
     fn skips_dotdirs_and_node_modules() {
         let d = dir();
         let agent = d.join("agent");
-        skill(&agent, "skills/.hidden/SKILL.md", "---\nname: hidden\ndescription: dot\n---\nbody");
-        skill(&agent, "skills/node_modules/pkg/SKILL.md", "---\nname: pkg\ndescription: nm\n---\nbody");
-        skill(&agent, "skills/good/SKILL.md", "---\nname: good\ndescription: good\n---\nbody");
+        skill(
+            &agent,
+            "skills/.hidden/SKILL.md",
+            "---\nname: hidden\ndescription: dot\n---\nbody",
+        );
+        skill(
+            &agent,
+            "skills/node_modules/pkg/SKILL.md",
+            "---\nname: pkg\ndescription: nm\n---\nbody",
+        );
+        skill(
+            &agent,
+            "skills/good/SKILL.md",
+            "---\nname: good\ndescription: good\n---\nbody",
+        );
         let mut w = Vec::new();
         let s = load_from_dir(&agent.join("skills"), &mut w);
         assert_eq!(s.len(), 1);
@@ -445,20 +550,41 @@ mod tests {
         let d = dir();
         let agent = d.join("agent");
         // Declared skill without description: skipped + warning.
-        skill(&agent, "skills/nodesc/SKILL.md", "---\nname: nodesc\n---\nbody");
+        skill(
+            &agent,
+            "skills/nodesc/SKILL.md",
+            "---\nname: nodesc\n---\nbody",
+        );
         // Plain .md without description: silent skip.
         skill(&agent, "skills/plain.md", "just text");
         // Invalid name chars: skill loads WITH warnings (upstream behavior);
         // the frontmatter name is kept as-is (fallback is only for a missing
         // or empty name).
-        skill(&agent, "skills/bad/SKILL.md", "---\nname: Bad_Name\ndescription: has warnings\n---\nbody");
+        skill(
+            &agent,
+            "skills/bad/SKILL.md",
+            "---\nname: Bad_Name\ndescription: has warnings\n---\nbody",
+        );
         let mut w = Vec::new();
         let s = load_from_dir(&agent.join("skills"), &mut w);
         assert_eq!(s.len(), 1, "{s:?}");
-        assert_eq!(s[0].name, "Bad_Name", "frontmatter name is kept; only warnings are emitted");
-        assert!(w.iter().any(|m| m.starts_with("description is required")), "{w:?}");
-        assert!(w.iter().any(|m| m.starts_with("name contains invalid characters")), "{w:?}");
-        assert!(!w.iter().any(|m| m.contains("plain.md")), "plain .md must be silent: {w:?}");
+        assert_eq!(
+            s[0].name, "Bad_Name",
+            "frontmatter name is kept; only warnings are emitted"
+        );
+        assert!(
+            w.iter().any(|m| m.starts_with("description is required")),
+            "{w:?}"
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with("name contains invalid characters")),
+            "{w:?}"
+        );
+        assert!(
+            !w.iter().any(|m| m.contains("plain.md")),
+            "plain .md must be silent: {w:?}"
+        );
     }
 
     #[test]
@@ -466,13 +592,24 @@ mod tests {
         let d = dir();
         let agent = d.join("agent");
         let cwd = d.join("cwd");
-        skill(&agent, "skills/dup/SKILL.md", "---\nname: dup\ndescription: agent one\n---\nbody");
-        skill(&cwd, ".pi/skills/dup2/SKILL.md", "---\nname: dup\ndescription: project one\n---\nbody");
+        skill(
+            &agent,
+            "skills/dup/SKILL.md",
+            "---\nname: dup\ndescription: agent one\n---\nbody",
+        );
+        skill(
+            &cwd,
+            ".pi/skills/dup2/SKILL.md",
+            "---\nname: dup\ndescription: project one\n---\nbody",
+        );
         let mut w = Vec::new();
         let s = load(&agent, &cwd, &mut w);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].description, "agent one");
-        assert!(w.iter().any(|m| m.starts_with("name \"dup\" collision")), "{w:?}");
+        assert!(
+            w.iter().any(|m| m.starts_with("name \"dup\" collision")),
+            "{w:?}"
+        );
     }
 
     #[test]
@@ -555,7 +692,11 @@ mod tests {
     #[test]
     fn expand_skill_golden_with_and_without_args() {
         let d = dir();
-        let p = skill(&d, "greet/SKILL.md", "---\nname: greet\ndescription: g\n---\n# Title\n\nDo the thing.");
+        let p = skill(
+            &d,
+            "greet/SKILL.md",
+            "---\nname: greet\ndescription: g\n---\n# Title\n\nDo the thing.",
+        );
         let s = load_from_dir(&d, &mut Vec::new()).pop().unwrap();
         let base = format!(
             "<skill name=\"greet\" location=\"{}\">\nReferences are relative to {}.\n\n# Title\n\nDo the thing.\n</skill>",
@@ -563,6 +704,9 @@ mod tests {
             d.join("greet").display()
         );
         assert_eq!(expand_skill(&s, "").unwrap(), base);
-        assert_eq!(expand_skill(&s, "extra args").unwrap(), format!("{base}\n\nextra args"));
+        assert_eq!(
+            expand_skill(&s, "extra args").unwrap(),
+            format!("{base}\n\nextra args")
+        );
     }
 }
