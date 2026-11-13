@@ -10,7 +10,7 @@ pub mod openai;
 pub use anthropic::AnthropicDriver;
 pub use openai::OpenAiDriver;
 
-use crate::model::{AssistantTurn, ModelDriver};
+use crate::model::{AssistantTurn, ModelDriver, StreamDelta};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::future::Future;
@@ -32,7 +32,7 @@ impl ProviderDriver {
 	pub fn complete<'a>(
 		&'a self,
 		convo: &'a [Value],
-		on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+		on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
 	) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		match self {
 			ProviderDriver::OpenAi(d) => d.complete(convo, on_delta),
@@ -183,13 +183,13 @@ pub fn build_provider(name: &str, model: Option<&str>, agent_dir: &std::path::Pa
 }
 
 impl ModelDriver for Arc<OpenAiDriver> {
-	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		self.as_ref().complete(convo, on_delta)
 	}
 }
 
 impl ModelDriver for Arc<AnthropicDriver> {
-	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		self.as_ref().complete(convo, on_delta)
 	}
 }
@@ -467,7 +467,7 @@ mod family_tests {
 			let turn = drv
 				.complete(
 					&[serde_json::json!({"role":"user","content":"hi"})],
-					Box::new(|_: &str| {}),
+					Box::new(|_: crate::model::StreamDelta| {}),
 				)
 				.await
 				.unwrap_or_else(|e| panic!("{p} complete: {e}"));

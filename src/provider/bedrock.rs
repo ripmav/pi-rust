@@ -2,7 +2,7 @@
 //! (no AWS SDK, per WP-405). The AWS event-stream framing (prelude,
 //! headers, CRCs) is parsed manually; wire shapes follow upstream
 //! `packages/ai/src/api/bedrock-converse-stream.ts` (pinned 085c84e).
-use crate::model::{AssistantTurn, ModelDriver, ToolCallSpec, Usage};
+use crate::model::{AssistantTurn, ModelDriver, StreamDelta, ToolCallSpec, Usage};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use hmac::{Hmac, KeyInit, Mac};
@@ -179,7 +179,7 @@ impl BedrockDriver {
 	async fn complete_impl<'a>(
 		&'a self,
 		convo: &'a [Value],
-		mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+		mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
 	) -> Result<AssistantTurn> {
 		let (system_field, messages) = Self::map_messages(convo);
 		let mut body = json!({"modelId":self.model,"messages":messages});
@@ -219,6 +219,7 @@ impl BedrockDriver {
 			bail!("bedrock api error {status}: {text}");
 		}
 		let mut text = String::new();
+		let mut text_started = false;
 		let mut usage = Usage::default();
 		let mut stop_reason: Option<String> = None;
 		// toolUseId -> (name, accumulated input JSON string)
@@ -269,8 +270,12 @@ impl BedrockDriver {
 					"contentBlockDelta" => {
 						let delta = v.pointer("/contentBlockDelta/delta");
 						if let Some(t) = delta.and_then(|d| d.get("text")).and_then(Value::as_str) {
+							if !text_started {
+							text_started = true;
+							on_delta(StreamDelta::TextStart { index: 0 });
+							}
 							text.push_str(t);
-							on_delta(t); // WP-603: TUI renders tokens as they arrive
+							on_delta(StreamDelta::TextDelta { index: 0, delta: t.to_string() }); // WP-603: TUI renders tokens as they arrive
 						}
 						if let Some(tu) = delta.and_then(|d| d.get("toolUse")) {
 							let id = tu.get("toolUseId").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -317,6 +322,19 @@ impl BedrockDriver {
 				ToolCallSpec { id, name, input }
 			})
 			.collect();
+		// WP-802: stream-end events (upstream assistantMessageEvent parity;
+		// tool-call deltas are batched at end for non-OpenAI drivers).
+		if text_started {
+			on_delta(StreamDelta::TextEnd { index: 0, content: text.clone() });
+		}
+		for (i, tc) in tool_calls.iter().enumerate() {
+			let idx = i as u32;
+			on_delta(StreamDelta::ToolCallStart { index: idx, id: tc.id.clone(), name: tc.name.clone(), initial_args: Value::Null });
+			on_delta(StreamDelta::ToolCallEnd {
+				index: idx,
+				tool_call: json!({"id":tc.id,"name":tc.name,"arguments":tc.input.clone()}),
+			});
+		}
 		Ok(AssistantTurn {
 			text: if text.is_empty() { None } else { Some(text) },
 			tool_calls,
@@ -375,7 +393,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 impl ModelDriver for BedrockDriver {
-	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		Box::pin(async move { self.complete_impl(convo, on_delta).await })
 	}
 }
@@ -485,7 +503,7 @@ mod tests {
 		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock_bytes(raw_response(&events), tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "anthropic.claude-3-5-sonnet-v2:0".into());
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Hello"));
 		assert_eq!(turn.tool_calls, vec![ToolCallSpec { id: "tu1".into(), name: "bash".into(), input: json!({"command":"ls"}) }]);
 		assert_eq!(turn.usage.input, 12);
@@ -506,7 +524,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock(resp, tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "m".into());
-		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap_err().to_string();
 		assert!(err.contains("403"), "{err}");
 		assert!(err.contains("Unauthorized access"), "{err}");
 	}
@@ -520,7 +538,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock_bytes(raw_response(&events), tx).await;
 		let d = BedrockDriver::with_base(base, "us-east-1".into(), "AK".into(), "SK".into(), None, "m".into());
-		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap_err().to_string();
 		assert!(err.contains("field required"), "{err}");
 	}
 }

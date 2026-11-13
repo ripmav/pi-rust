@@ -2,7 +2,7 @@
 //! Covers OpenAI itself, local servers, and compatible endpoints (solheim/qwen-style)
 //! via `base_url`. The conversation arrives in pi format; tools come from the
 //! system message's `toolsAdded` (built by `build_conversation`).
-use crate::model::{AssistantTurn, ModelDriver, ToolCallSpec};
+use crate::model::{AssistantTurn, ModelDriver, StreamDelta, ToolCallSpec};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -154,7 +154,7 @@ impl OpenAiDriver {
 	async fn complete_impl<'a>(
 		&'a self,
 		convo: &'a [Value],
-		mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+		mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
 	) -> Result<AssistantTurn> {
 		let tools = Self::tools_from(convo);
 		let mut body = json!({"model":self.model,"stream":true,"stream_options":{"include_usage":true},"messages":Self::map_messages(convo)});
@@ -189,6 +189,7 @@ impl OpenAiDriver {
 			bail!("openai api error {status}: {text}");
 		}
 		let mut text = String::new();
+		let mut text_started = false;
 		let mut usage = crate::model::Usage::default();
 		// index -> (id, name, accumulated argument JSON string)
 		let mut calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
@@ -217,25 +218,58 @@ impl OpenAiDriver {
 				}
 				let Some(delta) = v.pointer("/choices/0/delta") else { continue };
 				if let Some(t) = delta.get("content").and_then(Value::as_str) {
+						if !text_started {
+							text_started = true;
+							on_delta(StreamDelta::TextStart { index: 0 });
+						}
 						text.push_str(t);
-						on_delta(t); // WP-603: TUI renders tokens as they arrive
+						on_delta(StreamDelta::TextDelta { index: 0, delta: t.to_string() }); // WP-603: TUI renders tokens as they arrive
 				}
 				if let Some(items) = delta.get("tool_calls").and_then(Value::as_array) {
 					for c in items {
 						let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
 						let e = calls.entry(idx).or_default();
+						let (had_id, had_name) = (!e.0.is_empty(), !e.1.is_empty());
 						if let Some(id) = c.get("id").and_then(Value::as_str) {
 							e.0 = id.to_string();
 						}
 						if let Some(n) = c.pointer("/function/name").and_then(Value::as_str) {
 							e.1 = n.to_string();
 						}
-						if let Some(a) = c.pointer("/function/arguments").and_then(Value::as_str) {
-							e.2.push_str(a);
+						let fragment = c.pointer("/function/arguments").and_then(Value::as_str).map(str::to_string);
+						let first_seen = (!had_id || !had_name) && !e.0.is_empty() && !e.1.is_empty();
+						if first_seen {
+							// WP-802: toolcall_start once id + name are known
+							// (the content index offsets past a text block);
+							// the same chunk's arguments fragment is the
+							// initial partial the upstream `start` event sees.
+							if let Some(f) = &fragment { e.2.push_str(f); }
+							let ci = if text.is_empty() { idx } else { idx + 1 };
+							let initial = if e.2.trim().is_empty() { None }
+								else { serde_json::from_str::<Value>(e.2.as_str()).ok() };
+							on_delta(StreamDelta::ToolCallStart { index: ci, id: e.0.clone(), name: e.1.clone(),
+								initial_args: initial.unwrap_or(Value::Null) });
+						}
+						if let Some(f) = &fragment {
+							if !first_seen { e.2.push_str(f); }
+							let ci = if text.is_empty() { idx } else { idx + 1 };
+							on_delta(StreamDelta::ToolCallDelta { index: ci, delta: f.clone() });
 						}
 					}
 				}
 			}
+		}
+		// WP-802: stream-end events (upstream `assistantMessageEvent` parity).
+		if text_started {
+			on_delta(StreamDelta::TextEnd { index: 0, content: text.clone() });
+		}
+		for (idx, (id, name, args)) in &calls {
+			let parsed = if args.trim().is_empty() { json!({}) } else { serde_json::from_str(args).unwrap_or(json!({})) };
+			let ci = if text.is_empty() { *idx } else { *idx + 1 };
+			on_delta(StreamDelta::ToolCallEnd {
+				index: ci,
+				tool_call: json!({"type":"toolCall","id":id,"name":name,"arguments":parsed}),
+			});
 		}
 		let tool_calls = calls
 			.into_iter()
@@ -254,7 +288,7 @@ impl OpenAiDriver {
 }
 
 impl ModelDriver for OpenAiDriver {
-	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		Box::pin(async move { self.complete_impl(convo, on_delta).await })
 	}
 }
@@ -281,7 +315,7 @@ mod tests {
 		);
 		let base = mock::start_mock(mock::sse_response(sse), tx).await;
 		let d = OpenAiDriver::new(base, "k".into(), "m".into());
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Hello"));
 		assert_eq!(turn.tool_calls, vec![ToolCallSpec { id: "tc_1".into(), name: "hello".into(), input: json!({"name":"X"}) }]);
 	}
@@ -308,7 +342,11 @@ mod tests {
 		let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 		let got2 = got.clone();
 		let turn = d
-			.complete(&mock::test_convo(), Box::new(move |c: &str| got2.lock().unwrap().push(c.to_string())))
+			.complete(&mock::test_convo(), Box::new(move |ev: crate::model::StreamDelta| {
+				if let crate::model::StreamDelta::TextDelta { delta, .. } = &ev {
+					got2.lock().unwrap().push(delta.clone());
+				}
+			}))
 			.await
 			.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Hello world"));
@@ -332,7 +370,7 @@ mod tests {
 		);
 		let base = mock::start_mock(mock::sse_response(sse), tx).await;
 		let d = OpenAiDriver::new(base, "k".into(), "m".into());
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.usage.input, 11);
 		assert_eq!(turn.usage.output, 7);
 		assert_eq!(turn.usage.cache_read, 3);
@@ -347,7 +385,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock(resp, tx).await;
 		let d = OpenAiDriver::new(base, "k".into(), "m".into());
-		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap_err().to_string();
 		assert!(err.contains("500"), "{err}");
 		assert!(err.contains("boom"), "{err}");
 	}
@@ -388,7 +426,7 @@ mod tests {
 			"dep-gpt".into(),
 			"2024-10-21".into(),
 		);
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("ok"));
 		let recorded = rx.recv().await.unwrap();
 		let first_line = recorded.lines().next().unwrap_or_default().to_string();

@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::client::{BridgeClient, Decision, State};
-use crate::model::{AssistantTurn, FakeDriver, ModelDriver};
+use crate::model::{AssistantTurn, FakeDriver, ModelDriver, StreamDelta};
 use crate::provider::ProviderDriver;
 use crate::session::{now_ms, Session};
 use crate::tools;
@@ -108,6 +109,8 @@ pub enum OutputMode {
     Ndjson,
     Text,
     Json,
+    /// WP-802: upstream `--mode rpc` surface (stdin JSONL command loop).
+    Rpc,
 }
 
 pub struct Core {
@@ -124,7 +127,8 @@ pub struct Core {
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
-    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
+    /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
+    pub skills: Arc<Vec<crate::skills::Skill>>,    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
     pub log: EventLog,
     pub fail: Arc<Mutex<Option<String>>>,               // first fatal scenario error
     pub model: Arc<Mutex<(Value, Option<String>)>>,     // (active model, thinking level)
@@ -137,6 +141,8 @@ pub struct Core {
     pub agent_dir: Arc<std::path::PathBuf>,
     /// Cumulative token usage / cost for --print-usage (WP-407).
     pub usage_total: Arc<Mutex<crate::model::Usage>>,
+    /// WP-802: true while an agent run is executing (rpc `prompt` guard).
+    pub run_active: Arc<std::sync::atomic::AtomicBool>,
     pub cost_total: Arc<Mutex<f64>>,
     /// TUI mode (WP-604): blocking ui dialogs are forwarded to the TUI
     /// instead of answering with the upstream defaults.
@@ -157,7 +163,7 @@ pub struct Core {
 
 /// WP-610: Json mode — write one upstream-shaped event line.
 fn jemit(ctx: &Core, v: Value) {
-    if ctx.out_mode == OutputMode::Json {
+    if ctx.out_mode == OutputMode::Json || ctx.out_mode == OutputMode::Rpc {
         let _ = ctx.json_tx.as_ref().unwrap().send(v.to_string());
     }
 }
@@ -584,14 +590,109 @@ async fn finalize_tool_result(ctx: &Core, call_id: &str, name: &str, input: &Val
 
 /// WP-603: the per-turn streaming callback — each text chunk becomes a
 /// TUI-only `model_delta` event (never on the headless NDJSON stdout).
-fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32) -> Box<dyn FnMut(&str) + Send + 'c> {
-    Box::new(move |chunk: &str| {
-        ctx.log
-            .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":chunk}));
-        if ctx.out_mode == OutputMode::Json {
-            json_delta(ctx, 0, chunk);
+fn delta_emitter<'c>(ctx: &'c Core, turn_index: u32, rpc_skeleton: Arc<std::sync::Mutex<bool>>) -> Box<dyn FnMut(StreamDelta) + Send + 'c> {
+    Box::new(move |ev: StreamDelta| {
+        match &ev {
+            StreamDelta::TextDelta { delta, .. } => {
+                ctx.log
+                    .emit_tui(json!({"kind":"model_delta","turnIndex":turn_index,"text":delta}));
+                if ctx.out_mode == OutputMode::Json {
+                    json_delta(ctx, 0, delta);
+                }
+            }
+            _ => {}
+        }
+        // WP-802: Rpc mode carries the full upstream `message_update` event
+        // set (text_start/delta/end, toolcall_start/delta/end); Json keeps
+        // its shipped text_delta-only contract.
+        if ctx.out_mode == OutputMode::Rpc {
+            // The message_start arrives with the first stream delta
+            // (upstream `start` event parity), not before the model call.
+            if !*rpc_skeleton.lock().unwrap() {
+                let items: Vec<Value> = match &ev {
+                    StreamDelta::TextStart { .. } => vec![json!({"type":"text","text":""})],
+                    StreamDelta::ToolCallStart { id, name, initial_args, .. } => {
+                        let args = if initial_args.is_object() { initial_args.clone() } else { json!({}) };
+                        vec![json!({"type":"toolCall","id":id,"name":name,"arguments":args})]
+                    }
+                    _ => Vec::new(),
+                };
+                let active = ctx.model.lock().unwrap().0.clone();
+                let m = rpc_assistant_message(&Value::Array(items), &active, "stop",
+                    &json!(crate::session::epoch_ms()), 0, true);
+                jemit(ctx, json!({"type":"message_start","message":m}));
+                *rpc_skeleton.lock().unwrap() = true;
+            }
+            let ame = match &ev {
+                StreamDelta::TextStart { index } => json!({"type":"text_start","contentIndex":index}),
+                StreamDelta::TextDelta { index, delta } => json!({"type":"text_delta","contentIndex":index,"delta":delta}),
+                StreamDelta::TextEnd { index, content } => json!({"type":"text_end","contentIndex":index,"content":content}),
+                StreamDelta::ToolCallStart { index, id, name, .. } => json!({"type":"toolcall_start","contentIndex":index,"id":id,"toolName":name}),
+                StreamDelta::ToolCallDelta { index, delta } => json!({"type":"toolcall_delta","contentIndex":index,"delta":delta}),
+                StreamDelta::ToolCallEnd { index, tool_call } => json!({"type":"toolcall_end","contentIndex":index,"toolCall":tool_call}),
+            };
+            jemit(ctx, json!({"type":"message_update","usage":rpc_usage6(&crate::model::Usage::default()),"assistantMessageEvent":ame}));
         }
     })
+}
+
+/// WP-802: upstream `Usage` wire shape (the 6-key form with `totalTokens`
+/// and the nested `cost` object; values are zeroed here — the cumulative
+/// totals live in the session usage entries).
+fn rpc_usage6(u: &crate::model::Usage) -> Value {
+    let total = u.input + u.output;
+    json!({"input":u.input,"output":u.output,"cacheRead":u.cache_read,"cacheWrite":u.cache_write,
+        "totalTokens":total,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}})
+}
+
+/// WP-802: upstream assistant-message wire shape (key structure matches the
+/// pinned upstream `AssistantMessage`; pi values where pi differs).
+fn rpc_assistant_message(content: &Value, active: &Value, stop_reason: &str, ts: &Value, duration_ms: u64, skeleton: bool) -> Value {
+    let usage = content.get("usage").cloned().unwrap_or(json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}));
+    let total = usage.get("input").and_then(Value::as_u64).unwrap_or(0) + usage.get("output").and_then(Value::as_u64).unwrap_or(0);
+    // The upstream wire tool-call items use {type,id,name,arguments}; the
+    // stored compact form uses {id,input,name,type}.
+    let content = match content {
+        Value::Array(items) => Value::Array(items.iter().map(|it| {
+            if it.get("type").and_then(Value::as_str) == Some("toolCall") && it.get("input").is_some() {
+                json!({"type":"toolCall","id":it.get("id").cloned().unwrap_or(Value::Null),
+                    "name":it.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments":it.get("input").cloned().unwrap_or(Value::Null)})
+            } else { it.clone() }
+        }).collect()),
+        other => other.clone(),
+    };
+    let mut m = json!({"role":"assistant","content":content,"api":active.get("id").cloned().unwrap_or(Value::Null),
+        "provider":active.get("provider").cloned().unwrap_or(Value::Null),"model":active.get("id").cloned().unwrap_or(Value::Null),
+        "usage":{"input":usage.get("input").cloned().unwrap_or(json!(0)),"output":usage.get("output").cloned().unwrap_or(json!(0)),
+            "cacheRead":usage.get("cacheRead").cloned().unwrap_or(json!(0)),"cacheWrite":usage.get("cacheWrite").cloned().unwrap_or(json!(0)),
+            "totalTokens":total,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+        "stopReason":stop_reason,"timestamp":ts.clone()});
+    if !skeleton {
+        // The upstream wire always carries the raw provider stop reason
+        // (tool_calls -> toolUse is the only mapping pi v0 produces).
+        m["rawStopReason"] = json!(if stop_reason == "toolUse" {"tool_calls"} else {stop_reason});
+        m["thinkingLevel"] = json!("off");
+        m["durationMs"] = json!(duration_ms);
+    }
+    m
+}
+
+/// WP-802: the upstream system-message wire shape emitted around every run
+/// (key structure only — the prompt section values are pi's own).
+fn rpc_system_message(ctx: &Core) -> Value {
+    let mut sections = json!({"preamble":BASE_SYSTEM_PROMPT,
+        "cwd":std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()});
+    if !ctx.skills.is_empty() {
+        sections["skills"] = json!(crate::skills::format_for_prompt(&ctx.skills));
+    }
+    let tools_added: Vec<Value> = merged_tool_defs(ctx).iter().map(|t| {
+        json!({"name":t.get("name").cloned().unwrap_or(Value::Null),
+            "description":t.get("description").cloned().unwrap_or(Value::Null),
+            "parameters":t.get("parameters").cloned().unwrap_or(json!({})),
+            "constrainedSampling":{"type":"json_schema","strict":"prefer"}})
+    }).collect();
+    json!({"role":"system","content":"","sections":sections,"timestamp":now_ms(),"toolsAdded":tools_added})
 }
 
 pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>) {
@@ -603,15 +704,22 @@ pub async fn agent_task(ctx: Arc<Core>, mut items: mpsc::UnboundedReceiver<Item>
             Item::User(u) => {
                 index += 1;
                 ctx.log.emit(json!({"kind":"user_input","index":index,"source":u.source,"text":u.text}));
-                if let Err(msg) = run_agent(&ctx, &u).await {
+                ctx.run_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                let err = match run_agent(&ctx, &u).await {
+                    Ok(()) => None,
+                    Err(msg) => Some(msg),
+                };
+                ctx.run_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Some(msg) = err {
                     crate::corelog::line(&format!("[core] agent run failed: {msg}"));
                     // WP-610: Json mode surfaces the failure in-stream (the
                     // upstream error assistant message); Text mode stays
                     // silent on stdout (the error goes to stderr + exit 1).
-                    if ctx.out_mode == OutputMode::Json {
+                    if ctx.out_mode == OutputMode::Json || ctx.out_mode == OutputMode::Rpc {
                         jemit(&ctx, json!({"type":"message_end","message":{"role":"assistant","content":[],
                             "stopReason":"error","errorMessage":msg,"timestamp":crate::session::now_iso()}}));
                         jemit(&ctx, json!({"type":"agent_end","messages":[],"willRetry":false}));
+                        jemit(&ctx, json!({"type":"agent_settled","aborted":false}));
                     }
                     *ctx.fail.lock().unwrap() = Some(msg);
                     break; // remaining queued items are dropped (v0)
@@ -669,13 +777,21 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     }
     let user_msg = json!({"role":"user","content":user_content,"timestamp":crate::session::now_iso()});
     ctx.session.append_message(&user_msg);
-    jemit(ctx, json!({"type":"message_start","message":user_msg}));
+    let is_rpc = ctx.out_mode == OutputMode::Rpc;
+    // WP-802: in Rpc mode the user message events follow agent_start +
+    // turn_start (upstream order); other modes keep the early start.
+    if !is_rpc {
+        jemit(ctx, json!({"type":"message_start","message":user_msg.clone()}));
+    }
 
     // `before_agent_start`: prepend returned custom messages; a returned
     // systemPrompt (present only when a handler changed it) replaces the prompt
     // for this run.
     let mut custom: Vec<Value> = Vec::new();
-    let mut system_prompt = BASE_SYSTEM_PROMPT.to_string();
+    // WP-801: the skills section is part of the base prompt (upstream builds
+    // it before before_agent_start); a handler-returned systemPrompt replaces
+    // the whole prompt including the section.
+    let mut system_prompt = crate::skills::append_section(BASE_SYSTEM_PROMPT, &ctx.skills);
     if subscribed(ctx, "before_agent_start") {
         let event = json!({"type":"before_agent_start","messageType":"user","prompt":text});
         // BuildSystemPromptOptions subset for the sidecar: core cwd, currently
@@ -689,7 +805,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             "selectedTools": selected_tools,
             "sections": {},
         });
-        let req = json!({"event":event,"systemPrompt":BASE_SYSTEM_PROMPT,"systemPromptOptions":spon});
+        let req = json!({"event":event,"systemPrompt":system_prompt.clone(),"systemPromptOptions":spon});
         let data = decision_data(ctx, ctx.client.request("before_agent_start", req.clone()).await, "before_agent_start", &req, &Value::Null);
         if let Some(ms) = data.get("messages").and_then(Value::as_array) {
             custom = ms.to_vec();
@@ -746,6 +862,18 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         if subscribed(ctx, "turn_start") { ctx.client.fire(json!({"type":"turn_start","event":{"type":"turn_start","turnIndex":turn_index,"timestamp":now_ms()}})); }
         ctx.log.emit(json!({"kind":"turn_start","turnIndex":turn_index}));
         jemit(ctx, json!({"type":"turn_start"}));
+        // WP-802: upstream order for the first turn — the run's initial
+        // messages (system, user) stream after agent_start + turn_start.
+        if is_rpc && turn_index == 0 {
+            let sys = rpc_system_message(ctx);
+            jemit(ctx, json!({"type":"message_start","message":sys.clone()}));
+            jemit(ctx, json!({"type":"message_end","message":sys}));
+            // The wire user message uses the upstream epoch-ms timestamp.
+            let user_wire = json!({"role":"user","content":user_msg.get("content").cloned().unwrap_or(Value::Null),
+                "timestamp":crate::session::epoch_ms()});
+            jemit(ctx, json!({"type":"message_start","message":user_wire.clone()}));
+            jemit(ctx, json!({"type":"message_end","message":user_wire}));
+        }
         // WP-610: the assistant message_start (skeleton) opens the stream
         // before the driver call — the deltas land between start and end.
         if ctx.out_mode == OutputMode::Json {
@@ -756,10 +884,14 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 "provider":active.get("provider").cloned().unwrap_or(Value::Null),
                 "model":active.get("id").cloned().unwrap_or(Value::Null)}}));
         }
+        // WP-802: the RPC message_start lands with the first stream delta;
+        // turns without deltas get it right before the message_end.
+        let rpc_skeleton = Arc::new(std::sync::Mutex::new(false));
+        let model_start = Instant::now();
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
         // (the headless NDJSON contract keeps its single `model_output`).
-        let turn = model_call(ctx, fake_driver.as_ref(), &convo, delta_emitter(ctx, turn_index)).await?;
+        let turn = model_call(ctx, fake_driver.as_ref(), &convo, delta_emitter(ctx, turn_index, rpc_skeleton.clone())).await?;
 
         // Usage accounting (WP-407): per-turn session entry + cumulative
         // total; cost from the bundled registry (unknown model → 0).
@@ -781,7 +913,23 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         // WP-610: message_end carries the final assistant message (the
         // skeleton message_start + the on_delta updates came first).
         let msg_id = ctx.session.append_message(&assistant);
-        jemit(ctx, json!({"type":"message_end","message":assistant}));
+        // WP-802: Rpc carries the upstream wire shape (full usage/cost,
+        // thinkingLevel, durationMs); other modes keep the stored shape.
+        let assistant_wire = if is_rpc {
+            let stop = assistant.get("stopReason").and_then(Value::as_str).unwrap_or("stop");
+            let wire = rpc_assistant_message(&assistant.get("content").cloned().unwrap_or(json!([])),
+                &ctx.model.lock().unwrap().0, stop, &json!(crate::session::epoch_ms()),
+                model_start.elapsed().as_millis() as u64, false);
+            // A turn without stream deltas never emitted the message_start:
+            // it lands here (upstream emits a start at stream start).
+            if !*rpc_skeleton.lock().unwrap() {
+                jemit(ctx, json!({"type":"message_start","message":wire.clone()}));
+            }
+            wire
+        } else {
+            assistant.clone()
+        };
+        jemit(ctx, json!({"type":"message_end","message":assistant_wire.clone()}));
         ctx.log.emit(json!({"kind":"model_output","turnIndex":turn_index,"text":turn.text.as_deref(),
             "toolCalls":turn.tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()}));
         if ctx.out_mode == OutputMode::Text {
@@ -791,20 +939,58 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         }
 
         let mut tool_results: Vec<Value> = Vec::new();
+        // WP-802: Rpc wire tool-result shapes for turn_end/agent_end.
+        let mut tool_result_wires: Vec<Value> = Vec::new();
         let mut tool_result_ids: Vec<String> = Vec::new();
         let mut all_terminate = true;
         for tc in &turn.tool_calls {
             // WP-610: upstream tool_execution_start before the run (args).
             jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
-            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {
-                Ok((trm, terminate)) => {
+            if is_rpc {
+                // WP-802: the execution stream opens with an empty partial
+                // result (upstream update parity for the v0 non-streaming
+                // tool surface).
+                jemit(ctx, json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
+                    "args":tc.input,"partialResult":{"content":[]}}));
+            }
+            let tool_start = Instant::now();
+            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {                Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
-                    // WP-610: upstream tool_execution_end (result + isError).
+                    // WP-610: upstream tool_execution_end (result + isError);
+                    // WP-802: Rpc carries the full result shape and the
+                    // measured durationMs.
                     let is_error = trm.get("content").and_then(Value::as_array)
                         .map(|c| c.iter().any(|x| x.get("isError") == Some(&json!(true))))
                         .unwrap_or(false);
-                    jemit(ctx, json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
-                        "result":trm.get("content").cloned().unwrap_or(Value::Null),"isError":is_error}));
+                    let dur = tool_start.elapsed().as_millis() as u64;
+                    let content = trm.get("content").cloned().unwrap_or(json!([]));
+                    let mut te = if is_rpc {
+                        jemit(ctx, json!({"type":"tool_execution_update","toolCallId":tc.id,"toolName":tc.name,
+                            "args":tc.input,"partialResult":{"content":content.clone(),"details":{}}}));
+                        json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
+                            "result":{"content":content,
+                                "structuredContent":trm.get("details").cloned().unwrap_or(json!({}))},
+                            "isError":is_error,"durationMs":dur})
+                    } else {
+                        json!({"type":"tool_execution_end","toolCallId":tc.id,"toolName":tc.name,
+                            "result":content,"isError":is_error})
+                    };
+                    jemit(ctx, te);
+                    // WP-802: the toolResult message is a message event too
+                    // (upstream emits message_start/end for it as well);
+                    // the wire shape drops the stored `details` and carries
+                    // the measured duration.
+                    let trm_wire = if is_rpc {
+                        json!({"role":"toolResult","toolCallId":tc.id,"toolName":tc.name,
+                            "content":trm.get("content").cloned().unwrap_or(json!([])),
+                            "isError":is_error,"durationMs":dur,
+                            "timestamp":trm.get("timestamp").cloned().unwrap_or(json!(crate::session::epoch_ms()))})
+                    } else {
+                        trm.clone()
+                    };
+                    if is_rpc { tool_result_wires.push(trm_wire.clone()); }
+                    jemit(ctx, json!({"type":"message_start","message":trm_wire.clone()}));
+                    jemit(ctx, json!({"type":"message_end","message":trm_wire}));
                     tool_results.push(trm);
                     if !terminate {
                         all_terminate = false;
@@ -820,6 +1006,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 "context":{"contextEntries":[],"contextMessages":[],"llmMessages":[],"pendingMessages":[],"canContinue":false}}}));
         }
         ctx.log.emit(json!({"kind":"turn_end","turnIndex":turn_index}));
+        // WP-802: the json/rpc stream carries turn_end (upstream
+        // AgentSessionEvent parity; Rpc uses the full wire shape).
+        let turn_msg = if is_rpc { assistant_wire.clone() } else { assistant.clone() };
+        let turn_results = if is_rpc { tool_result_wires.clone() } else { tool_results.clone() };
+        jemit(ctx, json!({"type":"turn_end","message":turn_msg,"toolResults":turn_results}));
 
         // A turn with no tool calls ends the run; `terminate` is honored only
         // when EVERY finalized result in the batch carried it (upstream rule).
@@ -830,9 +1021,24 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     }
 
     let run_messages = ctx.session.transcript()[run_start..].to_vec();
-    if subscribed(ctx, "agent_end") { ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages}})); }
+    // WP-802: upstream agent_end lists the run's messages starting with the
+    // system message (then the user message); Rpc only.
+    let wire_messages = if is_rpc {
+        let mut v = vec![rpc_system_message(ctx), user_msg.clone()];
+        v.extend(run_messages.iter().cloned());
+        v
+    } else {
+        run_messages.clone()
+    };
+    if subscribed(ctx, "agent_end") { ctx.client.fire(json!({"type":"agent_end","event":{"type":"agent_end","messages":run_messages.clone()}})); }
     ctx.log.emit(json!({"kind":"agent_end"}));
-    jemit(ctx, json!({"type":"agent_end","messages":run_messages,"willRetry":false}));
+    jemit(ctx, json!({"type":"agent_end","messages":wire_messages,"willRetry":false}));
+    // WP-802: the client's idle gate (waitForIdle/promptAndWait) waits for
+    // agent_settled after every run (Rpc only — the Json mode contract
+    // ends at agent_end).
+    if is_rpc {
+        jemit(ctx, json!({"type":"agent_settled","aborted":false}));
+    }
     Ok(())
 }
 
@@ -843,7 +1049,7 @@ async fn model_call<'a>(
     ctx: &'a Core,
     fake_driver: Option<&'a Box<dyn ModelDriver>>,
     convo: &[Value],
-    mut deltas: Box<dyn FnMut(&str) + Send + 'a>,
+    mut deltas: Box<dyn FnMut(crate::model::StreamDelta) + Send + 'a>,
 ) -> Result<AssistantTurn, String> {
     // WP-701: an extension-registered model always routes via the
     // bridge — an explicit provider selection wins over the scripted
@@ -866,16 +1072,32 @@ async fn model_call<'a>(
                 Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
                     let mut events = Vec::new();
                     let mut rx = rx;
+                    let mut text_started = false;
+                    let mut text_full = String::new();
                     while let Some(line) = rx.recv().await {
                         if let Some(delta) = line.pointer("/event/delta").and_then(Value::as_str) {
-                            deltas(delta); // TUI model_delta + Json message_update
+                            // WP-802: the bridge streams text chunks; map them
+                            // onto the StreamDelta event set (tool calls from
+                            // extension models arrive in the event list, not
+                            // the stream — M7 behavior unchanged).
+                            if !text_started {
+                                text_started = true;
+                                deltas(crate::model::StreamDelta::TextStart { index: 0 });
+                            }
+                            text_full.push_str(delta);
+                            deltas(crate::model::StreamDelta::TextDelta { index: 0, delta: delta.to_string() });
                         }
                         let is_terminal = line.get("event")
                             .and_then(|e| e.get("type"))
                             .and_then(Value::as_str)
                             .is_some_and(|t| t == "done" || t == "error");
                         events.push(line.get("event").cloned().unwrap_or(Value::Null));
-                        if is_terminal { break; }
+                        if is_terminal {
+                            if text_started {
+                                deltas(crate::model::StreamDelta::TextEnd { index: 0, content: text_full.clone() });
+                            }
+                            break;
+                        }
                     }
                     ctx.client.detach_stream(&stream_id);
                     provider_events_to_turn(&events).map_err(|e| e.to_string())

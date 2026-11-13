@@ -7,6 +7,7 @@ mod config;
 mod corelog;
 mod model;
 mod session;
+mod skills;
 mod templates;
 mod provider;
 mod registry;

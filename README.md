@@ -266,6 +266,42 @@ the prompt: `$1`..`$9`, `$@`/`$ARGUMENTS`, `${N:-default}` /
 `${ARGUMENTS:-default}`, one pass (ported from upstream `prompt-templates.ts`;
 recorded v0 deviations in `roadmap/m3-config-and-state/wp-307-prompt-templates.md`).
 
+### Skills (M8, WP-801)
+
+`<agentDir>/skills/` and `<cwd>/.pi/skills/` are scanned for `SKILL.md`
+files (a directory containing one is a skill root; otherwise direct `.md`
+children of the root count too). Frontmatter `name` (falls back to the
+parent directory name) and `description` are validated per the Agent Skills
+spec; invalid skills are skipped with a `[core] skill: ...` warning
+(stderr headless, `tui-stderr.log` in the TUI). Discovered skills are
+appended to the system prompt as the upstream `<skills>` section (byte-exact
+`formatSkillsForPrompt` golden), and `/skill:<name> [args]` expands to the
+skill body in the TUI and in headless positional prompts (unknown skills
+pass through unchanged). The model loads a skill file with the `read` tool
+per the prompt hint — there is no skill activation tool. Recorded v0
+deviations from upstream: `odd/tasks/m8-ecosystem.md` L2.
+
+### RPC mode (M8, WP-802)
+
+`--mode rpc` runs the upstream NDJSON command protocol on stdin/stdout
+(the pinned upstream `modes/rpc` wire contract, verified line-for-line by a
+live protocol diff against the upstream CLI,
+`tests/fixtures/rpc-diff.mjs`). v0 commands: `prompt` (with
+`streamingBehavior: steer|followUp` queueing while a run is active); every
+other command type answers
+`{success:false, error:"Unknown command: <type>"}` until a later WP adds it.
+The event stream carries the full upstream `AgentEvent` set: `agent_start`,
+`turn_start/end`, `message_start/end` for system/user/assistant/toolResult
+messages (wire shapes with epoch-ms timestamps, usage/cost,
+`rawStopReason`), streaming `message_update` (`text_start/delta/end`,
+`toolcall_start/delta/end`), `tool_execution_start/update/end`, and
+`agent_end` + `agent_settled` (the client idle gate). The upstream
+`RpcClient` drives pi-rust unmodified
+(`tests/rpc.rs::wp802_upstream_rpc_client_drives`). Recorded v0 deviations:
+`odd/tasks/m8-ecosystem.md` L4/L5 (pre-queue disposition, follow-up queue
+instead of mid-turn steering, `images` accepted but unmapped, remaining
+commands pending).
+
 ### Scenario format
 
 ```json

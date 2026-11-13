@@ -175,7 +175,8 @@ pub async fn run() -> Result<i32> {
                 let m = match v.as_str() {
                     "text" => crate::agent::OutputMode::Text,
                     "json" => crate::agent::OutputMode::Json,
-                    other => bail!("invalid --mode '{other}' (valid: text, json)"),
+                    "rpc" => crate::agent::OutputMode::Rpc,
+                    other => bail!("invalid --mode '{other}' (valid: text, json, rpc)"),
                 };
                 anyhow::ensure!(out_mode.map(|o| o == m).unwrap_or(true), "--mode conflicts with --print (text)");
                 out_mode = Some(m);
@@ -205,12 +206,15 @@ pub async fn run() -> Result<i32> {
     }
     if let Some(m) = out_mode {
         use crate::agent::OutputMode::*;
-        anyhow::ensure!(
-            prompt.is_some() || scenario_path.is_some(),
-            "{:?} mode requires --prompt <text> or --scenario <file>",
-            if m == Json { "json" } else { "print" }
-        );
-        anyhow::ensure!(!list_sessions, "print/json mode cannot be combined with --list-sessions");
+        if m != Rpc {
+            anyhow::ensure!(
+                prompt.is_some() || scenario_path.is_some(),
+                "{m:?} mode requires --prompt <text> or --scenario <file>"
+            );
+            anyhow::ensure!(!list_sessions, "print/json mode cannot be combined with --list-sessions");
+        } else {
+            anyhow::ensure!(prompt.is_none() && scenario_path.is_none(), "rpc mode takes prompts over stdin (no --prompt/--scenario)");
+        }
     }
 
     let cwd = std::env::current_dir().context("cwd")?;
@@ -225,6 +229,14 @@ pub async fn run() -> Result<i32> {
         crate::config::resolve_agent_dir(agent_dir.as_deref(), std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(), &home)
     };
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+
+    // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
+    // skills are skipped with a core-log warning (upstream diagnostics).
+    let mut skill_warnings: Vec<String> = Vec::new();
+    let skills = crate::skills::load(&agent_dir, &cwd, &mut skill_warnings);
+    for w in &skill_warnings {
+        crate::corelog::line(&format!("[core] skill: {w}"));
+    }
 
     // --scenario/--prompt/--template are mutually exclusive (original flags).
     if scenario_path.is_some() && (prompt.is_some() || template_name.is_some())
@@ -255,7 +267,9 @@ pub async fn run() -> Result<i32> {
             compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
         }], None),
         (None, None) => {
-            if list_sessions {
+            if out_mode == Some(crate::agent::OutputMode::Rpc) {
+                (Vec::new(), None) // rpc: prompts arrive over stdin
+            } else if list_sessions {
                 (Vec::new(), None) // --list-sessions needs no scenario
             } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                 (Vec::new(), None) // interactive TUI (WP-601)
@@ -264,6 +278,25 @@ pub async fn run() -> Result<i32> {
             }
         }
     };
+
+    // WP-801: /skill:<name> [args] in a positional prompt expands core-side
+    // (upstream _expandSkillCommand runs in all modes); unknown skills pass
+    // through unchanged.
+    let runs: Vec<RunSpec> = runs.into_iter().map(|mut r| {
+        if let Some(rest) = r.text.strip_prefix("/skill:") {
+            let (name, args) = match rest.find(char::is_whitespace) {
+                Some(i) => (rest[..i].to_string(), rest[i..].trim().to_string()),
+                None => (rest.to_string(), String::new()),
+            };
+            if let Some(sk) = skills.iter().find(|s| s.name == name) {
+                match crate::skills::expand_skill(sk, &args) {
+                    Ok(e) => r.text = e,
+                    Err(e) => crate::corelog::line(&format!("[core] skill expansion failed for {name}: {e}")),
+                }
+            }
+        }
+        r
+    }).collect();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
@@ -379,7 +412,7 @@ pub async fn run() -> Result<i32> {
     sidecar_args.push(agent_dir.to_string_lossy().into());
 
     // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
-    let tui_mode = scenario_path.is_none() && prompt.is_none() && !list_sessions;
+    let tui_mode = scenario_path.is_none() && prompt.is_none() && !list_sessions && out_mode != Some(crate::agent::OutputMode::Rpc);
 
     // TUI mode owns the terminal: the sidecar's stderr and the core's own
     // diagnostic lines must not corrupt the screen — both go to a log file
@@ -404,7 +437,7 @@ pub async fn run() -> Result<i32> {
 
     // WP-610: the NDJSON-on-stdout contract applies to the default headless
     // mode only; --print/--mode json keep stdout clean (their own streams).
-    let log = EventLog::start(!tui_mode && out_mode != Some(crate::agent::OutputMode::Text) && out_mode != Some(crate::agent::OutputMode::Json));
+    let log = EventLog::start(!tui_mode && out_mode != Some(crate::agent::OutputMode::Text) && out_mode != Some(crate::agent::OutputMode::Json) && out_mode != Some(crate::agent::OutputMode::Rpc));
     let fail: Arc<Mutex<Option<String>>> = Arc::default();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -466,7 +499,7 @@ pub async fn run() -> Result<i32> {
         events: Arc::default(),
         ext_tools: Arc::default(),
         ext_models: Arc::default(),
-        ready: Mutex::new(Some(ready_tx)),
+        skills: Arc::new(skills.clone()),        ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
         model: Arc::new(Mutex::new((initial_model, agent_config.default_thinking_level.clone()))),
@@ -475,6 +508,7 @@ pub async fn run() -> Result<i32> {
         provider: Arc::new(Mutex::new(provider)),
         agent_dir: Arc::new(agent_dir.clone()),
         usage_total: Arc::default(),
+        run_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cost_total: Arc::default(),
         tui: tui_mode,
         ui_tx,
@@ -483,7 +517,7 @@ pub async fn run() -> Result<i32> {
         out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
         text_final: Arc::default(),
         json_tx: {
-            if out_mode == Some(crate::agent::OutputMode::Json) {
+            if matches!(out_mode, Some(crate::agent::OutputMode::Json) | Some(crate::agent::OutputMode::Rpc)) {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
@@ -558,6 +592,7 @@ pub async fn run() -> Result<i32> {
     // continues (does not abort the run). TUI mode runs them on a task after
     // the TUI loop is up: a command that opens a dialog would otherwise
     // block its own response (the dialog is answered in the TUI).
+    let mut rpc_quit: Option<i32> = None;
     if tui_mode {
         let c_client = client.clone();
         let c_log = log.clone();
@@ -621,8 +656,8 @@ pub async fn run() -> Result<i32> {
             session.id.lock().unwrap().clone(),
         )
         .with_shortcuts(ext_shortcuts)
-        .with_commands(ext_cmds, tui_templates);
-        if let Some(e) = kb_error {
+        .with_commands(ext_cmds, tui_templates)
+        .with_skills(skills);        if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
         // WP-607: the `theme` setting selects the starting theme (a
@@ -746,6 +781,13 @@ pub async fn run() -> Result<i32> {
         if let Err(e) = result {
             crate::corelog::line(&format!("[core] tui: {e}"));
         }
+    } else if ctx.out_mode == crate::agent::OutputMode::Rpc {
+        // WP-802: the stdin command loop owns the input; runs are queued
+        // per `prompt` (upstream: the process idles on open stdin).
+        let code = rpc_command_loop(ctx.clone()).await;
+        let _ = msg_tx.send(Item::End);
+        let _ = tokio::time::timeout(Duration::from_secs(10), done_rx).await;
+        rpc_quit = Some(code);
     } else {
         // Seed the runs: one agent run per user message. Fake mode validates each
         // model_script up front; provider mode ignores scripts (real completions).
@@ -757,10 +799,9 @@ pub async fn run() -> Result<i32> {
             msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone(), compact_summary: r.compact_summary.clone() })).unwrap();
         }
         msg_tx.send(Item::End).unwrap();
+        // Wait for the scenario (and any extension-injected user messages).
+        let _ = done_rx.await;
     }
-
-    // Wait for the scenario (and any extension-injected user messages).
-    let _ = done_rx.await;
 
     // Clean shutdown: session_shutdown → sidecar exits 0. The core marks the
     // state Stopped once the shutdown is sent (avoids misclassifying the
@@ -783,6 +824,12 @@ pub async fn run() -> Result<i32> {
         }
     } else {
         client.set_stopped();
+    }
+
+    // WP-802: rpc quit is its own exit code (EOF -> 0, SIGTERM -> 143);
+    // in-band run errors never change the quit code.
+    if let Some(code) = rpc_quit {
+        std::process::exit(code);
     }
 
     // Final event: the full session (acked: written+flushed before exit).
@@ -816,6 +863,95 @@ pub async fn run() -> Result<i32> {
             if client.degraded_seen() || fail.lock().unwrap().is_some() { 1 } else { 0 }
         }
     })
+}
+
+/// WP-802: the `--mode rpc` stdin command loop (upstream rpc-mode.ts
+/// surface). `prompt` is the v0 command; responses and session events
+/// share stdout (events through the json writer, responses here).
+/// stdin EOF -> 0, SIGTERM -> 143 (upstream parity).
+async fn rpc_command_loop(ctx: Arc<crate::agent::Core>) -> i32 {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
+    let mut exit_code = 0i32;
+    loop {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                exit_code = 143;
+                break;
+            }
+            line = lines.next_line() => match line {
+                Ok(Some(l)) => handle_rpc_line(&ctx, &l),
+                Ok(None) => break, // EOF: the client closed stdin
+                Err(_) => break,
+            },
+        }
+    }
+    let _ = Ordering::SeqCst; // (flag reads happen in handle_rpc_line)
+    exit_code
+}
+
+fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
+    use std::sync::atomic::Ordering;
+    let v: Value = match serde_json::from_str(line.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(tx) = &ctx.json_tx {
+                let _ = tx.send(json!({"id":Value::Null,"type":"response","command":Value::Null,
+                    "success":false,"error":format!("Failed to parse command: {e}")}).to_string());
+            }
+            return;
+        }
+    };
+    let id = v.get("id").cloned().unwrap_or(Value::Null);
+    let command = v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let respond = |success: bool, data: Option<Value>, error: Option<String>| {
+        let mut resp = json!({"id":id.clone(),"type":"response","command":command.clone(),"success":success});
+        if let Some(d) = data {
+            resp["data"] = d;
+        }
+        if let Some(e) = error {
+            resp["error"] = json!(e);
+        }
+        if let Some(tx) = &ctx.json_tx {
+            let _ = tx.send(resp.to_string());
+        }
+    };
+    match command.as_str() {
+        "prompt" => {
+            let message = v.get("message").and_then(Value::as_str).unwrap_or_default().to_string();
+            if v.get("images").is_some() {
+                crate::corelog::line("[core] rpc: `images` is accepted but unmapped in v0");
+            }
+            if ctx.run_active.load(Ordering::SeqCst) {
+                match v.get("streamingBehavior").and_then(Value::as_str) {
+                    Some("steer" | "followUp") => {
+                        // v0 deviation: queued as a follow-up run, not a
+                        // mid-turn steer (the run loop is sequential).
+                        respond(true, Some(json!({"disposition":"queued"})), None);
+                        let _ = ctx.msg_tx.send(crate::agent::Item::User(crate::agent::QueuedUser {
+                            text: message, source: "rpc", steps: Vec::new(), images: Vec::new(), compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+                        }));
+                    }
+                    _ => respond(false, None, Some(
+                        "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
+                            .to_string(),
+                    )),
+                }
+            } else {
+                // The response lands before the run's events (upstream
+                // writes it synchronously before the run starts).
+                respond(true, Some(json!({"disposition":"started"})), None);
+                let _ = ctx.msg_tx.send(crate::agent::Item::User(crate::agent::QueuedUser {
+                    text: message, source: "rpc", steps: Vec::new(), images: Vec::new(), compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+                }));
+            }
+        }
+        _ => respond(false, None, Some(format!("Unknown command: {command}"))),
+    }
 }
 
 /// `--list-sessions`: one NDJSON line per session file under

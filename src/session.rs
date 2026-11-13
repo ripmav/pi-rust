@@ -153,6 +153,12 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// WP-802: epoch-milliseconds timestamp (the upstream wire form).
+pub fn epoch_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 /// ISO-8601 UTC from unix seconds (list-sessions `updated`).
 pub fn iso_from_secs(secs: u64) -> String {
     chrono::DateTime::from_timestamp(secs as i64, 0)
