@@ -34,7 +34,11 @@ type Ack = Option<tokio::sync::oneshot::Sender<()>>;
 #[derive(Clone)]
 pub struct EventLog {
     tx: Option<mpsc::UnboundedSender<(Value, Ack)>>,
-    sub: tokio::sync::broadcast::Sender<Value>,
+    /// Lossless in-process event stream (TUI): a lagging broadcast receiver
+    /// silently drops events — under load that loses extension statuses
+    /// (CI macOS found it). mpsc: the single TUI consumer never loses one.
+    sub: mpsc::UnboundedSender<Value>,
+    sub_rx: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<Value>>>>,
 }
 
 impl EventLog {
@@ -42,7 +46,7 @@ impl EventLog {
     /// --scenario/--prompt/--list-sessions runs); the TUI renders in-process
     /// instead and passes `false`.
     pub fn start(headless: bool) -> Self {
-        let (sub, _) = tokio::sync::broadcast::channel(8192); // 8192: streaming bursts (WP-603)
+        let (sub, sub_rx) = mpsc::unbounded_channel::<Value>();
         let tx = if headless {
             let (tx, mut rx) = mpsc::unbounded_channel::<(Value, Ack)>();
             tokio::spawn(async move {
@@ -60,13 +64,22 @@ impl EventLog {
         } else {
             None
         };
-        Self { tx, sub }
+        Self {
+            tx,
+            sub,
+            sub_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(sub_rx))),
+        }
     }
 
-    /// Subscribe to the in-process event stream (TUI).
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
-        self.sub.subscribe()
+    /// Subscribe to the in-process event stream (TUI, exactly once).
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Value> {
+        self.sub_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the TUI event stream is subscribed exactly once")
     }
+
 
     /// TUI-only event (in-process broadcast only — never on the headless
     /// NDJSON stdout, so the machine output contract stays unchanged).

@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::{self, Event as TermEvent};
-use crossterm::execute;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::EnableBracketedPaste;
+use crossterm::event::{self, Event as TermEvent};
+use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, SetTitle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -35,9 +35,12 @@ use tokio::sync::mpsc;
 ///   core's active session; the return carries the loaded session for the
 ///   TUI display reset.
 /// - `on_exit`: called once when the user quits.
+// Nine wire/callback parameters: each maps to one TUI responsibility
+// (events, ui, submit, dialog, theme dir, request, resume, exit).
+#[allow(clippy::too_many_arguments)]
 pub async fn run<F, G, H, I, J>(
     app: &mut super::TuiApp,
-    mut events: tokio::sync::broadcast::Receiver<Value>,
+    mut events: mpsc::UnboundedReceiver<Value>,
     mut ui: mpsc::UnboundedReceiver<Value>,
     mut on_submit: F,
     mut on_dialog: H,
@@ -66,13 +69,10 @@ where
         }
         match event::poll(Duration::from_millis(50)) {
             Ok(true) => {
-                match event::read() {
-                    Ok(ev) => {
-                        if stdin_tx.send(ev).is_err() {
-                            break;
-                        }
+                if let Ok(ev) = event::read() {
+                    if stdin_tx.send(ev).is_err() {
+                        break;
                     }
-                    Err(_) => {}
                 }
             }
             Ok(false) => {}
@@ -84,8 +84,16 @@ where
     terminal::enable_raw_mode().context("enabling raw mode")?;
     execute!(backend, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut term = Terminal::new(backend).context("init terminal")?;
-    app.set_size(term.size().map(|s| (s.width, s.height)).unwrap_or((80, 24)).0,
-                 term.size().map(|s| (s.width, s.height)).unwrap_or((80, 24)).1);
+    app.set_size(
+        term.size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((80, 24))
+            .0,
+        term.size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((80, 24))
+            .1,
+    );
 
     // Redraws are event-driven (keys, core events, resizes, dialogs).
     let mut dirty = true;
@@ -253,7 +261,9 @@ where
                 ev = events.recv() => match ev {
                     // WP-603: drain the burst before drawing — a stream of
                     // token deltas becomes one render, not one per token.
-                    Ok(first) => {
+                    // Lossless mpsc: no Lagged arm — a slow render queueing
+                    // events can no longer drop them (CI macOS found it).
+                    Some(first) => {
                         let mut v = first;
                         loop {
                             app.apply_event(&v);
@@ -288,9 +298,8 @@ where
                         }
                         dirty = true;
                     }
-                    // Receiver lagged: drop and continue (events are display-only).
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { dirty = true; }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    // The sender dropped: the run ended.
+                    None => break,
                 },
             }
         }
