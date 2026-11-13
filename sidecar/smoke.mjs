@@ -6,8 +6,10 @@
  * permission-gate.ts, event-bus.ts, claude-rules.ts, prompt-customizer.ts)
  * plus one scratch test fixture (created in a temp dir) that exercises
  * sendUserMessage / appendEntry / setSessionName / registerFlag /
- * setThinkingLevel, and pins the P1 advisory fixes: shutdown dispatch
- * guard, orderly exit on a broken stdout pipe, and the 1 MB stdin line cap.
+ * setThinkingLevel / registerProvider, and pins the P1 advisory fixes:
+ * shutdown dispatch guard, orderly exit on a broken stdout pipe, and the
+ * 1 MB stdin line cap. Phase 3 verifies the UNMODIFIED upstream
+ * custom-provider-gitlab-duo example loads and registers (701c).
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,6 +17,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+
+const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXAMPLES = path.join(ROOT, "upstream/packages/coding-agent/examples/extensions");
@@ -135,7 +139,39 @@ class FakeCore {
 }
 
 const SCRATCH_EXTENSION = `
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
+
 export default function (pi) {
+	// WP-701: registered providers (legacy config form). smokeprovider has a
+	// deterministic streamSimple ($ENV apiKey resolution is exercised by the
+	// provider_stream round trip); smoke-badkey pins the !command rejection.
+	const U0 = ${JSON.stringify(ZERO_USAGE)};
+	const assistant = (content, usage, stopReason) => ({ role: "assistant", content, usage, stopReason, timestamp: Date.now() });
+	pi.registerProvider("smokeprovider", {
+		api: "smoke-api",
+		apiKey: "$SMOKE_PROVIDER_KEY",
+		models: [{ id: "smoke/echo-1", name: "Smoke Echo", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 512 }],
+		streamSimple(model, context, options) {
+			const stream = createAssistantMessageEventStream();
+			(async () => {
+				const text = "key=" + (options?.apiKey ?? "none") + " msgs=" + (context?.messages?.length ?? 0) + " api=" + (model?.api ?? "?");
+				const partial = assistant([{ type: "text", text }], U0, "stop");
+				stream.push({ type: "start", partial: assistant([], U0, "stop") });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial });
+				stream.push({ type: "done", reason: "stop", message: assistant([{ type: "text", text }], { ...U0, input: 2, output: 2, totalTokens: 4 }, "stop") });
+				stream.end();
+			})();
+			return stream;
+		},
+	});
+	pi.registerProvider("smoke-badkey", {
+		api: "smoke-bad-api",
+		apiKey: "!fake-command",
+		models: [{ id: "smoke/bad-1", name: "Smoke Bad", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 512 }],
+		streamSimple() {
+			throw new Error("must not run");
+		},
+	});
 	pi.registerFlag("probe", { type: "boolean", default: true });
 	pi.registerTool({
 		name: "probe_send",
@@ -204,17 +240,20 @@ async function main() {
 			"--extension-dir", extDir,
 			"--agent-dir", agentDir,
 		],
-		{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, SMOKE_PROVIDER_KEY: "smoke-key-123" } },
 	);
 	child.stderr.on("data", (d) => process.stderr.write(d));
 	const core = new FakeCore(child);
 
 	let child2 = null;
+	let child3 = null;
+	let child4 = null;
+	let child5 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 0,
+			protocolVersion: 4,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -232,7 +271,21 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 7 extensions, no errors", ready.extensions.length === 7 && ready.errors.length === 0, ready.errors);
+		check("ready lists 8 extensions (7 + builtin mcp), no errors", ready.extensions.length === 8 && ready.errors.length === 0, ready.errors);
+
+		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
+		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
+		check(
+			"ready providers are objects with model entries",
+			Array.isArray(ready.providers) && ready.providers.length === 2 &&
+				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
+			ready.providers,
+		);
+		check(
+			"ready provider model entry carries provider/id/api",
+			Boolean(smokeProv?.models?.some((m) => m.provider === "smokeprovider" && m.id === "smoke/echo-1" && m.api === "smoke-api" && m.name === "Smoke Echo")),
+			smokeProv,
+		);
 
 		// (c) session_start: pi.events round-trip + claude-rules scan
 		core.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
@@ -329,6 +382,54 @@ async function main() {
 		);
 		check("command -> pi.events -> notify", /Event from \/emit command: smoke/.test(cmdNotify.message), cmdNotify.message);
 
+		// (f4) WP-701: provider_stream round trip — the ack, the forwarded
+		// events, $ENV apiKey resolution, and the !command typed rejection.
+		const streamAck = await core.request({
+			type: "provider_stream",
+			streamId: "s1",
+			model: { provider: "smokeprovider", id: "smoke/echo-1", api: "smoke-api" },
+			messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			options: {},
+		});
+		check("provider_stream acks with the streamId", streamAck.success === true && streamAck.data?.streamId === "s1", streamAck);
+		let terminal = null;
+		const deltas = [];
+		for (let i = 0; i < 20 && !terminal; i++) {
+			const ev = await core.nextEvent(
+				(e) => e.type === "provider_stream_event" && e.streamId === "s1",
+				"provider_stream_event",
+				5000,
+			);
+			if (ev.event?.type === "text_delta") deltas.push(ev.event.delta);
+			if (ev.event?.type === "done" || ev.event?.type === "error") terminal = ev.event;
+		}
+		check(
+			"provider stream forwards events with $ENV apiKey resolved",
+			deltas.length === 1 && /^key=smoke-key-123 msgs=1 api=smoke-api$/.test(deltas[0]),
+			deltas,
+		);
+		check(
+			"provider stream terminates with done + message",
+			terminal?.type === "done" && terminal?.message?.content?.[0]?.text === "key=smoke-key-123 msgs=1 api=smoke-api",
+			terminal,
+		);
+		const badKey = await core.request({
+			type: "provider_stream",
+			streamId: "s2",
+			model: { provider: "smoke-badkey", id: "smoke/bad-1", api: "smoke-bad-api" },
+			messages: [],
+			options: {},
+		});
+		check("!command apiKey is a typed rejection", badKey.success === false && /!command/.test(badKey.error), badKey);
+		const unknownProv = await core.request({
+			type: "provider_stream",
+			streamId: "s3",
+			model: { provider: "nope", id: "nope/1" },
+			messages: [],
+			options: {},
+		});
+		check("unknown provider rejects", unknownProv.success === false && /unknown extension provider/.test(unknownProv.error), unknownProv);
+
 		// (g) before_agent_start: claude-rules rewrites the system prompt
 		const bas = await core.request({
 			type: "before_agent_start",
@@ -423,7 +524,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 0,
+			protocolVersion: 4,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -450,12 +551,129 @@ async function main() {
 			code2 !== "timeout" && /stdout write failed/.test(stderr2Text) && !/UnhandledPromiseRejection|\n\s+at /.test(stderr2Text),
 			{ code2, tail: stderr2Text.slice(-400) },
 		);
+
+		// (l) 701c: the UNMODIFIED upstream custom-provider-gitlab-duo example
+		// loads and registers through the real loader (no streamSimple
+		// invocation — it needs a live GitLab endpoint).
+		const GLD = path.join(EXAMPLES, "custom-provider-gitlab-duo");
+		const agentDir3 = path.join(tmp, "agent3");
+		mkdirSync(agentDir3, { recursive: true });
+		child3 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", GLD, "--agent-dir", agentDir3],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child3.stderr.on("data", (d) => process.stderr.write(d));
+		const core3 = new FakeCore(child3);
+		const init3 = await core3.request({
+			type: "init",
+			protocolVersion: 4,
+			capabilities: { ui: [], timeoutMs: 5000 },
+		});
+		check("gitlab-duo sidecar init", init3.success === true, init3);
+		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
+		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
+		check(
+			"gitlab-duo loads unmodified (1 user extension + builtin mcp, no errors)",
+			ready3.extensions.length === 2 && ready3.errors.length === 0,
+			ready3.errors,
+		);
+		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
+		check(
+			"gitlab-duo model entry shape (provider/id/api)",
+			gld?.models?.[0] && gld.models[0].provider === "gitlab-duo" && gld.models[0].id === "claude-opus-4-8" && gld.models[0].api === "gitlab-duo-api",
+			gld?.models?.[0],
+		);
+		core3.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code3 = await Promise.race([core3.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("gitlab-duo sidecar clean exit 0", code3 === 0, code3);
+
+		// (m) 702b: config-declared stdio MCP server — the sidecar hosts the
+		// built-in mcp extension, connects on session_start and pushes the new
+		// tools over the v2 `tools_changed` event (post-ready dynamic set).
+		const mcpFixture = path.join(ROOT, "tests/fixtures/mcp-server-fixture.mjs");
+		const agentDir4 = path.join(tmp, "agent4");
+		mkdirSync(agentDir4, { recursive: true });
+		child4 = spawn(
+			process.execPath,
+			[ENTRY, "--agent-dir", agentDir4],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child4.stderr.on("data", (d) => process.stderr.write(d));
+		const core4 = new FakeCore(child4);
+		const init4 = await core4.request({
+			type: "init",
+			protocolVersion: 4,
+			capabilities: { ui: [], timeoutMs: 5000 },
+			mcpConfig: {
+				mcpServers: {
+					fixture: { command: process.execPath, args: [mcpFixture], exposure: "direct" },
+				},
+			},
+		});
+		check("mcp sidecar init (mcpConfig)", init4.success === true, init4);
+		const ready4 = await core4.nextEvent((e) => e.type === "ready", "ready (mcp)");
+		check("mcp tools are not in the ready snapshot (pre-connection)", !ready4.tools.some((t) => t.name.startsWith("mcp__fixture__")), ready4.tools.map((t) => t.name));
+		core4.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
+		const changed = await core4.nextEvent((e) => e.type === "tools_changed", "tools_changed (mcp)");
+		const mcpTools = changed.tools.map((t) => t.name);
+		check("tools_changed carries the MCP tools (upstream naming)", mcpTools.includes("mcp__fixture__echo") && mcpTools.includes("mcp__fixture__counter"), mcpTools);
+		const echoTool = changed.tools.find((t) => t.name === "mcp__fixture__echo");
+		check("mcp tool keeps its server schema", echoTool?.parameters?.type === "object" && echoTool?.parameters?.properties?.text, echoTool?.parameters);
+		core4.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code4 = await Promise.race([core4.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("mcp sidecar clean exit 0", code4 === 0, code4);
+
+		// (n) 705: extension shortcuts — the sidecar resolves them with the
+		// upstream precedence against the core's resolved keybindings: the
+		// reserved built-in (ctrl+c = app.clear) blocks the conflicting
+		// shortcut with a diagnostic; the clean one (ctrl+shift+x) is
+		// dispatched over the `shortcut` req/resp and its handler runs.
+		const agentDir5 = path.join(tmp, "agent5");
+		mkdirSync(agentDir5, { recursive: true });
+		child5 = spawn(
+			process.execPath,
+			[ENTRY, "--agent-dir", agentDir5, "--extension-dir", path.join(ROOT, "tests/fixtures/shortcut-reg.ts")],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child5.stderr.on("data", (d) => process.stderr.write(d));
+		const core5 = new FakeCore(child5);
+		const init5 = await core5.request({
+			type: "init",
+			protocolVersion: 4,
+			capabilities: { ui: [], timeoutMs: 5000 },
+			keybindings: { "app.clear": ["ctrl+c"] },
+		});
+		check("shortcut sidecar init (keybindings)", init5.success === true, init5);
+		const ready5 = await core5.nextEvent((e) => e.type === "ready", "ready (shortcut)");
+		const scKeys = (ready5.shortcuts ?? []).map((sc) => sc.key);
+		check("clean shortcut resolves, reserved conflict is skipped", scKeys.includes("ctrl+shift+x") && !scKeys.includes("ctrl+c"), scKeys);
+		const sc = (ready5.shortcuts ?? []).find((x) => x.key === "ctrl+shift+x");
+		check("shortcut carries description + extensionPath", sc?.description === "wp705 fixture action" && /shortcut-reg/.test(sc?.extensionPath ?? ""), sc);
+		check("conflict diagnostic (upstream text)", (ready5.shortcutDiagnostics ?? []).some((m) => m.includes("conflicts with built-in shortcut. Skipping.") && m.includes("ctrl+c")), ready5.shortcutDiagnostics);
+		core5.send({ type: "session_start", event: { type: "session_start", reason: "startup" } });
+		const shortResp = await core5.request({ type: "shortcut", key: "ctrl+shift+x" });
+		check("shortcut dispatch succeeds", shortResp.success === true, shortResp);
+		const fired = await core5.nextEvent(
+			(e) => e.type === "session_append_entry" && e.entry?.customType === "wp705-fired",
+			"appendEntry (shortcut handler)",
+			5000,
+		);
+		check("shortcut handler ran (appendEntry observed)", fired.entry?.customType === "wp705-fired", fired.entry);
+		const reservedResp = await core5.request({ type: "shortcut", key: "ctrl+c" });
+		check("reserved key is not dispatchable", reservedResp.success === false && /No extension shortcut/.test(reservedResp.error ?? ""), reservedResp);
+		core5.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("shortcut sidecar clean exit 0", code5 === 0, code5);
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
 		try {
 			child.kill("SIGKILL");
 			child2?.kill("SIGKILL");
+			child3?.kill("SIGKILL");
+			child4?.kill("SIGKILL");
+			child5?.kill("SIGKILL");
 		} catch {}
 	}
 

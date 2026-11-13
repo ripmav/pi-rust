@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap, Widget};
 use ratatui::buffer::Buffer;
+use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 pub mod dialog;
@@ -54,8 +55,9 @@ pub struct TuiApp {
     pub session: String,
     /// Window title set by an extension (`setTitle`); shown in the status bar.
     pub title: Option<String>,
-    /// Status text set by an extension (`setStatus`); shown in the status bar.
-    pub status_text: Option<String>,
+    /// Extension statuses by key (`setStatus`, upstream keyed map); the
+    /// status bar renders them sorted by key, space-joined.
+    pub statuses: BTreeMap<String, String>,
     /// Open dialog (WP-604); keys are routed to it until it closes.
     pub dialog: Option<dialog::Dialog>,
     /// Open `editor` dialog (WP-605): the main editor pane is reused as the
@@ -67,6 +69,9 @@ pub struct TuiApp {
     pub theme: theme::Theme,
     /// WP-608: extension `registerCommand` commands (from the ready payload).
     pub ext_commands: Vec<commands::Command>,
+    /// WP-705: (key, description) extension shortcuts from ready — the
+    /// sidecar already applied the upstream precedence resolution.
+    pub ext_shortcuts: Vec<(String, String)>,
     /// WP-608: prompt templates (WP-307 discovery).
     pub templates: Vec<crate::templates::Template>,
     /// WP-608: the open slash menu (matched commands + selection).
@@ -109,6 +114,9 @@ pub enum TuiAction {
     /// WP-609: `/resume` — the terminal loads the session list and opens
     /// the picker (it owns the agent dir).
     OpenSessionsPicker,
+    /// WP-705: a registered extension shortcut (ready.shortcuts); the key
+    /// string as registered (the terminal sends it back over the bridge).
+    BridgeShortcut { key: String },
 }
 
 impl TuiApp {
@@ -124,6 +132,20 @@ impl TuiApp {
 
     /// WP-608: set the extension commands and prompt templates that feed
     /// the slash menu and dispatch.
+    /// WP-705: the resolved extension shortcuts from `ready`.
+    pub fn with_shortcuts(mut self, ext_shortcuts: Vec<(String, String)>) -> Self {
+        self.ext_shortcuts = ext_shortcuts;
+        self
+    }
+
+    /// WP-706: upstream `resetExtensionUI` on session replacement — the
+    /// extension-contributed chrome (status entries, title) belongs to the
+    /// previous session.
+    pub fn clear_extension_chrome(&mut self) {
+        self.statuses.clear();
+        self.title = None;
+    }
+
     pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
         self.ext_commands = ext_commands;
         self.templates = templates;
@@ -330,12 +352,13 @@ impl TuiApp {
             cwd: cwd.into(),
             session: session.into(),
             title: None,
-            status_text: None,
+            statuses: BTreeMap::new(),
             dialog: None,
             editor_session: None,
             kb,
             theme: theme::Theme::builtin("dark").expect("built-in dark theme"),
             ext_commands: Vec::new(),
+            ext_shortcuts: Vec::new(),
             templates: Vec::new(),
             slash: None,
             picker: None,
@@ -817,6 +840,14 @@ impl TuiApp {
     }
 
     fn process_key(&mut self, k: crossterm::event::KeyEvent) -> Option<TuiAction> {
+        // WP-705: extension shortcuts dispatch before any built-in binding
+        // (upstream custom-editor.handleInput checks them first); a match
+        // consumes the key.
+        for (key, _) in &self.ext_shortcuts {
+            if keybindings::matches_event(&k, key) {
+                return Some(TuiAction::BridgeShortcut { key: key.clone() });
+            }
+        }
         {
             // WP-606: the keybinding manager (upstream schema + user
             // config) drives the wired actions; first match wins.
@@ -1099,7 +1130,17 @@ impl TuiApp {
                 self.scroll = 0;
             }
             Some("set_status") => {
-                self.status_text = ev.get("statusText").and_then(Value::as_str).map(str::to_string);
+                // Upstream semantics: keyed; undefined text deletes the key.
+                if let Some(k) = ev.get("statusKey").and_then(Value::as_str) {
+                    match ev.get("statusText").and_then(Value::as_str) {
+                        Some(t) => {
+                            self.statuses.insert(k.to_string(), t.to_string());
+                        }
+                        None => {
+                            self.statuses.remove(k);
+                        }
+                    }
+                }
             }
             Some("set_title") => {
                 self.title = ev.get("title").and_then(Value::as_str).map(str::to_string);
@@ -1260,8 +1301,9 @@ impl TuiApp {
             if let Some(t) = &self.title {
                 segs.push(t.clone());
             }
-            if let Some(st) = &self.status_text {
-                segs.push(st.clone());
+            if !self.statuses.is_empty() {
+                // BTreeMap iterates sorted by key (upstream footer order).
+                segs.push(self.statuses.values().cloned().collect::<Vec<_>>().join(" "));
             }
             if self.pending {
                 segs.push("● working".into());
@@ -1859,7 +1901,7 @@ mod tests {
         app.apply_event(&json!({"kind":"notify","message":"hello"}));
         assert!(app.transcript.last().unwrap().text.contains("hello"));
         app.apply_event(&json!({"kind":"set_status","statusKey":"k","statusText":"busy"}));
-        assert_eq!(app.status_text.as_deref(), Some("busy"));
+        assert_eq!(app.statuses.get("k"), Some(&"busy".to_string()));
         app.apply_event(&json!({"kind":"set_title","title":"MyTitle"}));
         assert_eq!(app.title.as_deref(), Some("MyTitle"));
         app.apply_event(&json!({"kind":"set_editor_text","text":"preset"}));
@@ -2141,5 +2183,51 @@ mod tests {
         app.handle_key(TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
         let scrolled = app.render_string();
         assert!(!scrolled.contains("line-59"), "scrolling up moves the window: {scrolled}");
+    }
+
+    #[test]
+    fn wp705_extension_shortcut_dispatches_before_builtins() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app = app.with_shortcuts(vec![(
+            "ctrl+shift+x".to_string(),
+            "fixture action".to_string(),
+        )]);
+        // A registered extension shortcut dispatches over the bridge and
+        // consumes the key (upstream custom-editor.handleInput checks
+        // extension shortcuts before any built-in binding).
+        let action = app.handle_key(key_mod('x', KeyModifiers::CONTROL | KeyModifiers::SHIFT));
+        assert_eq!(
+            action,
+            Some(TuiAction::BridgeShortcut {
+                key: "ctrl+shift+x".to_string()
+            })
+        );
+        assert_eq!(app.input, "", "the matched key is consumed");
+        // A key without an extension shortcut still reaches the built-ins.
+        assert_eq!(app.handle_key(key('h')), None);
+        assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn wp706_keyed_statuses_sorted_joined_deleted_and_cleared() {
+        let mut app = TuiApp::new("m", "cwd", "s");
+        // Upstream semantics: keyed statuses, rendered sorted by key and
+        // space-joined in the status bar.
+        app.apply_event(&json!({"kind":"set_status","statusKey":"zeta","statusText":"zz"}));
+        app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"aa"}));
+        let s = app.render_string();
+        assert!(s.contains("aa zz"), "sorted + space-joined in the status bar:\n{s}");
+        // Overwrite + delete (undefined text removes the key).
+        app.apply_event(&json!({"kind":"set_status","statusKey":"alpha","statusText":"ab"}));
+        app.apply_event(&json!({"kind":"set_status","statusKey":"zeta"}));
+        assert_eq!(app.statuses.len(), 1, "one entry survives");
+        let s = app.render_string();
+        assert!(s.contains("ab") && !s.contains("zz"), "{s}");
+        // Session replacement clears the extension chrome (upstream
+        // resetExtensionUI: statuses + title).
+        app.apply_event(&json!({"kind":"set_title","title":"gone"}));
+        assert_eq!(app.title.as_deref(), Some("gone"));
+        app.clear_extension_chrome();
+        assert!(app.statuses.is_empty() && app.title.is_none());
     }
 }

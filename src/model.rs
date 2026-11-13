@@ -67,12 +67,21 @@ pub trait ModelDriver: Send + Sync {
 pub struct FakeDriver {
     turns: Mutex<VecDeque<AssistantTurn>>,
     echo: bool,
+    /// WP-704: the deterministic answer to the compaction summary call
+    /// (the scenario `compact_summary`; keeps scripted e2e turn slots stable).
+    compact_summary: String,
 }
+
+/// WP-704: the scenario-less default for the fake's compaction summary.
+pub const DEFAULT_COMPACT_SUMMARY: &str = "CONTEXT SUMMARY (fake)";
+
+/// The marker in SUMMARIZATION_SYSTEM_PROMPT that identifies the summary call.
+const SUMMARY_SYSTEM_MARKER: &str = "context summarization assistant";
 
 impl FakeDriver {
     /// Parses scenario steps: consecutive `tool_call` steps form ONE assistant
     /// turn with multiple tool calls; a `text` step is a text-only turn.
-    pub fn from_steps(steps: &[Value]) -> Result<Self> {
+    pub fn from_steps(steps: &[Value], compact_summary: &str) -> Result<Self> {
         let mut turns: Vec<AssistantTurn> = Vec::new();
         let mut cur: Vec<ToolCallSpec> = Vec::new();
         let mut seq = 0;
@@ -97,15 +106,15 @@ impl FakeDriver {
         if !cur.is_empty() {
             turns.push(AssistantTurn { text: None, tool_calls: cur, usage: Usage::default() });
         }
-        Ok(Self { turns: Mutex::new(VecDeque::from(turns)), echo: false })
+        Ok(Self { turns: Mutex::new(VecDeque::from(turns)), echo: false, compact_summary: compact_summary.to_string() })
     }
 }
 
 impl FakeDriver {
     /// Prompt-mode driver: no script; answers the last user message with a
     /// deterministic `echo: <text>` turn, then reports exhaustion.
-    pub fn echo_mode() -> Self {
-        Self { turns: Mutex::new(VecDeque::new()), echo: true }
+    pub fn echo_mode(compact_summary: &str) -> Self {
+        Self { turns: Mutex::new(VecDeque::new()), echo: true, compact_summary: compact_summary.to_string() }
     }
 }
 
@@ -116,6 +125,20 @@ impl ModelDriver for FakeDriver {
         mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
         Box::pin(async move {
+            // WP-704: the summary call is detected by its system prompt (the
+            // verbatim SUMMARIZATION_SYSTEM_PROMPT marker); it answers with
+            // the compact_summary as plain text, no tool calls, WITHOUT
+            // consuming a scripted turn (turn slots stay stable).
+            let is_summary_call = convo.iter().any(|m| {
+                m.get("role").and_then(Value::as_str) == Some("system")
+                    && m.get("content").and_then(Value::as_str)
+                        .is_some_and(|s| s.contains(SUMMARY_SYSTEM_MARKER))
+            });
+            if is_summary_call {
+                let text = self.compact_summary.clone();
+                on_delta(&text);
+                return Ok(AssistantTurn { text: Some(text), tool_calls: Vec::new(), usage: Usage::default() });
+            }
             if let Some(t) = self.turns.lock().unwrap().pop_front() {
                 if let Some(text) = &t.text {
                     on_delta(text); // single delta: the fake does not stream
@@ -131,5 +154,35 @@ impl ModelDriver for FakeDriver {
             }
             anyhow::bail!("model script exhausted before the run could finish")
         })
+    }
+}
+
+#[cfg(test)]
+mod wp704_tests {
+    use super::*;
+
+    fn summary_convo() -> Vec<Value> {
+        vec![
+            json!({"role":"system","content":"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary."}),
+            json!({"role":"user","content":[{"type":"text","text":"<conversation>\n[User]: hi\n</conversation>"}]}),
+        ]
+    }
+
+    #[test]
+    fn summary_call_is_detected_and_does_not_consume_script() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let driver = FakeDriver::from_steps(&[json!({"text": "scripted"})], "MY SUMMARY").unwrap();
+        // The summary call answers with the scenario's compact_summary.
+        let t1 = rt.block_on(driver.complete(&summary_convo(), Box::new(|_| {}))).unwrap();
+        assert_eq!(t1.text.as_deref(), Some("MY SUMMARY"));
+        assert!(t1.tool_calls.is_empty(), "plain text, no tool calls");
+        // The script is intact: the next ordinary call pops the scripted turn.
+        let normal = vec![json!({"role":"user","content":[{"type":"text","text":"hi"}]})];
+        let t2 = rt.block_on(driver.complete(&normal, Box::new(|_| {}))).unwrap();
+        assert_eq!(t2.text.as_deref(), Some("scripted"));
+        // echo mode: the configured summary (cli passes the default marker).
+        let echo = FakeDriver::echo_mode(DEFAULT_COMPACT_SUMMARY);
+        let t3 = rt.block_on(echo.complete(&summary_convo(), Box::new(|_| {}))).unwrap();
+        assert_eq!(t3.text.as_deref(), Some(DEFAULT_COMPACT_SUMMARY));
     }
 }

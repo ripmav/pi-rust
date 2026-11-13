@@ -16,7 +16,7 @@ use crossterm::event::{self, Event as TermEvent};
 use crossterm::execute;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::EnableBracketedPaste;
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, SetTitle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde_json::{json, Value};
@@ -146,6 +146,11 @@ where
                                                 }
                                                 app.transcript = transcript;
                                                 app.scroll = 0;
+                                                // WP-706: upstream
+                                                // resetExtensionUI on session
+                                                // replacement — the chrome
+                                                // belongs to the old session.
+                                                app.clear_extension_chrome();
                                             }
                                             Err(e) => {
                                                 crate::corelog::line(&format!("[core] resume: {e}"));
@@ -176,7 +181,14 @@ where
                                         }
                                     }
                                 }
-                                super::TuiAction::BridgeCommand { name, args } => {
+                                super::TuiAction::BridgeShortcut { key } => {
+                                    // WP-705: the sidecar resolves the key to the
+                                    // registered handler; a handler error renders
+                                    // through the same result event (upstream
+                                    // showError equivalent).
+                                    on_request(format!("shortcut {key}"), Value::Null, "shortcut", json!({ "key": key }));
+                                }
+                                                                super::TuiAction::BridgeCommand { name, args } => {
                                     on_request(format!("/{name}"), Value::Null, "command", json!({ "name": name, "args": args }));
                                 }
                                 super::TuiAction::SetThinking { level } => {
@@ -245,6 +257,15 @@ where
                         let mut v = first;
                         loop {
                             app.apply_event(&v);
+                            // WP-706: the extension title also sets the
+                            // terminal window/tab title (upstream setTitle
+                            // is window-title-only; the status-bar segment
+                            // comes from apply_event).
+                            if v.get("kind").and_then(|k| k.as_str()) == Some("set_title") {
+                                if let Some(t) = v.get("title").and_then(|n| n.as_str()) {
+                                    let _ = execute!(term.backend_mut(), SetTitle(t));
+                                }
+                            }
                             // WP-607: theme switch from the core (pi.setTheme).
                             if v.get("kind").and_then(|k| k.as_str()) == Some("set_theme") {
                                 if let Some(name) = v.get("name").and_then(|n| n.as_str()) {

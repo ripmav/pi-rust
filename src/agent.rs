@@ -19,6 +19,8 @@ pub struct QueuedUser {
     pub steps: Vec<Value>,
     /// (mime, base64) `--image` attachments (S8).
     pub images: Vec<(String, String)>,
+    /// WP-704: the fake driver's compaction summary (scenario `compact_summary`).
+    pub compact_summary: String,
 }
 
 pub enum Item {
@@ -119,6 +121,9 @@ pub struct Core {
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
+    /// WP-701: extension-registered models keyed `provider/id` (ready +
+    /// providers_changed payloads); per-turn bridge routing + set_model gate.
+    pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
     pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
     pub log: EventLog,
     pub fail: Arc<Mutex<Option<String>>>,               // first fatal scenario error
@@ -138,6 +143,16 @@ pub struct Core {
     pub tui: bool,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
+    /// WP-702: drain barrier for event_task — `sync_tool_set` sends a ping
+    /// and waits; the ping is answered only after every sidecar line that
+    /// reached the event channel earlier (in particular a `tools_changed`
+    /// emitted while the MCP extension's `tool_call` handler waited for a
+    /// server) has been applied.
+    pub tools_sync_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    /// WP-704: the scenario `compact` override (window, reserve, keep) — the
+    /// fake model has no catalog contextWindow, so without the override the
+    /// auto trigger stays off for it.
+    pub compact_override: Option<(u64, u64, u64)>,
 }
 
 /// WP-610: Json mode — write one upstream-shaped event line.
@@ -163,6 +178,20 @@ fn subscribed(ctx: &Core, name: &str) -> bool {
     ev.contains(name) || (name == "context_with_system" && ev.contains("context"))
 }
 
+/// WP-702: wait until `event_task` has applied every sidecar line that
+/// preceded the in-flight blocking command's response. The sidecar writes a
+/// `tools_changed` line and the decision response in that order on one pipe, and
+/// the demux delivers them in that order — but the decision response can wake
+/// the agent loop before `event_task` drains the earlier event, so the tool
+/// set must not be read without this barrier after a decision that may have
+/// connected an MCP server (`tool_call`, `before_agent_start`).
+async fn sync_tool_set(ctx: &Core) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if ctx.tools_sync_tx.send(tx).is_ok() {
+        let _ = rx.await;
+    }
+}
+
 /// Response `data` of a successful decision, else the protocol default
 /// (`fallback`); logs the decision event line either way.
 fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: &Value) -> Value {
@@ -181,161 +210,208 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// Sidecar→core event processor. Runs on its own task so a nested
 /// `tool_call_request` can be answered while the agent loop awaits a decision
 /// (bidirectional liveness, no head-of-line blocking).
-pub async fn event_task(mut events: mpsc::UnboundedReceiver<Value>, ctx: Arc<Core>) {
-    while let Some(ev) = events.recv().await {
-        match ev.get("type").and_then(Value::as_str).unwrap_or("") {
-            "ready" => {
-                let empty = Vec::new();
-                let names: Vec<String> = ev.get("events").and_then(Value::as_array).unwrap_or(&empty)
-                    .iter().filter_map(Value::as_str).map(str::to_string).collect();
-                ctx.events.lock().unwrap().extend(names.iter().cloned());
-                ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
-                crate::corelog::line(&format!(
-                    "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
-                    ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-                    ctx.ext_tools.lock().unwrap().len()
-                ));
-                if let Some(r) = ctx.ready.lock().unwrap().take() {
-                    let _ = r.send(ev);
-                }
-            }
-            "extension_ui_request" => {
-                let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
-                if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
-                    // WP-604: the TUI renders the dialog and answers it over
-                    // the unchanged bridge protocol.
-                    if ctx.ui_tx.send(ev.clone()).is_err() {
-                        ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
+pub async fn event_task(
+    mut events: mpsc::UnboundedReceiver<Value>,
+    mut tools_sync: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
+    ctx: Arc<Core>,
+) {
+    loop {
+        // The events branch is listed FIRST: a queued sidecar event is
+        // processed before a drain ping is answered, which is what makes
+        // `sync_tool_set` a real "everything written before the ping is
+        // applied" barrier (WP-702).
+        tokio::select! {
+            ev = events.recv() => {
+                let Some(ev) = ev else { break };
+                match ev.get("type").and_then(Value::as_str).unwrap_or("") {
+                "ready" => {
+                    let empty = Vec::new();
+                    let names: Vec<String> = ev.get("events").and_then(Value::as_array).unwrap_or(&empty)
+                        .iter().filter_map(Value::as_str).map(str::to_string).collect();
+                    ctx.events.lock().unwrap().extend(names.iter().cloned());
+                    ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
+                    // WP-701: extension-registered models become routable.
+                    *ctx.ext_models.lock().unwrap() = parse_providers(&ev);
+                    crate::corelog::line(&format!(
+                        "[core] ready: {} extension(s), {} extension tool(s), events: {names:?}",
+                        ev.get("extensions").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+                        ctx.ext_tools.lock().unwrap().len()
+                    ));
+                    if let Some(r) = ctx.ready.lock().unwrap().take() {
+                        let _ = r.send(ev);
                     }
-                } else if ctx.tui {
-                    // F&F UI channel: display-only, the TUI renders it.
-                    let kind = match method {
-                        "notify" => "notify",
-                        "setStatus" => "set_status",
-                        "setTitle" => "set_title",
-                        "set_editor_text" => "set_editor_text",
-                        _ => "extension_ui_request",
+                }
+                "extension_ui_request" => {
+                    let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
+                    if ctx.tui && matches!(method, "select" | "confirm" | "input" | "editor") {
+                        // WP-604: the TUI renders the dialog and answers it over
+                        // the unchanged bridge protocol.
+                        if ctx.ui_tx.send(ev.clone()).is_err() {
+                            ui_default(&ctx, &ev); // TUI gone: fall back to defaults.
+                        }
+                    } else if ctx.tui {
+                        // F&F UI channel: display-only, the TUI renders it.
+                        let kind = match method {
+                            "notify" => "notify",
+                            "setStatus" => "set_status",
+                            "setTitle" => "set_title",
+                            "set_editor_text" => "set_editor_text",
+                            _ => "extension_ui_request",
+                        };
+                        ctx.log.emit(json!({"kind":kind,
+                            "id":ev.get("id").cloned().unwrap_or(Value::Null),
+                            "method":method,
+                            "title":ev.get("title").cloned().unwrap_or(Value::Null),
+                            "message":ev.get("message").cloned().unwrap_or(Value::Null),
+                            "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
+                            "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
+                            "text":ev.get("text").cloned().unwrap_or(Value::Null),
+                            "response":Value::Null}));
+                    } else {
+                        ui_default(&ctx, &ev);
+                    }
+                }
+                "extension_error" => {
+                    crate::corelog::line(&format!("[core] extension_error: {ev}"));
+                    ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
+                        "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
+                }
+                "session_info_changed" => {
+                    let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                    ctx.session.set_name(name.clone());
+                    crate::corelog::line(&format!("[core] session name: {name:?}"));
+                }
+                "session_append_entry" => {
+                    if let Some(entry) = ev.get("entry") {
+                        ctx.session.append_entry(entry.clone());
+                    }
+                }
+                "user_message" => {
+                    let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                    crate::corelog::line(&format!("[core] extension user_message: {text}"));
+                    // Steer for v0 = append to the same queue (drained in order).
+                    let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new(), compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string() }));
+                }
+                "providers_changed" => {
+                    // WP-701: a registration arrived after ready; re-key routing.
+                    let next = parse_providers(&ev);
+                    crate::corelog::line(&format!("[core] providers_changed: {} extension model(s)", next.len()));
+                    *ctx.ext_models.lock().unwrap() = next;
+                }
+                "tools_changed" => {
+                    // WP-702: the extension tool set changed post-ready (MCP
+                    // tools register on connection, lazy reconnect, unregister)
+                    // — replace the ready.tools snapshot.
+                    let next = ev.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
+                    crate::corelog::line(&format!("[core] tools_changed: {} extension tool(s)", next.len()));
+                    ctx.ext_tools.lock().unwrap().clone_from(&next);
+                }
+                "set_model_request" => {
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
+                    let provider = ev.get("provider").and_then(Value::as_str).map(str::to_string);
+                    // WP-406: validate first (catalog + driver build), only then
+                    // swap; declines leave the active model untouched. IMPORTANT:
+                    // no `return` here — a return would exit event_task, not just
+                    // this arm, and kill the sidecar->core event pump.
+                    let reply = |success: bool, data: Value| {
+                        let mut line = json!({"id":id,"type":"response","command":"set_model_request","success":success});
+                        if success { line["data"] = data; } else { line["error"] = data; }
+                        ctx.client.send(line);
                     };
-                    ctx.log.emit(json!({"kind":kind,
-                        "id":ev.get("id").cloned().unwrap_or(Value::Null),
-                        "method":method,
-                        "title":ev.get("title").cloned().unwrap_or(Value::Null),
-                        "message":ev.get("message").cloned().unwrap_or(Value::Null),
-                        "statusKey":ev.get("statusKey").cloned().unwrap_or(Value::Null),
-                        "statusText":ev.get("statusText").cloned().unwrap_or(Value::Null),
-                        "text":ev.get("text").cloned().unwrap_or(Value::Null),
-                        "response":Value::Null}));
-                } else {
-                    ui_default(&ctx, &ev);
-                }
-            }
-            "extension_error" => {
-                crate::corelog::line(&format!("[core] extension_error: {ev}"));
-                ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),
-                    "event":ev.get("event").cloned().unwrap_or(Value::Null),"error":ev.get("error").cloned().unwrap_or(Value::Null)}));
-            }
-            "session_info_changed" => {
-                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
-                ctx.session.set_name(name.clone());
-                crate::corelog::line(&format!("[core] session name: {name:?}"));
-            }
-            "session_append_entry" => {
-                if let Some(entry) = ev.get("entry") {
-                    ctx.session.append_entry(entry.clone());
-                }
-            }
-            "user_message" => {
-                let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-                crate::corelog::line(&format!("[core] extension user_message: {text}"));
-                // Steer for v0 = append to the same queue (drained in order).
-                let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
-            }
-            "set_model_request" => {
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let model_id = ev.get("modelId").and_then(Value::as_str).map(str::to_string);
-                let provider = ev.get("provider").and_then(Value::as_str).map(str::to_string);
-                // WP-406: validate first (catalog + driver build), only then
-                // swap; declines leave the active model untouched. IMPORTANT:
-                // no `return` here — a return would exit event_task, not just
-                // this arm, and kill the sidecar->core event pump.
-                let reply = |success: bool, data: Value| {
-                    let mut line = json!({"id":id,"type":"response","command":"set_model_request","success":success});
-                    if success { line["data"] = data; } else { line["error"] = data; }
-                    ctx.client.send(line);
-                };
-                match (provider, model_id) {
-                    (Some(p), Some(m)) => {
-                        if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
-                            reply(false, json!(format!("unknown model {p}/{m}")));
-                        } else {
-                            match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
-                                Ok(Some(drv)) => {
-                                    let prev = ctx.model.lock().unwrap().0.clone();
-                                    let model = json!({"id":m,"provider":p});
-                                    ctx.model.lock().unwrap().0 = model.clone();
-                                    ctx.session.set_model(&p, &m);
-                                    *ctx.provider.lock().unwrap() = Some(drv);
-                                    reply(true, json!({"ok":true}));
-                                    if subscribed(&ctx, "model_select") {
-                                        ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
-                                    }
+                    match (provider, model_id) {
+                        (Some(p), Some(m)) => {
+                            // WP-701: extension-registered model — routable via
+                            // the bridge stream; no bundled driver is built.
+                            let key = format!("{p}/{m}");
+                            if ctx.ext_models.lock().unwrap().contains_key(&key) {
+                                let prev = ctx.model.lock().unwrap().0.clone();
+                                let model = json!({"id":m,"provider":p});
+                                ctx.model.lock().unwrap().0 = model.clone();
+                                ctx.session.set_model(&p, &m);
+                                reply(true, json!({"ok":true}));
+                                if subscribed(&ctx, "model_select") {
+                                    ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
                                 }
-                                Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
-                                Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                            } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                                reply(false, json!(format!("unknown model {p}/{m}")));
+                            } else {
+                                match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
+                                    Ok(Some(drv)) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
                             }
                         }
+                        _ => reply(false, json!("setModel requires provider and modelId")),
                     }
-                    _ => reply(false, json!("setModel requires provider and modelId")),
                 }
-            }
-            "set_thinking_level_request" => {
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let level = ev.get("level").and_then(Value::as_str).map(str::to_string);
-                let prev = ctx.model.lock().unwrap().1.clone().unwrap_or_else(|| "off".into());
-                ctx.model.lock().unwrap().1 = level.clone();
-                if let Some(l) = &level {
-                    ctx.session.set_thinking_level(l);
-                }
-                ctx.client.send(json!({"id":id,"type":"response","command":"set_thinking_level_request","success":true,"data":{"ok":level.is_some()}}));
-                if subscribed(&ctx, "thinking_level_select") {
-                    ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
-                }
-            }
-            "set_theme_request" => {
-                // WP-607: pi.setTheme from an extension. The TUI applies the
-                // switch via the `set_theme` broadcast; headless runs reject
-                // (upstream theme switching is an interactive-mode feature).
-                let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
-                let reply = |success: bool, data: Value| {
-                    let mut line =
-                        json!({"id":id,"type":"response","command":"set_theme_request","success":success});
-                    if success {
-                        line["data"] = data;
-                    } else {
-                        line["error"] = data;
+                "set_thinking_level_request" => {
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let level = ev.get("level").and_then(Value::as_str).map(str::to_string);
+                    let prev = ctx.model.lock().unwrap().1.clone().unwrap_or_else(|| "off".into());
+                    ctx.model.lock().unwrap().1 = level.clone();
+                    if let Some(l) = &level {
+                        ctx.session.set_thinking_level(l);
                     }
-                    ctx.client.send(line);
-                };
-                match name {
-                    Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
-                        Ok(t) => {
-                            ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
-                            reply(true, json!({"ok":true}));
+                    ctx.client.send(json!({"id":id,"type":"response","command":"set_thinking_level_request","success":true,"data":{"ok":level.is_some()}}));
+                    if subscribed(&ctx, "thinking_level_select") {
+                        ctx.client.fire(json!({"type":"set_thinking_level","event":{"type":"thinking_level_select","level":level,"previousLevel":prev}}));
+                    }
+                }
+                "set_theme_request" => {
+                    // WP-607: pi.setTheme from an extension. The TUI applies the
+                    // switch via the `set_theme` broadcast; headless runs reject
+                    // (upstream theme switching is an interactive-mode feature).
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = ev.get("name").and_then(Value::as_str).map(str::to_string);
+                    let reply = |success: bool, data: Value| {
+                        let mut line =
+                            json!({"id":id,"type":"response","command":"set_theme_request","success":success});
+                        if success {
+                            line["data"] = data;
+                        } else {
+                            line["error"] = data;
                         }
-                        Err(e) => reply(false, json!(e)),
-                    },
-                    Some(n) => reply(
-                        false,
-                        json!(format!(
-                            "theme {n:?} cannot be switched outside interactive (TUI) mode"
-                        )),
-                    ),
-                    None => reply(false, json!("setTheme requires a theme name")),
+                        ctx.client.send(line);
+                    };
+                    match name {
+                        Some(n) if ctx.tui => match crate::tui::theme::Theme::load(&ctx.agent_dir, &n) {
+                            Ok(t) => {
+                                ctx.log.emit_tui(json!({"kind":"set_theme","name":t.name}));
+                                reply(true, json!({"ok":true}));
+                            }
+                            Err(e) => reply(false, json!(e)),
+                        },
+                        Some(n) => reply(
+                            false,
+                            json!(format!(
+                                "theme {n:?} cannot be switched outside interactive (TUI) mode"
+                            )),
+                        ),
+                        None => reply(false, json!("setTheme requires a theme name")),
+                    }
+                }
+                "tool_call_request" => nested_tool(&ctx, &ev).await,
+                other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
                 }
             }
-            "tool_call_request" => nested_tool(&ctx, &ev).await,
-            other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
+            // WP-702 drain barrier: answer only after the events branch has
+            // had priority (select polls branches in order).
+            ping = tools_sync.recv() => {
+                let Some(tx) = ping else { break };
+                let _ = tx.send(());
+            }
         }
     }
 }
@@ -377,7 +453,7 @@ async fn nested_tool(ctx: &Core, ev: &Value) {
     let call_id = ev.get("toolCallId").and_then(Value::as_str).unwrap_or("nested").to_string();
     let name = ev.get("toolName").and_then(Value::as_str).unwrap_or_default().to_string();
     let input = ev.get("input").cloned().unwrap_or_else(|| json!({}));
-    let data = match execute_tool_call(ctx, &call_id, &name, &input).await {
+    let data = match execute_tool_call(ctx, &call_id, &name, &input, false).await {
         Ok((trm, _)) => {
             let mut d = json!({"content":trm.get("content").cloned().unwrap_or(json!([])),"isError":trm.get("isError").cloned().unwrap_or(json!(false))});
             if let Some(det) = trm.get("details") {
@@ -404,10 +480,19 @@ enum ToolFailure {
 /// `tool_call` decision (execute with the FINAL returned input) → execute
 /// (built-in locally / extension over the bridge) → `tool_result` decision.
 /// Returns (toolResult message, terminate hint).
-async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Result<(Value, bool), String> {
+async fn execute_tool_call(ctx: &Core, call_id: &str, name: &str, input: &Value, barrier: bool) -> Result<(Value, bool), String> {
     let event = json!({"type":"tool_call","toolCallId":call_id,"toolName":name,"input":input});
     // Degraded default: no block, input unchanged.
     let data = decision_data(ctx, ctx.client.request("tool_call", json!({"event":event})).await, "tool_call", &event, &json!({"result":Value::Null,"input":input}));
+    // The MCP extension's tool_call handler waits for the server's readiness
+    // inside the decision; its `tools_changed` must be applied first. The
+    // barrier is only meaningful for the agent-loop caller: event_task runs
+    // events strictly in order, so its own queued `tools_changed` lines are
+    // already applied when it reaches this point (and it cannot answer its
+    // own ping — waiting here would self-deadlock the nested path).
+    if barrier {
+        sync_tool_set(ctx).await;
+    }
     let blocked = data.pointer("/result/block").and_then(Value::as_bool).unwrap_or(false);
     let final_input = data.get("input").cloned().filter(|v| v.is_object()).unwrap_or_else(|| input.clone());
     let (content, details, is_error, terminate) = if blocked {
@@ -429,10 +514,17 @@ async fn run_tool(ctx: &Core, call_id: &str, name: &str, input: &Value) -> Resul
     // Upstream precedence: an extension tool shadows the built-in of the same name.
     let ext_hit = ctx.client.state() == State::Running
         && ctx.ext_tools.lock().unwrap().iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
-    if !ext_hit && tools::is_builtin(name) {
+    // WP-702: MCP tool names (upstream `mcp__<server>__<tool>` scheme and the
+    // resource tools) are bridge-routable even when the server never connected
+    // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
+    // the call records an error tool result instead of aborting the run as a
+    // model-script error.
+    let mcp_name = name.starts_with("mcp__")
+        || matches!(name, "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource");
+    if !ext_hit && !mcp_name && tools::is_builtin(name) {
         return Ok(tools::execute(name, input).await);
     }
-    if !ext_hit && !tools::is_builtin(name) {
+    if !ext_hit && !mcp_name && !tools::is_builtin(name) {
         return Err(ToolFailure::Unknown(name.to_string()));
     }
     // Extension tools are dropped from the model's tool set while degraded; a
@@ -545,9 +637,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             if u.steps.is_empty() {
                 // No scripted model: deterministic echo turn (prompt runs and
                 // TUI messages alike; the fake driver is a test double).
-                Some(Box::new(FakeDriver::echo_mode()))
+                Some(Box::new(FakeDriver::echo_mode(&u.compact_summary)))
             } else {
-                Some(Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?))
+                Some(Box::new(FakeDriver::from_steps(&u.steps, &u.compact_summary).map_err(|e| e.to_string())?))
             }
         }
     };
@@ -605,15 +697,38 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         if let Some(p) = data.get("systemPrompt").and_then(Value::as_str) {
             system_prompt = p.to_string();
         }
+        // The MCP extension's before_agent_start handler waits for servers with
+        // `direct` tools; its `tools_changed` must be applied before the turn's
+        // tool declarations are built.
+        sync_tool_set(ctx).await;
     }
 
     if subscribed(ctx, "agent_start") { ctx.client.fire(json!({"type":"agent_start","event":{"type":"agent_start"}})); }
     ctx.log.emit(json!({"kind":"agent_start"}));
     jemit(ctx, json!({"type":"agent_start"}));
     let run_start = ctx.session.transcript().len();
+    // WP-704: the run's compaction settings (None = auto-compaction off).
+    let compaction = compaction_settings(ctx);
 
     let mut turn_index = 0u32;
     loop {
+        // WP-704: auto compaction at the context threshold — checked before
+        // build_conversation so the summarized conversation is what this
+        // turn's model call sees; after a successful compaction the loop
+        // continues with the projected transcript.
+        if let Some((window, reserve, keep)) = compaction {
+            let system_msg = json!({"role":"system","content":system_prompt,"toolsAdded":merged_tool_defs(ctx),"timestamp":now_ms()});
+            let check_convo = build_conversation(ctx, &system_prompt, &custom);
+            let context_tokens = crate::session::estimate_context_tokens(&check_convo);
+            if crate::session::should_compact(context_tokens, window, reserve) {
+                let entries = ctx.session.entries();
+                if let Some(pre) = crate::session::prepare_compaction(&entries, &system_msg, keep) {
+                    run_compaction(ctx, fake_driver.as_ref(), &system_msg, &pre).await;
+                } else {
+                    crate::corelog::line("[core] compaction threshold reached, nothing to summarize (session too small)");
+                }
+            }
+        }
         // `context` always answers data:null; the single emitContext runs on
         // `context_with_system` — send the full transcript and use the returned
         // conversation as-is for the provider request (sidecar may transform it).
@@ -644,20 +759,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
         // (the headless NDJSON contract keeps its single `model_output`).
-        let turn = match fake_driver.as_ref() {
-            Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-            None => {
-                let drv = ctx.provider.lock().unwrap().clone();
-                match drv.as_ref() {
-                    Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                    None => unreachable!("fake_driver is None only while a provider exists"),
-                }
-            }
-        }
-        .map_err(|e| e.to_string())?;
+        let turn = model_call(ctx, fake_driver.as_ref(), &convo, delta_emitter(ctx, turn_index)).await?;
 
         // Usage accounting (WP-407): per-turn session entry + cumulative
         // total; cost from the bundled registry (unknown model → 0).
@@ -673,7 +775,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             *ctx.cost_total.lock().unwrap() += cost;
         }
         // The fake model does not stream: message_start + message_end only.
-        let assistant = assistant_message(&turn);
+        let assistant = assistant_message(&turn, &ctx.model.lock().unwrap().0);
         if subscribed(ctx, "message_start") { ctx.client.fire(json!({"type":"message_start","event":{"type":"message_start","message":assistant}})); }
         if subscribed(ctx, "message_end") { ctx.client.fire(json!({"type":"message_end","event":{"type":"message_end","message":assistant}})); }
         // WP-610: message_end carries the final assistant message (the
@@ -694,7 +796,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
         for tc in &turn.tool_calls {
             // WP-610: upstream tool_execution_start before the run (args).
             jemit(ctx, json!({"type":"tool_execution_start","toolCallId":tc.id,"toolName":tc.name,"args":tc.input}));
-            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input).await {
+            match execute_tool_call(ctx, &tc.id, &tc.name, &tc.input, true).await {
                 Ok((trm, terminate)) => {
                     tool_result_ids.push(ctx.session.append_message(&trm));
                     // WP-610: upstream tool_execution_end (result + isError).
@@ -734,6 +836,253 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     Ok(())
 }
 
+/// One model call with the active driver: extension-registered model (bridge
+/// stream, WP-701) → scripted fake driver → live provider. Shared by the turn
+/// loop (streaming deltas) and the WP-704 summary call (no-op deltas).
+async fn model_call<'a>(
+    ctx: &'a Core,
+    fake_driver: Option<&'a Box<dyn ModelDriver>>,
+    convo: &[Value],
+    mut deltas: Box<dyn FnMut(&str) + Send + 'a>,
+) -> Result<AssistantTurn, String> {
+    // WP-701: an extension-registered model always routes via the
+    // bridge — an explicit provider selection wins over the scripted
+    // fake driver and the live provider driver.
+    let active = ctx.model.lock().unwrap().0.clone();
+    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let ext_model = ctx.ext_models.lock().unwrap().get(&format!("{p}/{mid}")).cloned();
+    match ext_model {
+        Some(model) => {
+            let stream_id = uuid::Uuid::new_v4().to_string();
+            let rx = ctx.client.attach_stream(&stream_id);
+            let resp = ctx.client
+                .request(
+                    "provider_stream",
+                    json!({"streamId":stream_id,"model":model,"messages":convo,"options":{}}),
+                )
+                .await;
+            match resp {
+                Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+                    let mut events = Vec::new();
+                    let mut rx = rx;
+                    while let Some(line) = rx.recv().await {
+                        if let Some(delta) = line.pointer("/event/delta").and_then(Value::as_str) {
+                            deltas(delta); // TUI model_delta + Json message_update
+                        }
+                        let is_terminal = line.get("event")
+                            .and_then(|e| e.get("type"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|t| t == "done" || t == "error");
+                        events.push(line.get("event").cloned().unwrap_or(Value::Null));
+                        if is_terminal { break; }
+                    }
+                    ctx.client.detach_stream(&stream_id);
+                    provider_events_to_turn(&events).map_err(|e| e.to_string())
+                }
+                Decision::Response(r) => {
+                    ctx.client.detach_stream(&stream_id);
+                    Err(format!(
+                        "{}",
+                        r.get("error").and_then(Value::as_str).unwrap_or("provider_stream rejected")
+                    ))
+                }
+                Decision::Unavailable => {
+                    ctx.client.detach_stream(&stream_id);
+                    Err("provider stream unavailable (sidecar degraded)".to_string())
+                }
+            }
+        }
+        None => match fake_driver {
+            Some(d) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+            None => {
+                let drv = ctx.provider.lock().unwrap().clone();
+                match drv.as_ref() {
+                    Some(ProviderDriver::OpenAi(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Anthropic(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Google(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Bedrock(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    None => unreachable!("fake_driver is None only while a provider exists"),
+                }
+            }
+        },
+    }
+}
+
+/// WP-704: the run's compaction settings — the scenario `compact` override
+/// (window, reserve, keep) wins; else the bundled registry's contextWindow
+/// with the upstream defaults. Models without a catalog contextWindow (like
+/// the fake) keep auto-compaction off without the override.
+fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
+    if let Some(o) = ctx.compact_override {
+        return Some(o);
+    }
+    let active = ctx.model.lock().unwrap().0.clone();
+    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let window = crate::registry::ModelRegistry::bundled().resolve(&p, &mid)?.context_window?;
+    Some((window, crate::session::DEFAULT_RESERVE_TOKENS, crate::session::DEFAULT_KEEP_RECENT_TOKENS))
+}
+
+/// WP-704: the upstream Usage shape {input,output,cacheRead,cacheWrite} from
+/// an extension-supplied compaction (None when absent or malformed).
+fn extract_compaction_usage(v: Option<&Value>) -> Option<crate::model::Usage> {
+    let v = v?;
+    let f = |k: &str| v.get(k).and_then(Value::as_u64);
+    let (Some(input), Some(output), Some(cache_read), Some(cache_write)) =
+        (f("input"), f("output"), f("cacheRead"), f("cacheWrite"))
+    else {
+        return None;
+    };
+    Some(crate::model::Usage { input, output, cache_read, cache_write })
+}
+
+/// WP-704: the `session_compact_failed` F&F event (gated on ready.events).
+/// v0: no AbortSignal exists, so `aborted` is always false; an extension
+/// cancel is reported without an `errorMessage`.
+fn fire_compact_failed(ctx: &Core, reason: &str, error_message: Option<&str>, from_extension: bool) {
+    if !subscribed(ctx, "session_compact_failed") {
+        return;
+    }
+    let mut event = json!({"type":"session_compact_failed","reason":reason,"aborted":false,"willRetry":false,"fromExtension":from_extension});
+    if let Some(e) = error_message {
+        event["errorMessage"] = json!(e);
+    }
+    ctx.client.fire(json!({"type":"session_compact_failed","event":event}));
+}
+
+/// WP-704: one compaction attempt. `session_before_compact` decision →
+/// cancel (turn proceeds uncompacted) | extension summary (fromHook, no LLM
+/// call) | LLM summary via the SAME active driver (verbatim prompts, no
+/// toolsAdded, no message_start/end broadcast, no model_delta, no usage
+/// session entry). On success: append_compaction + `session_compact` F&F.
+/// A summary response with tool calls fails with a typed message (v0: the
+/// drivers do not surface stopReason, so a length stop is not detectable).
+async fn run_compaction(
+    ctx: &Core,
+    fake_driver: Option<&Box<dyn ModelDriver>>,
+    system_msg: &Value,
+    pre: &crate::session::CompactionPreparation,
+) {
+    {
+        let reason = "threshold";
+        let mut from_hook = false;
+        let mut summary: Option<String> = None;
+        let mut first_kept = pre.first_kept_entry_id.clone();
+        let mut tokens_before = pre.tokens_before;
+        let mut usage: Option<crate::model::Usage> = None;
+
+        // session_before_compact decision (gated on ready.events).
+        if subscribed(ctx, "session_before_compact") {
+            let event = json!({"type":"session_before_compact",
+                "preparation":{"reason":reason,"willRetry":false},
+                "branchEntries":pre.messages_to_summarize});
+            let req = json!({"event":event});
+            let data = decision_data(ctx, ctx.client.request("session_before_compact", req.clone()).await, "session_before_compact", &req, &Value::Null);
+            if data.get("cancel").and_then(Value::as_bool) == Some(true) {
+                // Abort compaction; the turn proceeds uncompacted.
+                crate::corelog::line("[core] compaction cancelled by session_before_compact");
+                ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"cancelled":true,"fromExtension":false}));
+                fire_compact_failed(ctx, reason, None, false);
+                return;
+            }
+            if let Some(c) = data.get("compaction") {
+                match c.get("summary").and_then(Value::as_str).map(str::to_string) {
+                    Some(s) => {
+                        // Extension-supplied summary: fromHook=true, skip the
+                        // LLM call, use its firstKeptEntryId/tokensBefore when given.
+                        from_hook = true;
+                        summary = Some(s);
+                        if let Some(fk) = c.get("firstKeptEntryId").and_then(Value::as_str) {
+                            first_kept = fk.to_string();
+                        }
+                        if let Some(tb) = c.get("tokensBefore").and_then(Value::as_u64) {
+                            tokens_before = tb;
+                        }
+                        usage = extract_compaction_usage(c.get("usage"));
+                    }
+                    None => {
+                        let err = "session_before_compact returned a compaction without a summary string";
+                        crate::corelog::line(&format!("[core] {err}"));
+                        ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":err,"fromExtension":true}));
+                        fire_compact_failed(ctx, reason, Some(err), true);
+                        return;
+                    }
+                }
+            }
+        }
+
+        let summary = match summary {
+            Some(s) => s,
+            None => {
+                // LLM summary: the SAME active driver, conversation =
+                // [system SUMMARIZATION_SYSTEM_PROMPT (no toolsAdded), user
+                // "<conversation>…</conversation>" (+ <previous-summary>)].
+                let base_prompt = pre
+                    .previous_summary
+                    .as_ref()
+                    .map(|_| crate::session::UPDATE_SUMMARIZATION_PROMPT)
+                    .unwrap_or(crate::session::SUMMARIZATION_PROMPT);
+                let mut prompt_text = format!(
+                    "<conversation>\n{}\n</conversation>\n\n",
+                    crate::session::serialize_conversation(&pre.messages_to_summarize)
+                );
+                if let Some(prev) = &pre.previous_summary {
+                    prompt_text.push_str(&format!("<previous-summary>\n{prev}\n</previous-summary>\n\n"));
+                }
+                prompt_text.push_str(base_prompt);
+                let convo = vec![
+                    json!({"role":"system","content":crate::session::SUMMARIZATION_SYSTEM_PROMPT,"timestamp":now_ms()}),
+                    json!({"role":"user","content":[{"type":"text","text":prompt_text}],"timestamp":crate::session::now_iso()}),
+                ];
+                match model_call(ctx, fake_driver, &convo, Box::new(|_| {})).await {
+                    Ok(turn) => {
+                        if !turn.tool_calls.is_empty() {
+                            let err = "Summarization attempted to call a tool";
+                            crate::corelog::line(&format!("[core] {err}"));
+                            ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":err,"fromExtension":false}));
+                            fire_compact_failed(ctx, reason, Some(err), false);
+                            return;
+                        }
+                        usage = (turn.usage != crate::model::Usage::default()).then_some(turn.usage);
+                        turn.text.unwrap_or_default()
+                    }
+                    Err(msg) => {
+                        crate::corelog::line(&format!("[core] summarization failed: {msg}"));
+                        ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":msg,"fromExtension":false}));
+                        fire_compact_failed(ctx, reason, Some(&msg), false);
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Persist the upstream-shaped entry, then the events.
+        let entry_id = ctx
+            .session
+            .append_compaction(&summary, &first_kept, tokens_before, usage.as_ref(), from_hook, Some(system_msg));
+        let file_entry = ctx
+            .session
+            .entries()
+            .into_iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(entry_id.as_str()))
+            .unwrap_or(Value::Null);
+        ctx.log.emit(json!({"kind":"compaction","summary":summary,"firstKeptEntryId":first_kept,
+            "tokensBefore":tokens_before,"fromExtension":from_hook,"reason":reason}));
+        if subscribed(ctx, "session_compact") {
+            ctx.client.fire(json!({"type":"session_compact","event":{"type":"session_compact",
+                "compactionEntry":file_entry,"fromExtension":from_hook,"reason":reason,"willRetry":false}}));
+        }
+        crate::corelog::line(&format!(
+            "[core] compacted: entry {entry_id} (tokens_before={tokens_before}, from_hook={from_hook})"
+        ));
+    }
+}
+
+/// Full transcript for `context_with_system`: leading system message (prompt +
+/// tool declarations), custom messages from before_agent_start, then the
+/// session transcript. Degraded: extension tools are dropped from the set.
+
 /// Full transcript for `context_with_system`: leading system message (prompt +
 /// tool declarations), custom messages from before_agent_start, then the
 /// session transcript. Degraded: extension tools are dropped from the set.
@@ -756,7 +1105,7 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     v
 }
 
-fn assistant_message(turn: &AssistantTurn) -> Value {
+fn assistant_message(turn: &AssistantTurn, model: &Value) -> Value {
     let mut content = Vec::new();
     if let Some(t) = &turn.text {
         content.push(json!({"type":"text","text":t}));
@@ -765,10 +1114,203 @@ fn assistant_message(turn: &AssistantTurn) -> Value {
         // pi-ai shape: toolCall blocks carry `input` (upstream session files).
         content.push(json!({"type":"toolCall","id":tc.id,"name":tc.name,"input":tc.input}));
     }
-    json!({"role":"assistant","content":content,"api":"fake","provider":"fake","model":"fake",
+    let (provider, mid) = (
+        model.get("provider").cloned().unwrap_or(json!("fake")),
+        model.get("id").cloned().unwrap_or(json!("fake")),
+    );
+    json!({"role":"assistant","content":content,"api":"fake","provider":provider,"model":mid,
         "usage":{"input":turn.usage.input,"output":turn.usage.output,
                  "cacheRead":turn.usage.cache_read,"cacheWrite":turn.usage.cache_write},
         "stopReason":if turn.tool_calls.is_empty(){"stop"}else{"toolUse"},"timestamp":crate::session::now_iso()})
+}
+
+/// WP-701: `ready`/`providers_changed` `providers` payload -> extension model
+/// map keyed `provider/id` (per-turn routing + set_model validation key).
+pub(crate) fn parse_providers(payload: &Value) -> std::collections::BTreeMap<String, Value> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(providers) = payload.get("providers").and_then(Value::as_array) else {
+        return map;
+    };
+    for entry in providers {
+        // Legacy name-only entries are not routable.
+        let (Some(name), Some(models)) = (entry.get("name").and_then(Value::as_str), entry.get("models").and_then(Value::as_array)) else {
+            continue;
+        };
+        for m in models {
+            let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
+            let provider = m.get("provider").and_then(Value::as_str).unwrap_or(name);
+            let mut model = m.clone();
+            model["provider"] = Value::String(provider.to_string());
+            map.insert(format!("{provider}/{id}"), model);
+        }
+    }
+    map
+}
+
+/// WP-701: token usage from an upstream `done` message (camelCase wire).
+fn usage_from_message(v: Option<&Value>) -> crate::model::Usage {
+    let Some(u) = v else { return crate::model::Usage::default() };
+    crate::model::Usage {
+        input: u.get("input").and_then(Value::as_u64).unwrap_or(0),
+        output: u.get("output").and_then(Value::as_u64).unwrap_or(0),
+        cache_read: u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0),
+        cache_write: u.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0),
+    }
+}
+
+/// WP-701: maps a run of upstream `AssistantMessageEvent`s (forwarded by the
+/// sidecar as `provider_stream_event` lines) to an AssistantTurn. `done` is
+/// authoritative for text/tool calls/usage; accumulated `text_delta` /
+/// `toolcall_end` state is the fallback when the done message carries no
+/// content. `error` is terminal; a run without a terminal event is an error.
+pub(crate) fn provider_events_to_turn(events: &[Value]) -> Result<AssistantTurn, String> {
+    use crate::model::{ToolCallSpec, Usage};
+    let mut text = String::new();
+    let mut tool_calls: Vec<ToolCallSpec> = Vec::new();
+    for ev in events {
+        match ev.get("type").and_then(Value::as_str) {
+            Some("text_delta") => {
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) { text.push_str(d); }
+            }
+            Some("toolcall_end") => {
+                if let Some(tc) = ev.get("toolCall") {
+                    tool_calls.push(ToolCallSpec {
+                        id: tc.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        name: tc.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        input: tc.get("arguments").cloned().unwrap_or(Value::Null),
+                    });
+                }
+            }
+            Some("done") => {
+                let message = ev.get("message").cloned().unwrap_or(Value::Null);
+                let usage = usage_from_message(message.get("usage"));
+                // The done message is authoritative when it carries content;
+                // otherwise fall back to the accumulated deltas/tool calls.
+                let content = message.get("content").and_then(Value::as_array);
+                let has_content = content.is_some_and(|c| !c.is_empty());
+                if has_content {
+                    let mut final_text = String::new();
+                    let mut final_tools: Vec<ToolCallSpec> = Vec::new();
+                    for part in content.unwrap() {
+                        match part.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                if let Some(t) = part.get("text").and_then(Value::as_str) { final_text.push_str(t); }
+                            }
+                            Some("toolCall") => final_tools.push(ToolCallSpec {
+                                id: part.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                name: part.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                input: part.get("arguments").cloned().unwrap_or(Value::Null),
+                            }),
+                            _ => {}
+                        }
+                    }
+                    return Ok(AssistantTurn { text: Some(final_text), tool_calls: final_tools, usage });
+                }
+                return Ok(AssistantTurn { text: Some(text), tool_calls, usage });
+            }
+            Some("error") => {
+                let msg = ev.pointer("/error/errorMessage").and_then(Value::as_str)
+                    .unwrap_or("provider stream error");
+                return Err(msg.to_string());
+            }
+            _ => {}
+        }
+    }
+    Err("provider stream ended without a terminal event".into())
+}
+
+#[cfg(test)]
+mod provider_stream_tests {
+    use super::{parse_providers, provider_events_to_turn, usage_from_message};
+    use crate::model::Usage;
+    use serde_json::json;
+
+    fn done_event(content: serde_json::Value, usage: Option<serde_json::Value>) -> serde_json::Value {
+        let mut message = json!({"role":"assistant","content":content,"stopReason":"stop","timestamp":1});
+        if let Some(u) = usage {
+            message["usage"] = u;
+        }
+        json!({"type":"done","reason":"stop","message":message})
+    }
+
+    #[test]
+    fn maps_text_deltas_and_toolcall_end_with_done_message() {
+        let events = vec![
+            json!({"type":"start","partial":{"role":"assistant","content":[]}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"Hello ","partial":{}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"world","partial":{}}),
+            json!({"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"tc_1","name":"bash","arguments":{"command":"ls"}},"partial":{}}),
+            done_event(
+                json!([{"type":"text","text":"Hello world"},{"type":"toolCall","id":"tc_1","name":"bash","arguments":{"command":"ls"}}]),
+                Some(json!({"input":7,"output":11,"cacheRead":3,"cacheWrite":4})),
+            ),
+        ];
+        let turn = provider_events_to_turn(&events).expect("done stream maps to a turn");
+        assert_eq!(turn.text.as_deref(), Some("Hello world"));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "tc_1");
+        assert_eq!(turn.tool_calls[0].name, "bash");
+        assert_eq!(turn.tool_calls[0].input, json!({"command":"ls"}));
+        assert_eq!(turn.usage, Usage { input: 7, output: 11, cache_read: 3, cache_write: 4 });
+    }
+
+    #[test]
+    fn terminal_error_event_yields_the_error_message() {
+        let events = vec![json!({"type":"start","partial":{}}),
+            json!({"type":"error","reason":"error","error":{"role":"assistant","stopReason":"error","errorMessage":"boom from fake provider"}})];
+        let err = provider_events_to_turn(&events).unwrap_err();
+        assert_eq!(err, "boom from fake provider");
+    }
+
+    #[test]
+    fn stream_without_terminal_event_is_an_error() {
+        let events = vec![json!({"type":"start","partial":{}}), json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":{}})];
+        let err = provider_events_to_turn(&events).unwrap_err();
+        assert!(err.contains("terminal"), "{err}");
+    }
+
+    #[test]
+    fn done_without_message_falls_back_to_accumulated_state() {
+        let events = vec![
+            json!({"type":"text_delta","contentIndex":0,"delta":"acc ","partial":{}}),
+            json!({"type":"text_delta","contentIndex":0,"delta":"text","partial":{}}),
+            json!({"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"tc_9","name":"read","arguments":{"path":"f"}},"partial":{}}),
+            json!({"type":"done","reason":"stop","message":{"role":"assistant","content":[]}}),
+        ];
+        let turn = provider_events_to_turn(&events).expect("fallback turn");
+        assert_eq!(turn.text.as_deref(), Some("acc text"));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "read");
+        assert_eq!(turn.usage, Usage::default());
+    }
+
+    #[test]
+    fn parse_providers_builds_provider_id_keys() {
+        let payload = json!({"providers":[
+            {"name":"faketest","models":[
+                {"provider":"faketest","id":"faketest/echo-1","api":"faketest-api","name":"Fake Echo 1"}
+            ]},
+            {"name":"other","models":[
+                {"id":"other/m-1"}
+            ]}
+        ]});
+        let map = parse_providers(&payload);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("faketest/faketest/echo-1").expect("first model").get("api"), Some(&json!("faketest-api")));
+        // A model entry without `provider` inherits the registered name.
+        let m = map.get("other/other/m-1").expect("second model");
+        assert_eq!(m.get("provider"), Some(&json!("other")));
+        // Legacy name-only entries are not routable.
+        let map = parse_providers(&json!({"providers":["legacy-name"]}));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn usage_from_message_maps_camel_case_fields() {
+        let u = usage_from_message(Some(&json!({"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10})));
+        assert_eq!(u, Usage { input: 1, output: 2, cache_read: 3, cache_write: 4 });
+        assert_eq!(usage_from_message(None), Usage::default());
+    }
 }
 
 fn summarize(content: &Value) -> String {

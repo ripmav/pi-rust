@@ -17,6 +17,8 @@ struct RunSpec {
     steps: Vec<Value>,
     /// (mime, base64) attachments for `--image` (first prompt run only).
     images: Vec<(String, String)>,
+    /// WP-704: the fake driver's compaction summary (scenario `compact_summary`).
+    compact_summary: String,
 }
 
 /// MIME detection by magic bytes (png/jpeg/gif/webp — the formats the
@@ -65,17 +67,35 @@ fn read_image_attachment(path: &Path) -> Result<(String, String)> {
 /// Scenario JSON: `user_messages: [string]` plus per-message `model_scripts`
 /// (index-aligned; omitted = empty script). Steps:
 /// `{"text":"..."}` | `{"tool_call":{"name":"...","input":{...}}}`.
-fn parse_scenario(v: &Value) -> Result<Vec<RunSpec>> {
+/// WP-704: optional top-level `compact: {window, reserve, keep}` (JSON
+/// numbers; the fake model has no catalog contextWindow, so the override
+/// drives the auto trigger) and `compact_summary` (the fake's summary text).
+/// Returns (runs, the compact override).
+fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> {
     let user_messages = v.get("user_messages").and_then(Value::as_array).context("scenario needs `user_messages: [string]`")?;
     let scripts = v.get("model_scripts").and_then(Value::as_array).cloned().unwrap_or_default();
+    let compact = match v.get("compact") {
+        None => None,
+        Some(c) => {
+            let field = |k: &str| -> Result<u64> {
+                c.get(k).and_then(Value::as_u64).with_context(|| format!("scenario compact.{k} must be a JSON number"))
+            };
+            Some((field("window")?, field("reserve")?, field("keep")?))
+        }
+    };
+    let compact_summary = v
+        .get("compact_summary")
+        .and_then(Value::as_str)
+        .unwrap_or(crate::model::DEFAULT_COMPACT_SUMMARY)
+        .to_string();
     let mut runs = Vec::new();
     for (i, m) in user_messages.iter().enumerate() {
         let text = m.as_str().with_context(|| format!("user_messages[{i}] must be a string"))?.to_string();
         let steps = scripts.get(i).and_then(Value::as_array).cloned().unwrap_or_default();
-        runs.push(RunSpec { text, steps, images: Vec::new() });
+        runs.push(RunSpec { text, steps, images: Vec::new(), compact_summary: compact_summary.clone() });
     }
     if runs.is_empty() { bail!("scenario needs at least one user message"); }
-    Ok(runs)
+    Ok((runs, compact))
 }
 
 fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
@@ -222,22 +242,23 @@ pub async fn run() -> Result<i32> {
         prompt = Some(text);
     }
 
-    let runs = match (&scenario_path, &prompt) {
+    let (runs, compact_override) = match (&scenario_path, &prompt) {
         (Some(p), None) => {
             let raw = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             parse_scenario(&serde_json::from_str(&raw).context("scenario must be a JSON object")?)?
         }
         (Some(_), Some(_)) => unreachable!("checked above: scenario + prompt/template are exclusive"),
-        (None, Some(text)) => vec![RunSpec {
+        (None, Some(text)) => (vec![RunSpec {
             text: text.clone(),
             steps: vec![],
             images: image_paths.iter().map(|p| read_image_attachment(p)).collect::<Result<_>>()?,
-        }],
+            compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
+        }], None),
         (None, None) => {
             if list_sessions {
-                Vec::new() // --list-sessions needs no scenario
+                (Vec::new(), None) // --list-sessions needs no scenario
             } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                Vec::new() // interactive TUI (WP-601)
+                (Vec::new(), None) // interactive TUI (WP-601)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -258,11 +279,24 @@ pub async fn run() -> Result<i32> {
     }
 
     let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
+    // WP-702/702c: agent-dir MCP server config (absent file = no servers).
+    let mcp_config = crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
     let (provider_name, model_id) =
         crate::config::resolve_provider_flags(provider_flag.as_deref(), model_id.as_deref(), &agent_config)?;
     // S3: provider credentials come from env only; the fake driver needs none.
-    let provider: Option<ProviderDriver> = build_provider(&provider_name, model_id.as_deref(), &agent_dir)?;
-    let fake_mode = provider.is_none();
+    // WP-701: a name unknown to the bundled registry may be an
+    // extension-registered provider — no driver is built at startup; the
+    // bridge routes it after `ready` (typed error if never registered).
+    let builtin = crate::provider::is_builtin_provider(&provider_name);
+    if !builtin && model_id.is_none() {
+        anyhow::bail!("--provider {provider_name} (not a built-in provider) requires --model <id>");
+    }
+    let provider: Option<ProviderDriver> = if builtin {
+        build_provider(&provider_name, model_id.as_deref(), &agent_dir)?
+    } else {
+        None
+    };
+    let fake_mode = builtin && provider.is_none();
     let initial_model = if fake_mode {
         json!({"id":"fake","provider":"fake"})
     } else {
@@ -378,6 +412,9 @@ pub async fn run() -> Result<i32> {
     // WP-604: blocking ui dialog requests for the TUI (headless: unused,
     // the default-answers path handles them in the event task).
     let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // WP-702: drain barrier between the agent loop and the event task
+    // (tools_changed must be applied before the tool set is read).
+    let (tools_sync_tx, tools_sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
     let (child, tx, rx) = transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
@@ -394,7 +431,29 @@ pub async fn run() -> Result<i32> {
     } else {
         json!([])
     };
-    let init = json!({"protocolVersion":0,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    // WP-705: the resolved keybinding table (upstream schema + user file)
+    // goes to the sidecar for the extension-shortcut precedence resolution
+    // and to the TUI for dispatch; an invalid file falls back to defaults
+    // (the TUI then shows the error in the status bar).
+    let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
+        Ok(kb) => (kb, None),
+        Err(e) => {
+            crate::corelog::line(&format!("[core] keybindings: {e}"));
+            (crate::tui::keybindings::KeybindingManager::default(), Some(e))
+        }
+    };
+    let mut init = json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+    // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
+    if let Some(cfg) = &mcp_config {
+        init["mcpConfig"] = cfg.clone();
+    }
+    // WP-705: resolved action -> keys (the sidecar runs upstream
+    // getShortcuts against this table).
+    let mut kb_map = serde_json::Map::new();
+    for a in crate::tui::keybindings::valid_actions() {
+        kb_map.insert(a.clone(), json!(kb.get_keys(&a)));
+    }
+    init["keybindings"] = Value::Object(kb_map);
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
         Decision::Response(r) => bail!("init failed: {}", r.get("error").and_then(Value::as_str).unwrap_or("?")),
@@ -406,6 +465,7 @@ pub async fn run() -> Result<i32> {
         session: session.clone(),
         events: Arc::default(),
         ext_tools: Arc::default(),
+        ext_models: Arc::default(),
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
@@ -418,6 +478,8 @@ pub async fn run() -> Result<i32> {
         cost_total: Arc::default(),
         tui: tui_mode,
         ui_tx,
+        tools_sync_tx,
+        compact_override,
         out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
         text_final: Arc::default(),
         json_tx: {
@@ -443,13 +505,23 @@ pub async fn run() -> Result<i32> {
             ctx.json_tx.as_ref().unwrap().send(h.to_string()).ok();
         }
     }
-    tokio::spawn(crate::agent::event_task(events_rx, ctx.clone()));
+    tokio::spawn(crate::agent::event_task(events_rx, tools_sync_rx, ctx.clone()));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
     let ready = tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), ready_rx)
         .await.context("sidecar did not send `ready` in time")?.context("sidecar event task exited before `ready`")?;
     if ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
         bail!("sidecar apiVersion != 0");
+    }
+    // WP-701: a startup --provider unknown to the bundled registry must have
+    // been registered by an extension — typed error before the run starts
+    // (no silent fake-driver fallback).
+    if !builtin {
+        let ext = crate::agent::parse_providers(&ready);
+        let key = format!("{provider_name}/{}", model_id.as_deref().unwrap_or(""));
+        if !ext.contains_key(&key) {
+            bail!("provider {key} is not a built-in provider and was not registered by an extension (check --extension-dir)");
+        }
     }
     for e in ready.get("errors").and_then(Value::as_array).into_iter().flatten() {
         crate::corelog::line(&format!("[core] extension load error: {e}"));
@@ -460,6 +532,24 @@ pub async fn run() -> Result<i32> {
         crate::corelog::line(&format!("[core] running: subscribed events {ev:?}"));
         if ev.contains("session_start") {
             client.fire(json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}));
+        }
+    }
+
+    // WP-705: extension shortcuts (the sidecar applied the upstream
+    // precedence resolution) + its conflict diagnostics, which the core
+    // surfaces on stderr like upstream prints them.
+    let mut ext_shortcuts: Vec<(String, String)> = Vec::new();
+    for sc in ready.get("shortcuts").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(key) = sc.get("key").and_then(Value::as_str) {
+            ext_shortcuts.push((
+                key.to_string(),
+                sc.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
+            ));
+        }
+    }
+    for d in ready.get("shortcutDiagnostics").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(m) = d.as_str() {
+            crate::corelog::line(&format!("[core] {m}"));
         }
     }
 
@@ -510,13 +600,6 @@ pub async fn run() -> Result<i32> {
         // WP-606: upstream keybinding schema + <agentDir>/keybindings.json.
         // An invalid file is logged (with the valid actions) and the TUI
         // starts on the defaults with the error in the status bar.
-        let (kb, kb_error) = match crate::tui::keybindings::KeybindingManager::load(&agent_dir) {
-            Ok(kb) => (kb, None),
-            Err(e) => {
-                crate::corelog::line(&format!("[core] keybindings: {e}"));
-                (crate::tui::keybindings::KeybindingManager::default(), Some(e))
-            }
-        };
         // WP-608: the slash menu gets the extension commands (ready
         // payload) and the discovered prompt templates (WP-307).
         let mut ext_cmds: Vec<crate::tui::commands::Command> = Vec::new();
@@ -537,6 +620,7 @@ pub async fn run() -> Result<i32> {
             cwd.display().to_string(),
             session.id.lock().unwrap().clone(),
         )
+        .with_shortcuts(ext_shortcuts)
         .with_commands(ext_cmds, tui_templates);
         if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
@@ -571,6 +655,7 @@ pub async fn run() -> Result<i32> {
                     source: "tui",
                     steps: vec![],
                     images: vec![],
+                    compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string(),
                 }));
             },
             move |outcome| match outcome {
@@ -666,10 +751,10 @@ pub async fn run() -> Result<i32> {
         // model_script up front; provider mode ignores scripts (real completions).
         for r in &runs {
             if fake_mode {
-                FakeDriver::from_steps(&r.steps).with_context(|| "parsing model_script")?;
+                FakeDriver::from_steps(&r.steps, &r.compact_summary).with_context(|| "parsing model_script")?;
             }
             let source: &'static str = if r.steps.is_empty() && scenario_path.is_none() { "cli" } else { "rpc" };
-            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone() })).unwrap();
+            msg_tx.send(Item::User(QueuedUser { text: r.text.clone(), source, steps: r.steps.clone(), images: r.images.clone(), compact_summary: r.compact_summary.clone() })).unwrap();
         }
         msg_tx.send(Item::End).unwrap();
     }
