@@ -517,14 +517,30 @@ pub async fn run() -> Result<i32> {
         out_mode: out_mode.unwrap_or(crate::agent::OutputMode::Ndjson),
         text_final: Arc::default(),
         json_tx: {
-            if matches!(out_mode, Some(crate::agent::OutputMode::Json) | Some(crate::agent::OutputMode::Rpc)) {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            if matches!(
+                out_mode,
+                Some(crate::agent::OutputMode::Json) | Some(crate::agent::OutputMode::Rpc)
+            ) {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
+                    String,
+                    Option<tokio::sync::oneshot::Sender<()>>,
+                )>();
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
                     let mut out = tokio::io::BufWriter::new(tokio::io::stdout());
-                    while let Some(line) = rx.recv().await {
-                        let _ = out.write_all(format!("{}\n", line.trim_end()).as_bytes()).await;
-                        let _ = out.flush().await;
+                    while let Some((line, ack)) = rx.recv().await {
+                        // The empty line is the shutdown sentinel: it acks
+                        // without writing, so every line sent before it is
+                        // written+flushed when its ack lands.
+                        if !line.is_empty() {
+                            let _ = out
+                                .write_all(format!("{}\n", line.trim_end()).as_bytes())
+                                .await;
+                            let _ = out.flush().await;
+                        }
+                        if let Some(a) = ack {
+                            let _ = a.send(());
+                        }
                     }
                 });
                 Some(tx)
@@ -536,7 +552,11 @@ pub async fn run() -> Result<i32> {
     // WP-610: the json stream opens with the session header (upstream parity).
     if ctx.out_mode == crate::agent::OutputMode::Json {
         if let Some(h) = session.header() {
-            ctx.json_tx.as_ref().unwrap().send(h.to_string()).ok();
+            ctx.json_tx
+                .as_ref()
+                .unwrap()
+                .send((h.to_string(), None))
+                .ok();
         }
     }
     tokio::spawn(crate::agent::event_task(events_rx, tools_sync_rx, ctx.clone()));
@@ -852,6 +872,21 @@ pub async fn run() -> Result<i32> {
         }
     }
 
+    // Json/Rpc stdout drain: the writer task may still hold queued lines
+    // (lost when the process exits and the runtime aborts it). The sentinel
+    // acks only after every earlier line is written+flushed.
+    if matches!(
+        ctx.out_mode,
+        crate::agent::OutputMode::Json | crate::agent::OutputMode::Rpc
+    ) {
+        if let Some(tx) = &ctx.json_tx {
+            let (atx, arx) = tokio::sync::oneshot::channel();
+            if tx.send((String::new(), Some(atx))).is_ok() {
+                let _ = tokio::time::timeout(Duration::from_secs(5), arx).await;
+            }
+        }
+    }
+
     // 0 = clean; 2 = scenario/model-script or shutdown failure; 3 = degraded
     // (sidecar crashed mid-run — protocol: degraded is terminal, no respawn).
     // WP-610: print/json use the upstream exit codes (1 for any failure).
@@ -900,8 +935,12 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
         Ok(v) => v,
         Err(e) => {
             if let Some(tx) = &ctx.json_tx {
-                let _ = tx.send(json!({"id":Value::Null,"type":"response","command":Value::Null,
-                    "success":false,"error":format!("Failed to parse command: {e}")}).to_string());
+                let _ = tx.send((
+                    json!({"id":Value::Null,"type":"response","command":Value::Null,
+                        "success":false,"error":format!("Failed to parse command: {e}")})
+                    .to_string(),
+                    None,
+                ));
             }
             return;
         }
@@ -917,7 +956,7 @@ fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {
             resp["error"] = json!(e);
         }
         if let Some(tx) = &ctx.json_tx {
-            let _ = tx.send(resp.to_string());
+            let _ = tx.send((resp.to_string(), None));
         }
     };
     match command.as_str() {

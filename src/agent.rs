@@ -133,7 +133,7 @@ pub struct Core {
     /// WP-610: Text mode — the last assistant text of the run.
     pub text_final: Arc<Mutex<Option<String>>>,
     /// WP-610: Json mode — upstream-shaped event lines to stdout.
-    pub json_tx: Option<mpsc::UnboundedSender<String>>,
+    pub json_tx: Option<mpsc::UnboundedSender<(String, Option<tokio::sync::oneshot::Sender<()>>)>>,
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>,            // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,              // ready.tools entries (pass-through schemas)
@@ -177,7 +177,7 @@ pub struct Core {
 /// WP-610: Json mode — write one upstream-shaped event line.
 fn jemit(ctx: &Core, v: Value) {
     if ctx.out_mode == OutputMode::Json || ctx.out_mode == OutputMode::Rpc {
-        let _ = ctx.json_tx.as_ref().unwrap().send(v.to_string());
+        let _ = ctx.json_tx.as_ref().unwrap().send((v.to_string(), None));
     }
 }
 
