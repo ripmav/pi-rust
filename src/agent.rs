@@ -124,7 +124,8 @@ pub struct Core {
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
-    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
+    /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
+    pub skills: Arc<Vec<crate::skills::Skill>>,    pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
     pub log: EventLog,
     pub fail: Arc<Mutex<Option<String>>>,               // first fatal scenario error
     pub model: Arc<Mutex<(Value, Option<String>)>>,     // (active model, thinking level)
@@ -675,7 +676,10 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     // systemPrompt (present only when a handler changed it) replaces the prompt
     // for this run.
     let mut custom: Vec<Value> = Vec::new();
-    let mut system_prompt = BASE_SYSTEM_PROMPT.to_string();
+    // WP-801: the skills section is part of the base prompt (upstream builds
+    // it before before_agent_start); a handler-returned systemPrompt replaces
+    // the whole prompt including the section.
+    let mut system_prompt = crate::skills::append_section(BASE_SYSTEM_PROMPT, &ctx.skills);
     if subscribed(ctx, "before_agent_start") {
         let event = json!({"type":"before_agent_start","messageType":"user","prompt":text});
         // BuildSystemPromptOptions subset for the sidecar: core cwd, currently
@@ -689,7 +693,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             "selectedTools": selected_tools,
             "sections": {},
         });
-        let req = json!({"event":event,"systemPrompt":BASE_SYSTEM_PROMPT,"systemPromptOptions":spon});
+        let req = json!({"event":event,"systemPrompt":system_prompt.clone(),"systemPromptOptions":spon});
         let data = decision_data(ctx, ctx.client.request("before_agent_start", req.clone()).await, "before_agent_start", &req, &Value::Null);
         if let Some(ms) = data.get("messages").and_then(Value::as_array) {
             custom = ms.to_vec();

@@ -266,6 +266,21 @@ the prompt: `$1`..`$9`, `$@`/`$ARGUMENTS`, `${N:-default}` /
 `${ARGUMENTS:-default}`, one pass (ported from upstream `prompt-templates.ts`;
 recorded v0 deviations in `roadmap/m3-config-and-state/wp-307-prompt-templates.md`).
 
+### Skills (M8, WP-801)
+
+`<agentDir>/skills/` and `<cwd>/.pi/skills/` are scanned for `SKILL.md`
+files (a directory containing one is a skill root; otherwise direct `.md`
+children of the root count too). Frontmatter `name` (falls back to the
+parent directory name) and `description` are validated per the Agent Skills
+spec; invalid skills are skipped with a `[core] skill: ...` warning
+(stderr headless, `tui-stderr.log` in the TUI). Discovered skills are
+appended to the system prompt as the upstream `<skills>` section (byte-exact
+`formatSkillsForPrompt` golden), and `/skill:<name> [args]` expands to the
+skill body in the TUI and in headless positional prompts (unknown skills
+pass through unchanged). The model loads a skill file with the `read` tool
+per the prompt hint — there is no skill activation tool. Recorded v0
+deviations from upstream: `odd/tasks/m8-ecosystem.md` L2.
+
 ### Scenario format
 
 ```json

@@ -74,6 +74,8 @@ pub struct TuiApp {
     pub ext_shortcuts: Vec<(String, String)>,
     /// WP-608: prompt templates (WP-307 discovery).
     pub templates: Vec<crate::templates::Template>,
+    /// WP-801: discovered skills (slash-command expansion for `/skill:<name>`).
+    pub skills: Vec<crate::skills::Skill>,
     /// WP-608: the open slash menu (matched commands + selection).
     pub slash: Option<(Vec<commands::Command>, usize)>,
     /// WP-609: the open picker (session resume / model switch).
@@ -149,6 +151,12 @@ impl TuiApp {
     pub fn with_commands(mut self, ext_commands: Vec<commands::Command>, templates: Vec<crate::templates::Template>) -> Self {
         self.ext_commands = ext_commands;
         self.templates = templates;
+        self
+    }
+
+    /// WP-801: set the discovered skills for `/skill:<name>` dispatch.
+    pub fn with_skills(mut self, skills: Vec<crate::skills::Skill>) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -290,6 +298,35 @@ impl TuiApp {
             }
             _ => {}
         }
+        // WP-801: /skill:<name> [args] expands to the skill body (upstream
+        // _expandSkillCommand); an unknown skill is submitted unchanged.
+        if let Some(name) = name.strip_prefix("skill:") {
+            if let Some(sk) = self.skills.iter().find(|s| s.name == name) {
+                if let Ok(expanded) = crate::skills::expand_skill(sk, args) {
+                    self.history.push(format!("/{name} {args}"));
+                    self.history_idx = None;
+                    self.draft = None;
+                    self.input.clear();
+                    self.cursor = (0, 0);
+                    self.scroll = 0;
+                    return Some(TuiAction::Submit(expanded));
+                } else {
+                    crate::corelog::line(&format!("[core] skill expansion failed for {name}"));
+                }
+            }
+            let text = if args.is_empty() {
+                format!("/skill:{name}")
+            } else {
+                format!("/skill:{name} {args}")
+            };
+            self.history.push(text.clone());
+            self.history_idx = None;
+            self.draft = None;
+            self.input.clear();
+            self.cursor = (0, 0);
+            self.scroll = 0;
+            return Some(TuiAction::Submit(text));
+        }
         // Prompt template (WP-307): expand and submit as a normal message.
         if let Some(t) = self.templates.iter().find(|t| t.name == name) {
             let expanded = crate::templates::expand(&t.content, &crate::templates::parse_args(args));
@@ -360,6 +397,7 @@ impl TuiApp {
             ext_commands: Vec::new(),
             ext_shortcuts: Vec::new(),
             templates: Vec::new(),
+            skills: Vec::new(),
             slash: None,
             picker: None,
             picker_kind: PickerKind::default(),
@@ -2230,4 +2268,25 @@ mod tests {
         app.clear_extension_chrome();
         assert!(app.statuses.is_empty() && app.title.is_none());
     }
+
+    #[test]
+    fn wp801_skill_command_dispatch() {
+        let d = std::env::temp_dir().join(format!("pi-rust-sktui-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("greet")).unwrap();
+        std::fs::write(d.join("greet/SKILL.md"), "---\nname: greet\ndescription: g\n---\nDo the thing.").unwrap();
+        let skills = crate::skills::load_from_dir(&d, &mut Vec::new());
+        assert_eq!(skills.len(), 1);
+        let mut app = TuiApp::new("m", "/a/b", "s").with_skills(skills);
+        let expected = format!(
+            "<skill name=\"greet\" location=\"{}\">\nReferences are relative to {}.\n\nDo the thing.\n</skill>",
+            d.join("greet/SKILL.md").display(),
+            d.join("greet").display()
+        );
+        // Expanded: the skill body is submitted as a normal message.
+        assert_eq!(submit_cmd(&mut app, "/skill:greet"), Some(TuiAction::Submit(expected.clone())));
+        // With args: appended after the block.
+        assert_eq!(submit_cmd(&mut app, "/skill:greet extra"), Some(TuiAction::Submit(format!("{expected}\n\nextra"))));
+        // Unknown skill: the original text is submitted unchanged (upstream pass-through).
+        assert_eq!(submit_cmd(&mut app, "/skill:nope x"), Some(TuiAction::Submit("/skill:nope x".into())));
+        let _ = std::fs::remove_dir_all(&d);    }
 }

@@ -226,6 +226,14 @@ pub async fn run() -> Result<i32> {
     };
     std::fs::create_dir_all(&agent_dir).with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
 
+    // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
+    // skills are skipped with a core-log warning (upstream diagnostics).
+    let mut skill_warnings: Vec<String> = Vec::new();
+    let skills = crate::skills::load(&agent_dir, &cwd, &mut skill_warnings);
+    for w in &skill_warnings {
+        crate::corelog::line(&format!("[core] skill: {w}"));
+    }
+
     // --scenario/--prompt/--template are mutually exclusive (original flags).
     if scenario_path.is_some() && (prompt.is_some() || template_name.is_some())
         || prompt.is_some() && template_name.is_some()
@@ -264,6 +272,25 @@ pub async fn run() -> Result<i32> {
             }
         }
     };
+
+    // WP-801: /skill:<name> [args] in a positional prompt expands core-side
+    // (upstream _expandSkillCommand runs in all modes); unknown skills pass
+    // through unchanged.
+    let runs: Vec<RunSpec> = runs.into_iter().map(|mut r| {
+        if let Some(rest) = r.text.strip_prefix("/skill:") {
+            let (name, args) = match rest.find(char::is_whitespace) {
+                Some(i) => (rest[..i].to_string(), rest[i..].trim().to_string()),
+                None => (rest.to_string(), String::new()),
+            };
+            if let Some(sk) = skills.iter().find(|s| s.name == name) {
+                match crate::skills::expand_skill(sk, &args) {
+                    Ok(e) => r.text = e,
+                    Err(e) => crate::corelog::line(&format!("[core] skill expansion failed for {name}: {e}")),
+                }
+            }
+        }
+        r
+    }).collect();
 
     // Isolated agent dir (owned by the core when defaulted) so extension
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
@@ -466,7 +493,7 @@ pub async fn run() -> Result<i32> {
         events: Arc::default(),
         ext_tools: Arc::default(),
         ext_models: Arc::default(),
-        ready: Mutex::new(Some(ready_tx)),
+        skills: Arc::new(skills.clone()),        ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
         fail: fail.clone(),
         model: Arc::new(Mutex::new((initial_model, agent_config.default_thinking_level.clone()))),
@@ -621,8 +648,8 @@ pub async fn run() -> Result<i32> {
             session.id.lock().unwrap().clone(),
         )
         .with_shortcuts(ext_shortcuts)
-        .with_commands(ext_cmds, tui_templates);
-        if let Some(e) = kb_error {
+        .with_commands(ext_cmds, tui_templates)
+        .with_skills(skills);        if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
         // WP-607: the `theme` setting selects the starting theme (a
