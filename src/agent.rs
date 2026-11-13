@@ -19,6 +19,8 @@ pub struct QueuedUser {
     pub steps: Vec<Value>,
     /// (mime, base64) `--image` attachments (S8).
     pub images: Vec<(String, String)>,
+    /// WP-704: the fake driver's compaction summary (scenario `compact_summary`).
+    pub compact_summary: String,
 }
 
 pub enum Item {
@@ -147,6 +149,10 @@ pub struct Core {
     /// emitted while the MCP extension's `tool_call` handler waited for a
     /// server) has been applied.
     pub tools_sync_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    /// WP-704: the scenario `compact` override (window, reserve, keep) — the
+    /// fake model has no catalog contextWindow, so without the override the
+    /// auto trigger stays off for it.
+    pub compact_override: Option<(u64, u64, u64)>,
 }
 
 /// WP-610: Json mode — write one upstream-shaped event line.
@@ -284,7 +290,7 @@ pub async fn event_task(
                     let text = ev.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
                     crate::corelog::line(&format!("[core] extension user_message: {text}"));
                     // Steer for v0 = append to the same queue (drained in order).
-                    let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new() }));
+                    let _ = ctx.msg_tx.send(Item::User(QueuedUser { text, source: "extension", steps: Vec::new(), images: Vec::new(), compact_summary: crate::model::DEFAULT_COMPACT_SUMMARY.to_string() }));
                 }
                 "providers_changed" => {
                     // WP-701: a registration arrived after ready; re-key routing.
@@ -631,9 +637,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             if u.steps.is_empty() {
                 // No scripted model: deterministic echo turn (prompt runs and
                 // TUI messages alike; the fake driver is a test double).
-                Some(Box::new(FakeDriver::echo_mode()))
+                Some(Box::new(FakeDriver::echo_mode(&u.compact_summary)))
             } else {
-                Some(Box::new(FakeDriver::from_steps(&u.steps).map_err(|e| e.to_string())?))
+                Some(Box::new(FakeDriver::from_steps(&u.steps, &u.compact_summary).map_err(|e| e.to_string())?))
             }
         }
     };
@@ -701,9 +707,28 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     ctx.log.emit(json!({"kind":"agent_start"}));
     jemit(ctx, json!({"type":"agent_start"}));
     let run_start = ctx.session.transcript().len();
+    // WP-704: the run's compaction settings (None = auto-compaction off).
+    let compaction = compaction_settings(ctx);
 
     let mut turn_index = 0u32;
     loop {
+        // WP-704: auto compaction at the context threshold — checked before
+        // build_conversation so the summarized conversation is what this
+        // turn's model call sees; after a successful compaction the loop
+        // continues with the projected transcript.
+        if let Some((window, reserve, keep)) = compaction {
+            let system_msg = json!({"role":"system","content":system_prompt,"toolsAdded":merged_tool_defs(ctx),"timestamp":now_ms()});
+            let check_convo = build_conversation(ctx, &system_prompt, &custom);
+            let context_tokens = crate::session::estimate_context_tokens(&check_convo);
+            if crate::session::should_compact(context_tokens, window, reserve) {
+                let entries = ctx.session.entries();
+                if let Some(pre) = crate::session::prepare_compaction(&entries, &system_msg, keep) {
+                    run_compaction(ctx, fake_driver.as_ref(), &system_msg, &pre).await;
+                } else {
+                    crate::corelog::line("[core] compaction threshold reached, nothing to summarize (session too small)");
+                }
+            }
+        }
         // `context` always answers data:null; the single emitContext runs on
         // `context_with_system` — send the full transcript and use the returned
         // conversation as-is for the provider request (sidecar may transform it).
@@ -734,71 +759,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
         // WP-603: streamed text chunks become TUI-only `model_delta` events
         // (the headless NDJSON contract keeps its single `model_output`).
-        let turn = {
-            // WP-701: an extension-registered model always routes via the
-            // bridge — an explicit provider selection wins over the scripted
-            // fake driver and the live provider driver.
-            let active = ctx.model.lock().unwrap().0.clone();
-            let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
-            let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-            let ext_model = ctx.ext_models.lock().unwrap().get(&format!("{p}/{mid}")).cloned();
-            match ext_model {
-                Some(model) => {
-                    let stream_id = uuid::Uuid::new_v4().to_string();
-                    let rx = ctx.client.attach_stream(&stream_id);
-                    let resp = ctx.client
-                        .request(
-                            "provider_stream",
-                            json!({"streamId":stream_id,"model":model,"messages":convo,"options":{}}),
-                        )
-                        .await;
-                        match resp {
-                            Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
-                                let mut events = Vec::new();
-                                let mut rx = rx;
-                                let mut deltas = delta_emitter(ctx, turn_index);
-                                while let Some(line) = rx.recv().await {
-                                    if let Some(delta) = line.pointer("/event/delta").and_then(Value::as_str) {
-                                        deltas(delta); // TUI model_delta + Json message_update
-                                    }
-                                    let is_terminal = line.get("event")
-                                        .and_then(|e| e.get("type"))
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|t| t == "done" || t == "error");
-                                    events.push(line.get("event").cloned().unwrap_or(Value::Null));
-                                    if is_terminal { break; }
-                                }
-                                ctx.client.detach_stream(&stream_id);
-                                provider_events_to_turn(&events).map_err(anyhow::Error::msg)
-                            }
-                            Decision::Response(r) => {
-                                ctx.client.detach_stream(&stream_id);
-                                Err(anyhow::anyhow!(
-                                    "{}", r.get("error").and_then(Value::as_str).unwrap_or("provider_stream rejected")
-                                ))
-                            }
-                            Decision::Unavailable => {
-                                ctx.client.detach_stream(&stream_id);
-                                Err(anyhow::anyhow!("provider stream unavailable (sidecar degraded)"))
-                            }
-                        }
-                    }
-                    None => match fake_driver.as_ref() {
-                        Some(d) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                        None => {
-                            let drv = ctx.provider.lock().unwrap().clone();
-                            match drv.as_ref() {
-                                Some(ProviderDriver::OpenAi(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                                Some(ProviderDriver::Anthropic(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                                Some(ProviderDriver::Google(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                                Some(ProviderDriver::Bedrock(d)) => d.complete(&convo, delta_emitter(ctx, turn_index)).await,
-                                None => unreachable!("fake_driver is None only while a provider exists"),
-                            }
-                        }
-                    },
-                }
-            }
-        .map_err(|e| e.to_string())?;
+        let turn = model_call(ctx, fake_driver.as_ref(), &convo, delta_emitter(ctx, turn_index)).await?;
 
         // Usage accounting (WP-407): per-turn session entry + cumulative
         // total; cost from the bundled registry (unknown model → 0).
@@ -874,6 +835,253 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     jemit(ctx, json!({"type":"agent_end","messages":run_messages,"willRetry":false}));
     Ok(())
 }
+
+/// One model call with the active driver: extension-registered model (bridge
+/// stream, WP-701) → scripted fake driver → live provider. Shared by the turn
+/// loop (streaming deltas) and the WP-704 summary call (no-op deltas).
+async fn model_call<'a>(
+    ctx: &'a Core,
+    fake_driver: Option<&'a Box<dyn ModelDriver>>,
+    convo: &[Value],
+    mut deltas: Box<dyn FnMut(&str) + Send + 'a>,
+) -> Result<AssistantTurn, String> {
+    // WP-701: an extension-registered model always routes via the
+    // bridge — an explicit provider selection wins over the scripted
+    // fake driver and the live provider driver.
+    let active = ctx.model.lock().unwrap().0.clone();
+    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let ext_model = ctx.ext_models.lock().unwrap().get(&format!("{p}/{mid}")).cloned();
+    match ext_model {
+        Some(model) => {
+            let stream_id = uuid::Uuid::new_v4().to_string();
+            let rx = ctx.client.attach_stream(&stream_id);
+            let resp = ctx.client
+                .request(
+                    "provider_stream",
+                    json!({"streamId":stream_id,"model":model,"messages":convo,"options":{}}),
+                )
+                .await;
+            match resp {
+                Decision::Response(r) if r.get("success") == Some(&json!(true)) => {
+                    let mut events = Vec::new();
+                    let mut rx = rx;
+                    while let Some(line) = rx.recv().await {
+                        if let Some(delta) = line.pointer("/event/delta").and_then(Value::as_str) {
+                            deltas(delta); // TUI model_delta + Json message_update
+                        }
+                        let is_terminal = line.get("event")
+                            .and_then(|e| e.get("type"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|t| t == "done" || t == "error");
+                        events.push(line.get("event").cloned().unwrap_or(Value::Null));
+                        if is_terminal { break; }
+                    }
+                    ctx.client.detach_stream(&stream_id);
+                    provider_events_to_turn(&events).map_err(|e| e.to_string())
+                }
+                Decision::Response(r) => {
+                    ctx.client.detach_stream(&stream_id);
+                    Err(format!(
+                        "{}",
+                        r.get("error").and_then(Value::as_str).unwrap_or("provider_stream rejected")
+                    ))
+                }
+                Decision::Unavailable => {
+                    ctx.client.detach_stream(&stream_id);
+                    Err("provider stream unavailable (sidecar degraded)".to_string())
+                }
+            }
+        }
+        None => match fake_driver {
+            Some(d) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+            None => {
+                let drv = ctx.provider.lock().unwrap().clone();
+                match drv.as_ref() {
+                    Some(ProviderDriver::OpenAi(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Anthropic(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Google(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    Some(ProviderDriver::Bedrock(d)) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+                    None => unreachable!("fake_driver is None only while a provider exists"),
+                }
+            }
+        },
+    }
+}
+
+/// WP-704: the run's compaction settings — the scenario `compact` override
+/// (window, reserve, keep) wins; else the bundled registry's contextWindow
+/// with the upstream defaults. Models without a catalog contextWindow (like
+/// the fake) keep auto-compaction off without the override.
+fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
+    if let Some(o) = ctx.compact_override {
+        return Some(o);
+    }
+    let active = ctx.model.lock().unwrap().0.clone();
+    let p = active.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+    let mid = active.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let window = crate::registry::ModelRegistry::bundled().resolve(&p, &mid)?.context_window?;
+    Some((window, crate::session::DEFAULT_RESERVE_TOKENS, crate::session::DEFAULT_KEEP_RECENT_TOKENS))
+}
+
+/// WP-704: the upstream Usage shape {input,output,cacheRead,cacheWrite} from
+/// an extension-supplied compaction (None when absent or malformed).
+fn extract_compaction_usage(v: Option<&Value>) -> Option<crate::model::Usage> {
+    let v = v?;
+    let f = |k: &str| v.get(k).and_then(Value::as_u64);
+    let (Some(input), Some(output), Some(cache_read), Some(cache_write)) =
+        (f("input"), f("output"), f("cacheRead"), f("cacheWrite"))
+    else {
+        return None;
+    };
+    Some(crate::model::Usage { input, output, cache_read, cache_write })
+}
+
+/// WP-704: the `session_compact_failed` F&F event (gated on ready.events).
+/// v0: no AbortSignal exists, so `aborted` is always false; an extension
+/// cancel is reported without an `errorMessage`.
+fn fire_compact_failed(ctx: &Core, reason: &str, error_message: Option<&str>, from_extension: bool) {
+    if !subscribed(ctx, "session_compact_failed") {
+        return;
+    }
+    let mut event = json!({"type":"session_compact_failed","reason":reason,"aborted":false,"willRetry":false,"fromExtension":from_extension});
+    if let Some(e) = error_message {
+        event["errorMessage"] = json!(e);
+    }
+    ctx.client.fire(json!({"type":"session_compact_failed","event":event}));
+}
+
+/// WP-704: one compaction attempt. `session_before_compact` decision →
+/// cancel (turn proceeds uncompacted) | extension summary (fromHook, no LLM
+/// call) | LLM summary via the SAME active driver (verbatim prompts, no
+/// toolsAdded, no message_start/end broadcast, no model_delta, no usage
+/// session entry). On success: append_compaction + `session_compact` F&F.
+/// A summary response with tool calls fails with a typed message (v0: the
+/// drivers do not surface stopReason, so a length stop is not detectable).
+async fn run_compaction(
+    ctx: &Core,
+    fake_driver: Option<&Box<dyn ModelDriver>>,
+    system_msg: &Value,
+    pre: &crate::session::CompactionPreparation,
+) {
+    {
+        let reason = "threshold";
+        let mut from_hook = false;
+        let mut summary: Option<String> = None;
+        let mut first_kept = pre.first_kept_entry_id.clone();
+        let mut tokens_before = pre.tokens_before;
+        let mut usage: Option<crate::model::Usage> = None;
+
+        // session_before_compact decision (gated on ready.events).
+        if subscribed(ctx, "session_before_compact") {
+            let event = json!({"type":"session_before_compact",
+                "preparation":{"reason":reason,"willRetry":false},
+                "branchEntries":pre.messages_to_summarize});
+            let req = json!({"event":event});
+            let data = decision_data(ctx, ctx.client.request("session_before_compact", req.clone()).await, "session_before_compact", &req, &Value::Null);
+            if data.get("cancel").and_then(Value::as_bool) == Some(true) {
+                // Abort compaction; the turn proceeds uncompacted.
+                crate::corelog::line("[core] compaction cancelled by session_before_compact");
+                ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"cancelled":true,"fromExtension":false}));
+                fire_compact_failed(ctx, reason, None, false);
+                return;
+            }
+            if let Some(c) = data.get("compaction") {
+                match c.get("summary").and_then(Value::as_str).map(str::to_string) {
+                    Some(s) => {
+                        // Extension-supplied summary: fromHook=true, skip the
+                        // LLM call, use its firstKeptEntryId/tokensBefore when given.
+                        from_hook = true;
+                        summary = Some(s);
+                        if let Some(fk) = c.get("firstKeptEntryId").and_then(Value::as_str) {
+                            first_kept = fk.to_string();
+                        }
+                        if let Some(tb) = c.get("tokensBefore").and_then(Value::as_u64) {
+                            tokens_before = tb;
+                        }
+                        usage = extract_compaction_usage(c.get("usage"));
+                    }
+                    None => {
+                        let err = "session_before_compact returned a compaction without a summary string";
+                        crate::corelog::line(&format!("[core] {err}"));
+                        ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":err,"fromExtension":true}));
+                        fire_compact_failed(ctx, reason, Some(err), true);
+                        return;
+                    }
+                }
+            }
+        }
+
+        let summary = match summary {
+            Some(s) => s,
+            None => {
+                // LLM summary: the SAME active driver, conversation =
+                // [system SUMMARIZATION_SYSTEM_PROMPT (no toolsAdded), user
+                // "<conversation>…</conversation>" (+ <previous-summary>)].
+                let base_prompt = pre
+                    .previous_summary
+                    .as_ref()
+                    .map(|_| crate::session::UPDATE_SUMMARIZATION_PROMPT)
+                    .unwrap_or(crate::session::SUMMARIZATION_PROMPT);
+                let mut prompt_text = format!(
+                    "<conversation>\n{}\n</conversation>\n\n",
+                    crate::session::serialize_conversation(&pre.messages_to_summarize)
+                );
+                if let Some(prev) = &pre.previous_summary {
+                    prompt_text.push_str(&format!("<previous-summary>\n{prev}\n</previous-summary>\n\n"));
+                }
+                prompt_text.push_str(base_prompt);
+                let convo = vec![
+                    json!({"role":"system","content":crate::session::SUMMARIZATION_SYSTEM_PROMPT,"timestamp":now_ms()}),
+                    json!({"role":"user","content":[{"type":"text","text":prompt_text}],"timestamp":crate::session::now_iso()}),
+                ];
+                match model_call(ctx, fake_driver, &convo, Box::new(|_| {})).await {
+                    Ok(turn) => {
+                        if !turn.tool_calls.is_empty() {
+                            let err = "Summarization attempted to call a tool";
+                            crate::corelog::line(&format!("[core] {err}"));
+                            ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":err,"fromExtension":false}));
+                            fire_compact_failed(ctx, reason, Some(err), false);
+                            return;
+                        }
+                        usage = (turn.usage != crate::model::Usage::default()).then_some(turn.usage);
+                        turn.text.unwrap_or_default()
+                    }
+                    Err(msg) => {
+                        crate::corelog::line(&format!("[core] summarization failed: {msg}"));
+                        ctx.log.emit(json!({"kind":"compaction_failed","reason":reason,"error":msg,"fromExtension":false}));
+                        fire_compact_failed(ctx, reason, Some(&msg), false);
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Persist the upstream-shaped entry, then the events.
+        let entry_id = ctx
+            .session
+            .append_compaction(&summary, &first_kept, tokens_before, usage.as_ref(), from_hook, Some(system_msg));
+        let file_entry = ctx
+            .session
+            .entries()
+            .into_iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(entry_id.as_str()))
+            .unwrap_or(Value::Null);
+        ctx.log.emit(json!({"kind":"compaction","summary":summary,"firstKeptEntryId":first_kept,
+            "tokensBefore":tokens_before,"fromExtension":from_hook,"reason":reason}));
+        if subscribed(ctx, "session_compact") {
+            ctx.client.fire(json!({"type":"session_compact","event":{"type":"session_compact",
+                "compactionEntry":file_entry,"fromExtension":from_hook,"reason":reason,"willRetry":false}}));
+        }
+        crate::corelog::line(&format!(
+            "[core] compacted: entry {entry_id} (tokens_before={tokens_before}, from_hook={from_hook})"
+        ));
+    }
+}
+
+/// Full transcript for `context_with_system`: leading system message (prompt +
+/// tool declarations), custom messages from before_agent_start, then the
+/// session transcript. Degraded: extension tools are dropped from the set.
 
 /// Full transcript for `context_with_system`: leading system message (prompt +
 /// tool declarations), custom messages from before_agent_start, then the

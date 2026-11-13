@@ -25,9 +25,9 @@ if pid == 0:
     os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR])
 
 # pty.fork() defaults to a 0x0 window; give the TUI an 80x24 screen.
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
 
-ROWS, COLS = 24, 80
+ROWS, COLS = 24, 120
 grid = [[" "] * COLS for _ in range(ROWS)]
 cur = [0, 0]
 
@@ -43,6 +43,10 @@ def feed(data: bytes):
                 i += len(m.group(0))
                 continue
             m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
             if m:
                 i += len(m.group(0))
                 continue
@@ -122,9 +126,9 @@ if pid == 0:
     os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR,
                     "--extension-dir", EXT_DIR, "--command", "dialog-check"])
 
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
 
-ROWS, COLS = 24, 80
+ROWS, COLS = 24, 120
 grid = [[" "] * COLS for _ in range(ROWS)]
 cur = [0, 0]
 
@@ -140,6 +144,10 @@ def feed(data: bytes):
                 i += len(m.group(0))
                 continue
             m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
             if m:
                 i += len(m.group(0))
                 continue
@@ -192,6 +200,8 @@ steps.append(wait_for(b"type here"))                     # input dialog rendered
 os.write(fd, b"amy\r")                                   # input + submit
 steps.append(wait_for(b"dialog done"))                     # notify only fires after all answers matched
 steps.append(not wait_for(b"dialog answers wrong", timeout=2.0))  # no extension_error
+steps.append(wait_for(b"status-ok"))                      # WP-706: extension status in the status bar
+steps.append(wait_for(b"dialog-ok"))                       # WP-706: extension title in the status bar
 os.write(fd, b"\x04")                                    # ctrl+d exit
 
 time.sleep(0.5)
@@ -225,9 +235,9 @@ if pid == 0:
     os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR,
                     "--extension-dir", EXT_DIR])
 
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
 
-ROWS, COLS = 24, 80
+ROWS, COLS = 24, 120
 grid = [[" "] * COLS for _ in range(ROWS)]
 cur = [0, 0]
 
@@ -243,6 +253,10 @@ def feed(data: bytes):
                 i += len(m.group(0))
                 continue
             m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
             if m:
                 i += len(m.group(0))
                 continue

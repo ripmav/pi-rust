@@ -5,8 +5,10 @@
 //! permission-gate block on `sudo true`. Asserts on the NDJSON event log.
 
 use serde_json::{json, Value};
+
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 
 /// WP-610 golden: `--print` (text mode) — stdout is the final assistant
@@ -1791,4 +1793,407 @@ fn wp702_mcp_dead_server_tool_error_not_crash() {
     assert_eq!(tool_result["message"]["isError"], json!(true), "tool result must be an error: {tool_result}");
     assert_eq!(entries.last().unwrap()["message"]["content"][0]["text"], "survived");
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S4/WP-703: a config-declared HTTP MCP server - the sidecar's upstream
+/// streamable-HTTP transport does initialize + tool calls against the local
+/// mock, assembles the SSE stream response, and the auth header (from the
+/// WP703_SECRET env expansion) reaches the server while the secret value
+/// stays out of every log line.
+#[test]
+fn wp703_mcp_http_round_trip() {
+    let secret = "wp703-secret-token-123";
+    // Mock server on an ephemeral 127.0.0.1 port; it reports the port on stdout.
+    let mut child = Command::new("node")
+        .arg(repo().join("tests/fixtures/mcp-http-fixture.mjs"))
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning mock MCP HTTP server");
+    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock server stdout"));
+    let mut port_line = String::new();
+    port_reader.read_line(&mut port_line).expect("mock server port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock server port");
+
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp703-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"httptest":{{"url":"http://127.0.0.1:{port}/m","exposure":"direct","headers":{{"Authorization":"${{WP703_SECRET}}"}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["call the http server"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "ping" } } },
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "sse" } } },
+            { "tool_call": { "name": "mcp__httptest__counter", "input": {} } },
+            { "text": "http mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .env("WP703_SECRET", secret)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}\n{stdout}");
+
+    // The secret never reaches any log line (sidecar stderr is inherited here).
+    assert!(!stderr.contains(secret), "secret leaked into stderr:\n{stderr}");
+
+    let lines = event_log(&stdout);
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__echo")
+        .collect();
+    assert_eq!(execs.len(), 2, "both echo calls executed\n{stdout}");
+    // Plain JSON response path: the server saw the expanded auth header.
+    let first = execs[0]["result_summary"].as_str().unwrap_or("").to_string();
+    assert!(first.contains("echo:ping auth:"), "first echo failed: {first}");
+    assert!(first.contains(secret), "auth header must reach the server: {first}");
+    // SSE stream response path: assembled from the event stream by the transport.
+    let second = execs[1]["result_summary"].as_str().unwrap_or("").to_string();
+    assert!(second.contains("echo:sse auth:"), "SSE stream response must assemble: {second}");
+    assert!(second.contains(secret), "auth header on the SSE path: {second}");
+    let counters: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__counter")
+        .collect();
+    assert_eq!(counters.len(), 1, "counter call executed\n{stdout}");
+    // Server-side state survived the calls (one live connection, not per-call).
+    let count_summary = counters[0]["result_summary"].as_str().unwrap_or("").to_string();
+    assert_eq!(count_summary, "count:1", "server-side counter state: {count_summary}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ============================================================================
+// WP-704: compaction (auto trigger + summarization + events + session
+// integration). Protocol v3; upstream core/compaction port (pin 085c84e).
+// ============================================================================
+
+/// WP-704 e2e scenario: run 1 completes a short turn; run 2 sends a long
+/// message that crosses the scenario `compact` threshold (window 1500,
+/// reserve 400, keep 0 — the fake model has no catalog contextWindow, so the
+/// override drives the auto trigger). Returns (scenario, filler text).
+fn wp704_compaction_scenario() -> (Value, String) {
+    let filler: String = std::iter::repeat("WP704LONG filler. ").take(500).collect(); // ~4500 tokens
+    let scenario = json!({
+        "user_messages": ["short first turn", &filler],
+        "model_scripts": [
+            [{ "text": "first turn done" }],
+            [
+                { "tool_call": { "name": "bash", "input": { "command": "echo after-compaction" } } },
+                { "text": "second run done" }
+            ]
+        ],
+        "compact": { "window": 1500, "reserve": 400, "keep": 0 },
+        "compact_summary": "WP704 SUMMARY"
+    });
+    (scenario, filler)
+}
+
+/// WP-704a/b: a scripted over-threshold session auto-compacts before the
+/// run-2 model call: upstream-shaped `compaction` session entry (summary from
+/// `compact_summary`, firstKeptEntryId = the long user entry, tokensBefore > 0,
+/// systemMessage snapshot, no fromHook), a `compaction` NDJSON line, the
+/// projected transcript (compactionSummary first; pre-compaction history
+/// projected out, kept tail retained), exit 0.
+#[test]
+fn wp704_auto_compaction_threshold() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp704a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (scenario, _filler) = wp704_compaction_scenario();
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The core emits one `compaction` event line (a kind line like tool_execution).
+    let compact = lines
+        .iter()
+        .find(|l| l.get("kind").and_then(Value::as_str) == Some("compaction"))
+        .expect("compaction NDJSON line missing\n{stdout}");
+    assert_eq!(compact["summary"], "WP704 SUMMARY");
+    assert_eq!(compact["reason"], "threshold");
+    assert_eq!(compact["fromExtension"], json!(false));
+    assert!(compact["tokensBefore"].as_u64().unwrap_or(0) > 0, "tokensBefore: {compact}");
+    let first_kept = compact["firstKeptEntryId"].as_str().expect("firstKeptEntryId").to_string();
+
+    // Session file: the upstream-shaped compaction entry.
+    let file = std::fs::read_to_string(&session_file).expect("session file missing");
+    let entries: Vec<Value> = file
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("session line not JSON: {l}: {e}")))
+        .collect();
+    let comp = entries
+        .iter()
+        .find(|e| e["type"] == "compaction")
+        .expect("compaction entry missing in session file\n{file}");
+    assert_eq!(comp["summary"], "WP704 SUMMARY");
+    assert_eq!(comp["firstKeptEntryId"], first_kept);
+    assert!(comp["tokensBefore"].as_u64().unwrap_or(0) > 0, "entry tokensBefore: {comp}");
+    assert!(comp.get("fromHook").is_none(), "core compaction is not fromHook: {comp}");
+    assert!(comp.get("systemMessage").is_some(), "systemMessage snapshot: {comp}");
+    assert!(comp.get("parentId").is_some() && comp.get("timestamp").is_some(), "entry base fields: {comp}");
+
+    // firstKeptEntryId resolves to the long user message entry (the kept tail).
+    let kept = entries
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(first_kept.as_str()))
+        .expect("firstKeptEntryId does not resolve to an entry");
+    assert_eq!(kept["message"]["role"], "user");
+    assert!(kept["message"]["content"][0]["text"].as_str().unwrap_or("").contains("WP704LONG"), "kept entry: {kept}");
+
+    // Transcript projection: the post-compaction model call sees the
+    // compactionSummary + kept tail, without the pre-compaction history.
+    let last = lines.last().expect("no transcript event");
+    let msgs = last["session"]["messages"].as_array().expect("projected messages").to_vec();
+    assert_eq!(msgs[0]["role"], "compactionSummary", "projection starts with the summary: {msgs:?}");
+    assert_eq!(msgs[0]["content"][0]["text"], "WP704 SUMMARY");
+    let all: String = msgs.iter().map(|m| m.to_string()).collect();
+    assert!(!all.contains("first turn done"), "pre-compaction assistant text projected out: {all}");
+    assert!(!all.contains("short first turn"), "pre-compaction user text projected out: {all}");
+    assert!(all.contains("WP704LONG"), "kept user message stays in context: {all}");
+    assert!(all.contains("after-compaction"), "post-compaction turn kept: {all}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-704a: with a fixture extension loaded, the session_before_compact
+/// decision (preparation + branchEntries) and the session_compact event
+/// (saved entry) reach the sidecar — the fixture records both as custom
+/// session entries.
+#[test]
+fn wp704_compaction_events_reach_extension() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp704b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (scenario, _filler) = wp704_compaction_scenario();
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/compaction-events.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let comp = lines
+        .iter()
+        .find(|l| l.get("kind").and_then(Value::as_str) == Some("compaction"))
+        .expect("compaction NDJSON line missing\n{stdout}");
+    let first_kept = comp["firstKeptEntryId"].as_str().expect("firstKeptEntryId").to_string();
+
+    let file = std::fs::read_to_string(&session_file).expect("session file missing");
+    let entries: Vec<Value> = file
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("session line not JSON: {l}: {e}")))
+        .collect();
+
+    // session_before_compact arrived (the fixture recorded the preparation).
+    let before = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp704-before-compact")
+        .expect("session_before_compact observable missing\n{file}");
+    assert_eq!(before["data"]["reason"], "threshold");
+    assert_eq!(before["data"]["willRetry"], json!(false));
+    assert_eq!(before["data"]["branchEntries"], 2, "the two pre-compaction messages: {before}");
+
+    // session_compact arrived with the saved entry.
+    let after = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp704-compacted")
+        .expect("session_compact observable missing\n{file}");
+    assert_eq!(after["data"]["summary"], "WP704 SUMMARY");
+    assert_eq!(after["data"]["firstKeptEntryId"], first_kept);
+    assert_eq!(after["data"]["tokensBefore"], comp["tokensBefore"]);
+    assert_eq!(after["data"]["fromExtension"], json!(false));
+    assert_eq!(after["data"]["reason"], "threshold");
+    assert_eq!(after["data"]["willRetry"], json!(false));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-704c: a session file containing a compaction entry loads with the
+/// upstream buildContextEntries projection (compactionSummary + kept tail +
+/// everything after; summarized entries projected out).
+#[test]
+fn wp704_compaction_resume_projection() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp704c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let session_file = tmp.join("resumed.jsonl");
+    let content = "\
+{\"type\":\"session\",\"version\":3,\"id\":\"ses-wp704\",\"timestamp\":\"2025-03-01T10:00:00.000Z\",\"cwd\":\"/work/resume\"}
+{\"type\":\"message\",\"id\":\"e1\",\"parentId\":null,\"timestamp\":\"2025-03-01T10:00:01.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"old question\"}],\"timestamp\":\"2025-03-01T10:00:01.000Z\"}}
+{\"type\":\"message\",\"id\":\"e2\",\"parentId\":\"e1\",\"timestamp\":\"2025-03-01T10:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"old answer\"}],\"api\":\"fake\",\"provider\":\"fake\",\"model\":\"fake\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"stopReason\":\"stop\",\"timestamp\":\"2025-03-01T10:00:02.000Z\"}}
+{\"type\":\"message\",\"id\":\"e3\",\"parentId\":\"e2\",\"timestamp\":\"2025-03-01T10:00:03.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"kept question\"}],\"timestamp\":\"2025-03-01T10:00:03.000Z\"}}
+{\"type\":\"message\",\"id\":\"e4\",\"parentId\":\"e3\",\"timestamp\":\"2025-03-01T10:00:04.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"kept answer\"}],\"api\":\"fake\",\"provider\":\"fake\",\"model\":\"fake\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"stopReason\":\"stop\",\"timestamp\":\"2025-03-01T10:00:04.000Z\"}}
+{\"type\":\"compaction\",\"id\":\"e5\",\"parentId\":\"e4\",\"timestamp\":\"2025-03-01T11:00:00.000Z\",\"summary\":\"RESUME SUMMARY\",\"firstKeptEntryId\":\"e3\",\"tokensBefore\":1234}
+{\"type\":\"message\",\"id\":\"e6\",\"parentId\":\"e5\",\"timestamp\":\"2025-03-01T11:00:01.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"after question\"}],\"timestamp\":\"2025-03-01T11:00:01.000Z\"}}
+{\"type\":\"message\",\"id\":\"e7\",\"parentId\":\"e6\",\"timestamp\":\"2025-03-01T11:00:02.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"after answer\"}],\"api\":\"fake\",\"provider\":\"fake\",\"model\":\"fake\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"stopReason\":\"stop\",\"timestamp\":\"2025-03-01T11:00:02.000Z\"}}
+";
+    std::fs::write(&session_file, content).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--prompt").arg("continue the session")
+        .arg("--resume").arg(&session_file)
+        .arg("--agent-dir").arg(tmp.join("agent-dir"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let last = lines.last().expect("no transcript event");
+    let msgs = last["session"]["messages"].as_array().expect("projected messages").to_vec();
+    let roles: Vec<&str> = msgs.iter().filter_map(|m| m.get("role").and_then(Value::as_str)).collect();
+    assert_eq!(
+        roles,
+        vec!["compactionSummary", "user", "assistant", "user", "assistant", "user", "assistant"],
+        "upstream buildContextEntries projection: {msgs:?}"
+    );
+    assert_eq!(msgs[0]["content"][0]["text"], "RESUME SUMMARY");
+    let all: String = msgs.iter().map(|m| m.to_string()).collect();
+    assert!(!all.contains("old question"), "summarized entries projected out: {all}");
+    assert!(!all.contains("old answer"), "summarized entries projected out: {all}");
+    assert!(all.contains("kept question") && all.contains("kept answer") && all.contains("after question"));
+    assert!(all.contains("continue the session"), "new prompt appended after the projection: {all}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-704a: a session_before_compact handler that returns {cancel: true}
+/// aborts the compaction (no entry written) and the turn proceeds uncompacted.
+#[test]
+fn wp704_before_compact_cancel() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp704d-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (scenario, _filler) = wp704_compaction_scenario();
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+    cmd.arg("--extension-dir").arg(repo().join("tests/fixtures/compaction-events.ts"));
+    cmd.arg("--agent-dir").arg(&agent_dir);
+    cmd.arg("--scenario").arg(&scen);
+    cmd.arg("--session-file").arg(&session_file);
+    cmd.env("WP704_CANCEL", "1"); // the fixture's cancel switch (sidecar env)
+    let out = cmd.output().expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "cancelled compaction must not fail the run\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let file = std::fs::read_to_string(&session_file).expect("session file missing");
+    let entries: Vec<Value> = file
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("session line not JSON: {l}: {e}")))
+        .collect();
+
+    // No compaction entry, no compaction event line.
+    assert!(!entries.iter().any(|e| e["type"] == "compaction"), "no compaction entry when cancelled\n{file}");
+    assert!(
+        !lines.iter().any(|l| l.get("kind").and_then(Value::as_str) == Some("compaction")),
+        "no compaction NDJSON line when cancelled\n{stdout}"
+    );
+
+    // The before-compact handler ran (it recorded the event) and cancelled.
+    let before = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp704-before-compact")
+        .expect("session_before_compact handler did not run\n{file}");
+    assert_eq!(before["data"]["reason"], "threshold");
+    assert_eq!(before["data"]["cancel"], json!(true));
+    assert!(
+        !entries.iter().any(|e| e["type"] == "custom" && e["customType"] == "wp704-compacted"),
+        "session_compact must not fire on cancel\n{file}"
+    );
+
+    // The conversation continues uncompacted: the history is still in the transcript.
+    let last = lines.last().expect("no transcript event");
+    let all: String = last["session"]["messages"].as_array().expect("messages").iter().map(|m| m.to_string()).collect();
+    assert!(all.contains("first turn done"), "uncompacted transcript keeps the history: {all}");
+    assert!(all.contains("WP704LONG"), "the long user message is still in context: {all}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// S7/WP-705: a fixture extension registers a clean shortcut plus one on a
+/// RESERVED built-in (ctrl+c). The sidecar resolves with the upstream
+/// precedence (reserved wins -> the conflicting shortcut is skipped with a
+/// diagnostic, which the core surfaces on stderr); the run itself is
+/// unaffected.
+#[test]
+fn wp705_shortcut_registration_and_conflict_diagnostic() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp705-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let scenario = json!({
+        "user_messages": ["shortcut check"],
+        "model_scripts": [[{ "text": "ok" }]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir").arg(repo().join("tests/fixtures/shortcut-reg.ts"))
+        .arg("--agent-dir").arg(&agent_dir)
+        .arg("--scenario").arg(&scen)
+        .arg("--session-file").arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(out.status.code(), Some(0), "pi-rust exited non-zero\n{stderr}");
+    // The reserved conflict is reported with the upstream diagnostic text
+    // (the core logs every shortcut diagnostic from the ready payload).
+    assert!(
+        stderr.contains("conflicts with built-in shortcut. Skipping."),
+        "reserved conflict diagnostic missing:\n{stderr}"
+    );
+    assert!(stderr.contains("ctrl+c"), "the conflicting key is named:\n{stderr}");
 }
