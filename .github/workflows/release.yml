@@ -9,6 +9,12 @@
 #     upstream/          (built pinned upstream tree, dev deps pruned)
 name: release
 
+# gh release (the gh CLI ships on the runners) publishes the artifacts —
+# no third-party release action (softprops/action-github-release vanished
+# from GitHub; 404 at resolve time).
+permissions:
+  contents: write
+
 on:
   push:
     tags: ["v*"]
@@ -103,12 +109,28 @@ jobs:
             esac
           done
 
-      - name: Upload + release
-        uses: softprops/action-github-release@v2
-        with:
-          files: |
-            dist/*.tar.gz
-            install.sh
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'staging') }}
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$tag" in *staging*) prerelease="--prerelease";; esac
+          prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            notes="$(git log --oneline "${prev}..HEAD" | sed 's/^/- /')"
+          else
+            notes="$(git log --oneline -25 | sed 's/^/- /')"
+          fi
+          for f in dist/*.tar.gz install.sh; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "$f" --clobber
+            else
+              # Matrix jobs race on the first create; fall back to upload.
+              if ! gh release create "$tag" --title "pi-rust ${tag}" \
+                    --notes "$notes" $prerelease "$f" 2>/dev/null; then
+                sleep 5
+                gh release upload "$tag" "$f" --clobber
+              fi
+            fi
+          done
