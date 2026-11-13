@@ -260,23 +260,18 @@ impl BedrockDriver {
         }
         let (_, auth_headers) = self.sign("POST", &path, &sign_headers, &payload, &amz_date);
         let url = format!("{}{path}", self.base_url.trim_end_matches('/'));
-        let mut req = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json");
-        for (k, v) in &auth_headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-        let resp = req
-            .body(payload)
-            .send()
-            .await
-            .with_context(|| format!("bedrock request failed: {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("bedrock api error {status}: {text}");
-        }
+        let resp = super::send_with_retry(|| {
+            let mut req = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json");
+            for (k, v) in &auth_headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            req.body(payload.clone())
+        })
+        .await
+        .map_err(|f| anyhow::anyhow!("{}", f.message("bedrock")))?;
         let mut text = String::new();
         let mut text_started = false;
         let mut usage = Usage::default();

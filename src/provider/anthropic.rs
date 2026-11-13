@@ -161,20 +161,15 @@ impl AnthropicDriver {
             body["tools"] = json!(tools);
         }
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("anthropic request failed: {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("anthropic api error {status}: {text}");
-        }
+        let resp = super::send_with_retry(|| {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .json(&body)
+        })
+        .await
+        .map_err(|f| anyhow::anyhow!("{}", f.message("anthropic")))?;
         // per content-block index: ("text", text) | ("tool", id, name, partial_json)
         #[derive(Default)]
         struct Block {
