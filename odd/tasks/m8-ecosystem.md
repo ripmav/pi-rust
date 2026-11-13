@@ -11,7 +11,7 @@ S4 (WP-804 acceptance): "Memo in-file; no code."
 
 ## Tasks
 - T1 / WP-801 — Skills system (discovery, frontmatter, system-prompt injection, headless+TUI command) — S1 — issue #92 — branch `feat/wp-801-skills` — commit: fa7c31c
-- T2 / WP-802 — RPC mode parity (upstream `--mode rpc` surface) — S2 — issue #93 — branch `feat/wp-802-rpc-parity` — commit: (pending)
+- T2 / WP-802 — RPC mode parity (upstream `--mode rpc` surface) — S2 — issue #93 — branch `feat/wp-802-rpc-parity` — commit: (see L5)
 - T3 / WP-803 — Extension packages (npm) evaluation memo — S3 — issue #94 — branch `feat/wp-803-packages-eval` — commit: (pending)
 - T4 / WP-804 — Session export (HTML) evaluation memo — S4 — issue #95 — branch `feat/wp-804-export-html-eval` — commit: (pending)
 
@@ -47,3 +47,5 @@ L5 (WP-802 evidence, 2026-11-13): `--mode rpc` implemented; the full upstream ev
 - Upstream `RpcClient` (dist, unmodified) drives pi-rust through the node shim: `promptAndWait` → `agent_settled`, `stop()` → 143 (test 3).
 - Full suite at WP-802 head: 240 in-crate, 23 e2e, 4 rpc, 3 PTY, 3 skills e2e, 43 smoke — all green.
 - Remaining documented deviations: the acceptance-set commands beyond `prompt` (set_model, session commands, compact, tool registration) answer `Unknown command` until a later WP; steer/followUp = follow-up run, not mid-turn steering; `images` accepted-but-unmapped.
+
+L6 (delivery note, 2026-11-13): WP-802 shipped as ONE feature commit on `feat/wp-802-rpc-parity` (2016 authored lines since main, lock files excluded). Slice-boundary deviation from the ~400-line work-unit rule: the acceptance criteria (protocol diff empty, unmodified upstream RpcClient driving pi-rust) are only observable on the complete feature — a mid-stream slice would emit a partial event stream against both the diff harness and the upstream client, so no coherent intermediate commit exists; the single-commit shape is the delivery strategy for this WP, recorded here per the feature-doc rule.
