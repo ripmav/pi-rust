@@ -1,0 +1,98 @@
+# M9/WP-901: CI pipeline.
+# Upstream is NOT tracked in this repo (`upstream/` is gitignored); the
+# pinned commit is shallow-cloned here, then node_modules + built packages
+# are cached so the build step only runs on a cache miss.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  UPSTREAM_SHA: "085c84e98e7f4c950f2be606466fff4f75d8fe7c"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upstream (pinned clone + npm install + build, cached)
+        id: upstream
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/node_modules
+            upstream/packages
+          key: upstream-085c84e9-${{ matrix.os }}-v1
+
+      - name: Fetch pinned upstream (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+
+      - name: Node setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+
+      - name: Upstream npm install + build (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        working-directory: upstream
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify upstream dist
+        run: test -f upstream/packages/coding-agent/dist/cli.js
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Sidecar smoke
+        run: node sidecar/smoke.mjs
+
+  clippy:
+    name: clippy (report only until WP-902)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets
+
+  fmt:
+    name: rustfmt (report only until WP-902)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
