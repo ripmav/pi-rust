@@ -1,0 +1,114 @@
+# M9/WP-903: release pipeline.
+# Tag `v*` (staging tags like v0.0.0-staging.1 use the same path) ->
+# GitHub release with per-architecture tarballs + generated changelog.
+#
+# Package layout (the sidecar resolves ../upstream relative to itself):
+#   pi-rust-<tag>/
+#     pi-rust            (stripped release binary)
+#     sidecar/           (the bridge + original loader wiring)
+#     upstream/          (built pinned upstream tree, dev deps pruned)
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  UPSTREAM_SHA: "085c84e98e7f4c950f2be606466fff4f75d8fe7c"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"]
+          - os: macos-latest
+            targets: ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # The sidecar runs the ORIGINAL upstream loader: the package ships the
+      # pinned, built upstream tree (dev deps pruned for size).
+      - name: Fetch + build pinned upstream
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+          npm ci
+          npm run build
+          npm prune --omit=dev
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ join(matrix.targets, ' ') }}
+      - uses: Swatinem/rust-cache@v2
+
+      # musl cross: the TLS crate stack compiles C (cc-rs).
+      - name: Install aarch64 musl cross toolchain (linux job)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq aarch64-linux-musl-cross
+
+      - name: Build release targets
+        run: |
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            cargo build --release --target "$t"
+          done
+
+      - name: Stage + package
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            strip target/"$t"/release/pi-rust
+            name="pi-rust-${tag}-${t}"
+            mkdir -p "dist/${name}"
+            install -m 0755 "target/${t}/release/pi-rust" "dist/${name}/pi-rust"
+            cp -r sidecar "dist/${name}/sidecar"
+            mkdir -p "dist/${name}/upstream"
+            cp -r upstream/packages upstream/node_modules upstream/package.json "dist/${name}/upstream/"
+            tar -czf "dist/${name}.tar.gz" -C dist "$name"
+            echo "${name}.tar.gz: $(du -h "dist/${name}.tar.gz" | cut -f1)"
+          done
+
+      # Acceptance: the release artifacts install and run (smoke scenario).
+      # Cross targets run under qemu (linux) / Rosetta (macOS x86_64).
+      - name: Smoke-check artifacts
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          check() {
+            dir="$1"; shift
+            agent_dir="$(mktemp -d)"
+            out="$("$dir/pi-rust" "$@" --provider fake --prompt hi --agent-dir "$agent_dir" 2>/dev/null)"
+            case "$out" in
+              *"echo: hi"*) echo "smoke OK: $dir" ;;
+              *) echo "smoke FAIL: $dir"; printf '%s\n' "$out" | head -5; return 1 ;;
+            esac
+          }
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            name="pi-rust-${tag}-${t}"
+            case "$t" in
+              x86_64-unknown-linux-gnu) check "dist/$name" ;;
+              aarch64-unknown-linux-musl)
+                sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
+                check "dist/$name" qemu-aarch64 # static musl binary
+                ;;
+              aarch64-apple-darwin) check "dist/$name" ;;
+              x86_64-apple-darwin) check "dist/$name" ;; # Rosetta on the arm64 runner
+            esac
+          done
+
+      - name: Upload + release
+        uses: softprops/action-github-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            install.sh
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'staging') }}
