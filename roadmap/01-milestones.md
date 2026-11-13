@@ -14,7 +14,7 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 | M5 | Built-in tool parity | read/write/edit/bash behave like upstream | 501–506 | ✅ done (stack #74, merged) |
 | M6 | Interactive TUI | ratatui REPL: chat, dialogs, editor, keybindings, themes, pickers | 601–610 | ✅ done (stack #59, merged) |
 | M7 | Extension completeness | the remaining contract rows: providers, MCP, compaction, shortcuts | 701–708 | ✅ done (stack #3461256, PRs #83–#91, pending merge) |
-| M8 | Ecosystem | skills, RPC-mode parity, package evaluation | 801–804 | open |
+| M8 | Ecosystem | skills, RPC-mode parity, package + export-HTML evaluation | 801–804 | ✅ done (PRs #96–#99, pending merge) |
 | M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | open |
 
 ## Milestone entry/exit
