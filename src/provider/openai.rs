@@ -196,21 +196,17 @@ impl OpenAiDriver {
                 false,
             ),
         };
-        let mut req = self.client.post(&url).json(&body);
-        if use_azure_key {
-            req = req.header("api-key", &self.api_key);
-        } else {
-            req = req.bearer_auth(&self.api_key);
-        }
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("openai request failed: {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("openai api error {status}: {text}");
-        }
+        let resp = super::send_with_retry(|| {
+            let mut req = self.client.post(&url).json(&body);
+            if use_azure_key {
+                req = req.header("api-key", &self.api_key);
+            } else {
+                req = req.bearer_auth(&self.api_key);
+            }
+            req
+        })
+        .await
+        .map_err(|f| anyhow::anyhow!("{}", f.message("openai")))?;
         let mut text = String::new();
         let mut text_started = false;
         let mut usage = crate::model::Usage::default();
