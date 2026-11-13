@@ -75,6 +75,9 @@ jobs:
 
   clippy:
     name: clippy (report only until WP-902)
+    # Report-only: this branch predates the fmt/clippy baseline (WP-902);
+    # the job must not block the stack bottom, it only reports the state.
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
