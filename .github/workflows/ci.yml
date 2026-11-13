@@ -79,6 +79,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # build.rs reads the upstream model catalog (frozen to the pin).
+      - name: Fetch pinned upstream (source only)
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
