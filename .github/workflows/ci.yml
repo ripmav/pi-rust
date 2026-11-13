@@ -82,12 +82,18 @@ jobs:
 
       # build.rs reads the upstream model catalog, which the upstream build
       # generates from TS source into packages/ai/src/providers/data.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
       - name: Fetch pinned upstream (pinned source, built catalog)
         run: |
           git init upstream
           git -C upstream remote add origin https://github.com/earendil-works/pi.git
           git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
           git -C upstream checkout --detach FETCH_HEAD
+      - name: Upstream npm install + build
+        working-directory: upstream
+        run: |
           npm ci
           npm run build
 

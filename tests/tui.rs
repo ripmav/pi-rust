@@ -68,6 +68,16 @@ def feed(data: bytes):
             if cur[0] < ROWS and cur[1] < COLS:
                 grid[cur[0]][cur[1]] = chr(data[i])
             cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            # UTF-8 multi-byte char (e.g. the … truncation glyph): one cell,
+            # rendered as '.' — dropping the bytes without consuming a cell
+            # shifted every later character (macOS status bar found it).
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
         i += 1
 
 def screen_text():
@@ -169,6 +179,16 @@ def feed(data: bytes):
             if cur[0] < ROWS and cur[1] < COLS:
                 grid[cur[0]][cur[1]] = chr(data[i])
             cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            # UTF-8 multi-byte char (e.g. the … truncation glyph): one cell,
+            # rendered as '.' — dropping the bytes without consuming a cell
+            # shifted every later character (macOS status bar found it).
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
         i += 1
 
 def screen_text():
@@ -278,6 +298,16 @@ def feed(data: bytes):
             if cur[0] < ROWS and cur[1] < COLS:
                 grid[cur[0]][cur[1]] = chr(data[i])
             cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            # UTF-8 multi-byte char (e.g. the … truncation glyph): one cell,
+            # rendered as '.' — dropping the bytes without consuming a cell
+            # shifted every later character (macOS status bar found it).
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
         i += 1
 
 def screen_text():
