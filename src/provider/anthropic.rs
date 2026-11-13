@@ -2,7 +2,7 @@
 //! `x-api-key` + `anthropic-version` headers; `system` as top-level field;
 //! `toolResult` maps to user-role `tool_result` blocks; consecutive same-role
 //! messages are merged (the API requires strict alternation).
-use crate::model::{AssistantTurn, ModelDriver, ToolCallSpec};
+use crate::model::{AssistantTurn, ModelDriver, StreamDelta, ToolCallSpec};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -136,7 +136,7 @@ impl AnthropicDriver {
 	async fn complete_impl<'a>(
 		&'a self,
 		convo: &'a [Value],
-		mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+		mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
 	) -> Result<AssistantTurn> {
 		let mut body = json!({
 			"model": self.model,
@@ -176,6 +176,7 @@ impl AnthropicDriver {
 			partial: String,
 		}
 		let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
+		let mut text_started = false;
 		let mut usage = crate::model::Usage::default();
 		let mut buf = String::new();
 		let mut event = String::new();
@@ -220,8 +221,12 @@ impl AnthropicDriver {
 						match delta.get("type").and_then(Value::as_str) {
 							Some("text_delta") => {
 								let t = delta.get("text").and_then(Value::as_str).unwrap_or_default();
+								if !text_started {
+									text_started = true;
+									on_delta(StreamDelta::TextStart { index: 0 });
+								}
 								b.text.push_str(t);
-								on_delta(t); // WP-603: TUI renders tokens as they arrive
+								on_delta(StreamDelta::TextDelta { index: 0, delta: t.to_string() }); // WP-603: TUI renders tokens as they arrive
 							}
 							Some("input_json_delta") => b.partial.push_str(delta.get("partial_json").and_then(Value::as_str).unwrap_or_default()),
 							_ => {}
@@ -262,6 +267,19 @@ impl AnthropicDriver {
 				_ => {}
 			}
 		}
+		// WP-802: stream-end events (upstream assistantMessageEvent parity;
+		// tool-call deltas are batched at end for non-OpenAI drivers).
+		if text_started {
+			on_delta(StreamDelta::TextEnd { index: 0, content: text.clone() });
+		}
+		for (i, tc) in tool_calls.iter().enumerate() {
+			let idx = i as u32;
+			on_delta(StreamDelta::ToolCallStart { index: idx, id: tc.id.clone(), name: tc.name.clone(), initial_args: Value::Null });
+			on_delta(StreamDelta::ToolCallEnd {
+				index: idx,
+				tool_call: json!({"id":tc.id,"name":tc.name,"arguments":tc.input.clone()}),
+			});
+		}
 		Ok(AssistantTurn {
 		text: if text.is_empty() { None } else { Some(text) },
 		tool_calls,
@@ -271,7 +289,7 @@ impl AnthropicDriver {
 }
 
 impl ModelDriver for AnthropicDriver {
-	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(&str) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
+	fn complete<'a>(&'a self, convo: &'a [Value], on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
 		Box::pin(async move { self.complete_impl(convo, on_delta).await })
 	}
 }
@@ -310,7 +328,7 @@ mod tests {
 		);
 		let base = mock::start_mock(mock::sse_response(sse), tx).await;
 		let d = AnthropicDriver::new(base, "k".into(), "m".into());
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.usage.input, 42);
 		assert_eq!(turn.usage.output, 9);
 		assert_eq!(turn.usage.cache_read, 5);
@@ -323,7 +341,7 @@ mod tests {
 		let sse = "event: message_stop\ndata: {}\n\n";
 		let base = mock::start_mock(mock::sse_response(sse), tx).await;
 		let d: Box<dyn ModelDriver> = Box::new(AnthropicDriver::new(base, "key-1".into(), "claude-test".into()));
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.text, None);
 		let req = rx.recv().await.unwrap();
 		let lines: Vec<&str> = req.lines().collect();
@@ -369,7 +387,7 @@ mod tests {
 		);
 		let base = mock::start_mock(mock::sse_response(sse), tx).await;
 		let d = AnthropicDriver::new(base, "k".into(), "m".into());
-		let turn = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap();
+		let turn = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap();
 		assert_eq!(turn.text.as_deref(), Some("Pi rocks"));
 		assert_eq!(turn.tool_calls, vec![ToolCallSpec { id: "tu_1".into(), name: "hello".into(), input: json!({"name":"X"}) }]);
 	}
@@ -381,7 +399,7 @@ mod tests {
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
 		let base = mock::start_mock(resp, tx).await;
 		let d = AnthropicDriver::new(base, "k".into(), "m".into());
-		let err = d.complete(&mock::test_convo(), Box::new(|_: &str| {})).await.unwrap_err().to_string();
+		let err = d.complete(&mock::test_convo(), Box::new(|_: crate::model::StreamDelta| {})).await.unwrap_err().to_string();
 		assert!(err.contains("400"), "{err}");
 		assert!(err.contains("bad model"), "{err}");
 	}

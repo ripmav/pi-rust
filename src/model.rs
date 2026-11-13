@@ -52,15 +52,36 @@ impl Usage {
 /// Model driver: produces the next assistant turn for the conversation so far.
 /// Object-safe async without a trait macro: `dyn ModelDriver` is used at the
 /// agent-loop seam (fake driver in scenarios/tests, real providers otherwise).
+/// Streaming events a driver reports while the assistant message is
+/// built. Text and tool-call variants mirror the upstream
+/// `assistantMessageEvent` wire shapes (WP-802 RPC parity); the TUI
+/// consumes `TextDelta` only.
+#[derive(Debug, Clone)]
+pub enum StreamDelta {
+    /// First text chunk of the message (content index 0 in v0).
+    TextStart { index: u32 },
+    /// A streamed text chunk.
+    TextDelta { index: u32, delta: String },
+    /// Text block finished; `content` is the full block.
+    TextEnd { index: u32, content: String },
+    /// A tool call started (id + name known).
+    ToolCallStart { index: u32, id: String, name: String, initial_args: Value },
+    /// Incremental tool-call argument JSON.
+    ToolCallDelta { index: u32, delta: String },
+    /// A tool call finished; `tool_call` is the upstream ToolCall shape
+    /// `{id, name, arguments}`.
+    ToolCallEnd { index: u32, tool_call: Value },
+}
+
 pub trait ModelDriver: Send + Sync {
     /// `Err` = the run cannot finish (script exhausted or provider failure).
-    /// `on_delta` is called per streamed text chunk (TUI display; headless
-    /// runs pass a no-op). Drivers that do not stream call it once with the
-    /// full text.
+    /// `on_delta` is called per streamed event (TUI display; headless runs
+    /// pass a no-op). Drivers that do not stream call it once with the full
+    /// text as a single `TextDelta`.
     fn complete<'a>(
         &'a self,
         convo: &'a [Value],
-        on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+        on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>>;
 }
 
@@ -122,7 +143,7 @@ impl ModelDriver for FakeDriver {
     fn complete<'a>(
         &'a self,
         convo: &'a [Value],
-        mut on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
         Box::pin(async move {
             // WP-704: the summary call is detected by its system prompt (the
@@ -136,12 +157,12 @@ impl ModelDriver for FakeDriver {
             });
             if is_summary_call {
                 let text = self.compact_summary.clone();
-                on_delta(&text);
+                on_delta(StreamDelta::TextDelta { index: 0, delta: text.clone() });
                 return Ok(AssistantTurn { text: Some(text), tool_calls: Vec::new(), usage: Usage::default() });
             }
             if let Some(t) = self.turns.lock().unwrap().pop_front() {
                 if let Some(text) = &t.text {
-                    on_delta(text); // single delta: the fake does not stream
+                    on_delta(StreamDelta::TextDelta { index: 0, delta: text.to_string() }); // single delta: the fake does not stream
                 }
                 return Ok(t);
             }
@@ -149,7 +170,7 @@ impl ModelDriver for FakeDriver {
                 let last_user = convo.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user"));
                 let text = last_user.map(crate::session::extract_text).unwrap_or_default();
                 let reply = format!("echo: {text}");
-                on_delta(&reply);
+                on_delta(StreamDelta::TextDelta { index: 0, delta: reply.clone() });
                 return Ok(AssistantTurn { text: Some(reply), tool_calls: Vec::new(), usage: Usage::default() });
             }
             anyhow::bail!("model script exhausted before the run could finish")

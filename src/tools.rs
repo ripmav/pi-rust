@@ -282,6 +282,7 @@ async fn bash(input: &Value) -> ExecResult {
 	let Ok(mut child) = Command::new("bash").arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() else {
 		return ExecResult::err("bash: failed to start".into());
 	};
+	let wall_start = std::time::Instant::now();
 	let mut capture = BashCapture::new();
 	let (status, timed_out) = match timeout {
 		None => (pump_child(&mut child, &mut capture).await, false),
@@ -298,7 +299,6 @@ async fn bash(input: &Value) -> ExecResult {
 	// Upstream: the "(no output)" placeholder is only applied on non-error paths
 	// (formatOutput's default emptyText); error paths pass "".
 	let mut text = if content.is_empty() && !timed_out { "(no output)".to_string() } else { content };
-	let mut details = json!({});
 	if let Some(t) = &trunc {
 		let start_line = t.total_lines - t.output_lines + 1;
 		let end_line = t.total_lines;
@@ -309,7 +309,11 @@ async fn bash(input: &Value) -> ExecResult {
 		} else {
 			text.push_str(&format!("\n\n[Showing lines {start_line}-{end_line} of {end_line} ({} limit). Full output: {}]", format_size(BASH_MAX_BYTES), t.full_output_path.display()));
 		}
-		details = json!({"truncation": t.to_json(), "fullOutputPath": t.full_output_path.to_string_lossy().into_owned()});
+	}
+	let mut details = json!({});
+	if let Some(t) = &trunc {
+		details["truncation"] = json!(t.to_json());
+		details["fullOutputPath"] = json!(t.full_output_path.to_string_lossy());
 	}
 	if timed_out {
 		let secs = timeout.map(|(t, _)| t.to_string()).unwrap_or_default();
@@ -322,10 +326,18 @@ async fn bash(input: &Value) -> ExecResult {
 		Some(s) => s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0) as i32),
 		None => 1,
 	};
+	// WP-802: the upstream bash `structuredContent` (also the stored
+	// `details` — the pi truncation keys extend it only when truncated).
+	details["output"] = json!(text.clone());
+	details["truncated"] = json!(trunc.is_some());
+	details["exit_code"] = json!(code);
+	details["wall_time_seconds"] = json!(wall_start.elapsed().as_secs_f64());
 	if code == 0 {
 		ExecResult { content: json!([{"type":"text","text":text}]), details, is_error: false, terminate: false }
 	} else {
 		let full = format!("{text}\n\nCommand exited with code {code}");
+		// The wire `output` carries the exact returned text (note included).
+		details["output"] = json!(full.clone());
 		ExecResult { content: json!([{"type":"text","text":full}]), details, is_error: true, terminate: false }
 	}
 }
@@ -1402,7 +1414,11 @@ mod tests {
 		let r = bash_tool(json!({"command": "echo hi"})).await;
 		assert!(!r.is_error);
 		assert_eq!(text(&r), "hi\n");
-		assert_eq!(r.details, json!({}));
+		// WP-802: the upstream structuredContent lives in `details`.
+		assert_eq!(r.details["output"], json!("hi\n"));
+		assert_eq!(r.details["truncated"], json!(false));
+		assert_eq!(r.details["exit_code"], json!(0));
+		assert!(r.details["wall_time_seconds"].is_number());
 	}
 
 	#[tokio::test]
@@ -1410,7 +1426,8 @@ mod tests {
 		let r = bash_tool(json!({"command": "true"})).await;
 		assert!(!r.is_error);
 		assert_eq!(text(&r), "(no output)");
-		assert_eq!(r.details, json!({}));
+		assert_eq!(r.details["output"], json!("(no output)"));
+		assert_eq!(r.details["exit_code"], json!(0));
 	}
 
 	#[tokio::test]
@@ -1421,7 +1438,7 @@ mod tests {
 		let r = bash_tool(json!({"command": "printf 'a\n'; sleep 0.2; printf 'x\n' >&2; sleep 0.2; printf 'b\n'"})).await;
 		assert!(!r.is_error);
 		assert_eq!(text(&r), "a\nx\nb\n");
-		assert_eq!(r.details, json!({}));
+		assert_eq!(r.details["exit_code"], json!(0));
 	}
 
 	#[tokio::test]
@@ -1429,7 +1446,8 @@ mod tests {
 		let r = bash_tool(json!({"command": "echo out; echo err >&2; exit 3"})).await;
 		assert!(r.is_error);
 		assert_eq!(text(&r), "out\nerr\n\n\nCommand exited with code 3");
-		assert_eq!(r.details, json!({}));
+		assert_eq!(r.details["exit_code"], json!(3));
+		assert_eq!(r.details["output"], json!("out\nerr\n\n\nCommand exited with code 3"));
 	}
 
 	#[tokio::test]
