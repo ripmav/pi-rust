@@ -116,3 +116,13 @@ provider_stream path reused (zero new wire events); env auth resolved sidecar-si
 unmodified llama hosted + refreshModels populates the catalog before ready (publish gate must call
 args.update()). 3 new e2e (native turn, typed not-configured error, unmodified llama via mock router);
 legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
+- L9: WP-1006 (ctx.ui.custom descriptor pane) — delivered. Protocol v6
+  (lockstep, TUI capability "custom"). Sidecar pane host runs the factory's
+  real pi-tui component sidecar-side and relays the structured descriptor
+  (title/lines/list/input/blocked) via pane_open/pane_update/pane_close +
+  pane_key; out-of-subset components degrade to ANSI-stripped render lines,
+  throwing factories resolve undefined (no crash). TUI renders the pane in
+  the transcript slot (above editor, below dialogs), owns input while open.
+  E2E: PTY round-trip of both WP-707 shapes (mcp-menu cursor+confirm,
+  progress live-update+cancel) + headless noOp contract. Dialog regression
+  green.

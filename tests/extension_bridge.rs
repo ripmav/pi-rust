@@ -3548,3 +3548,62 @@ fn wp1005_unmodified_llama_via_mock_router() {
     assert_eq!(changes[0]["modelId"], "gemma-mock");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// WP-1006 headless contract: without the `custom` capability (headless
+/// init advertises ui: []), ctx.ui.custom resolves with the upstream noOp
+/// result (undefined) — the factory never runs, nothing hangs, no
+/// pane_* events cross the wire. The fixture command throws on any
+/// deviation (ok:false on the command event).
+#[test]
+fn wp1006_headless_custom_is_noop() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1006-headless-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let ext = repo().join("tests/fixtures");
+    let agent_dir = tmp.join("agent-dir");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("fake")
+        .arg("--extension-dir")
+        .arg(&ext)
+        .arg("--command")
+        .arg("custom-probe")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--prompt")
+        .arg("probe")
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let cmd = lines
+        .iter()
+        .find(|l| l.get("kind").and_then(Value::as_str) == Some("command"))
+        .expect("command event missing\n{stdout}");
+    assert_eq!(cmd["name"], "custom-probe");
+    assert_eq!(
+        cmd["ok"],
+        json!(true),
+        "custom-probe must pass (noOp undefined)\n{cmd}"
+    );
+
+    // No pane lifecycle events may appear in the core log.
+    let corelog = std::fs::read_to_string(agent_dir.join("core.log")).unwrap_or_default();
+    assert!(
+        !corelog.contains("pane_open")
+            && !corelog.contains("pane_update")
+            && !corelog.contains("pane_key"),
+        "headless runs must not see pane_* events\n{corelog}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

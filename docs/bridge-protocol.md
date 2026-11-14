@@ -1,4 +1,4 @@
-# Extension Bridge Protocol v5
+# Extension Bridge Protocol v6
 
 Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` framing). S3 is the acceptance context: unmodified upstream example extensions must work "wie gewohnt" for the headless-safe API slice through this protocol.
 
@@ -29,13 +29,13 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 5` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
+2. Core sends `init`: `protocolVersion: 6` plus the core capability set — which `extension_ui_request` methods the core implements (TUI adds `custom`, § Custom pane) and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
 
-   `{"id":"…","type":"init","protocolVersion":5,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
+   `{"id":"…","type":"init","protocolVersion":6,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}` (TUI: `ui` gains `"custom"`)
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-five `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-six `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 5, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> }, keybindings?: { action: string[] } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2; `keybindings` new in v4 |
+| core→ | `init` | `{ protocolVersion: 6, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> }, keybindings?: { action: string[] } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2; `keybindings` new in v4; `custom` capability new in v6 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -125,7 +125,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":5,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
+{"id":"h1","type":"init","protocolVersion":6,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
 {"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
 ```
@@ -215,6 +215,23 @@ The **active tool set** is the set of extension tools declared to the model (ups
 - **Coalescing**: registration changes (`refreshTools`) and `setActiveTools` share one tick: at most one `tools_changed` + `tools_activated` pair per sidecar tick, carrying the final state; the core replaces its tool set then its active set, in that order. On `tools_changed`, the core prunes active entries for tools that no longer exist.
 - **Built-in `tool-search`**: the sidecar hosts the upstream `tool-search` extension (upstream main.ts auto-loads it). Its `tool_search` tool registers inactive (`model-only`, `defaultActive: false`) — activation goes through `setActiveTools` (core-side `--tools`/`defaultTools` config is a v0 non-goal). Its BM25 ranker searches `codemode`/`deferred` tools and loads the matches via `setActiveTools`, so they become declared from the next turn — the wire path this section describes.
 - **Execution routing is unchanged**: an extension tool call executes when its name is registered (the core's `run_tool` shadowing), independent of the active set; the active set only controls model declaration.
+
+## Custom pane (v6)
+
+`ctx.ui.custom` (WP-1006, the WP-707 tier-(b) descriptor subset): when the
+core advertises the `custom` capability (TUI only; headless runs keep the
+upstream noOp), the sidecar runs the factory's real pi-tui component
+sidecar-side and relays a **structured descriptor** — the pane host never
+renders ANSI, the TUI renders the descriptor in the transcript slot (above
+the editor, below dialogs).
+
+- Sidecar→core events (one-way; the sidecar's promise owns the result):
+  - `pane_open { id, blocked?: { kind, message } }` — a pane opens.
+  - `pane_update { id, title?, lines?: [{ text }], list?: { items: string[], cursor }, input?: { label, value, placeholder? }, blocked? }` — full descriptor snapshot (replacement, not patch); sent on `requestRender` and after keys, deduped by signature.
+  - `pane_close { id }` — the component called `done(result)`; the TUI drops the pane. The result resolves the sidecar-local promise; it does **not** cross the wire.
+- Core→sidecar: `pane_key { id, key: { code, text? } }` — a TUI key for the open pane. `code` ∈ `up | down | left | right | enter | escape | backspace | tab | char`; the sidecar encodes it to the pi-tui input string and dispatches it to the focused component (root `handleInput`, else the first `capturesViewportInput` descendant — the SelectList case — else any `handleInput` descendant).
+- Descriptor subset = the WP-707 production shapes: title + plain lines + list with cursor + one input + `blocked`. Out-of-subset components degrade to their `render(width)` lines (ANSI-stripped); a throwing factory resolves `undefined` with a sidecar log — never a crash.
+- The TUI never closes a pane itself: the component decides via `done`. While a pane is open, TUI keys route to the pane (not the editor).
 
 ## Out of scope for the v0 bridge
 

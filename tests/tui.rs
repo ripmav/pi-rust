@@ -351,6 +351,163 @@ sys.stderr.write("\n===EXIT %d STEPS %s\n" % (code, "".join(map(str, steps))))
 sys.exit(0 if (code == 0 and all(steps)) else 11)
 "#;
 
+/// WP-1006 acceptance: the two WP-707 production shapes round-trip through
+/// the pane host: the mcp-manager menu (list + cursor + confirm key) and
+/// the progress pane (live update + cancel key). The fixture commands fail
+/// (extension_error) unless the pane answers are menu=beta,
+/// progress=cancelled.
+const PYTHON_PANE: &str = r#"
+#!/usr/bin/env python3
+# WP-1006 acceptance: ctx.ui.custom descriptor panes rendered in the TUI,
+# driven by the user (cursor + confirm on the menu, esc on the progress
+# pane), live pane_update for the progress step.
+import os, pty, select, sys, time, fcntl, termios, struct, re
+
+BIN = os.path.join(sys.argv[1], "target", "debug", "pi-rust")
+WORKDIR = sys.argv[2]
+AGENT_DIR = sys.argv[3]
+EXT_DIR = sys.argv[4]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["PI_RUST_SIDECAR"] = os.path.join(sys.argv[1], "sidecar", "index.mjs")
+    os.chdir(WORKDIR)
+    os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR,
+                    "--extension-dir", EXT_DIR,
+                    "--command", "menu-check", "--command", "progress-check"])
+
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+
+ROWS, COLS = 24, 120
+grid = [[" "] * COLS for _ in range(ROWS)]
+cur = [0, 0]
+
+def feed(data: bytes):
+    i, n = 0, len(data)
+    while i < n:
+        b = data[i:i+1]
+        if b == b"\x1b":
+            m = re.match(rb"\x1b\[(\d+);(\d+)H", data[i:])
+            if m:
+                cur[0] = min(int(m.group(1)) - 1, ROWS - 1)
+                cur[1] = min(int(m.group(2)) - 1, COLS - 1)
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b.", data[i:])
+            if m:
+                i += 2
+                continue
+            i += 1
+            continue
+        if b == b"\r":
+            cur[1] = 0
+            i += 1
+            continue
+        if b == b"\n":
+            cur[0] = min(cur[0] + 1, ROWS - 1)
+            i += 1
+            continue
+        if 32 <= data[i] < 127:
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = chr(data[i])
+            cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
+        i += 1
+
+def screen_text() -> str:
+    return "\n".join("".join(r).rstrip() for r in grid)
+
+def wait_for(needle: bytes, timeout=15.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return needle in screen_text().encode("latin-1")
+            if not data:
+                return needle in screen_text().encode("latin-1")
+            feed(data)
+            if needle in screen_text().encode("latin-1"):
+                return True
+    return needle in screen_text().encode("latin-1")
+
+steps = []
+steps.append(wait_for(b"fake/fake"))                     # TUI ready
+# --- shape 1: the mcp-manager menu (list + cursor + confirm key) ---
+steps.append(wait_for(b"Menu check"))                     # pane title rendered
+steps.append(wait_for(b"alpha"))                          # list items rendered
+os.write(fd, b"\x1b[B")                                  # down: alpha -> beta
+time.sleep(0.3)
+os.write(fd, b"\r")                                      # confirm
+steps.append(wait_for(b"menu done"))                      # notify: answer was "beta"
+# --- shape 2: the progress pane (live update + cancel key) ---
+steps.append(wait_for(b"progress: step 1/3"))             # pane open
+steps.append(wait_for(b"progress: step 2/3"))             # live pane_update
+os.write(fd, b"\x1b")                                    # esc: cancel
+steps.append(wait_for(b"progress done"))                  # notify: answer was "cancelled"
+steps.append(not wait_for(b"menu answer wrong", timeout=2.0))
+steps.append(not wait_for(b"progress answer wrong", timeout=2.0))
+os.write(fd, b"\x04")                                    # ctrl+d exit
+
+time.sleep(0.5)
+try:
+    os.close(fd)
+except OSError:
+    pass
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+sys.stderr.write(screen_text())
+sys.stderr.write("\n===EXIT %d STEPS %s\n" % (code, "".join(map(str, steps))))
+sys.exit(0 if (code == 0 and all(steps)) else 11)
+"#;
+
+#[test]
+fn tui_custom_pane_roundtrip() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-tui-pane-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let py = tmp.join("pane_harness.py");
+    std::fs::write(&py, PYTHON_PANE).unwrap();
+
+    let out = Command::new("python3")
+        .args([
+            py.display().to_string().as_str(),
+            repo().display().to_string().as_str(),
+            tmp.display().to_string().as_str(),
+            tmp.join("agent-dir").display().to_string().as_str(),
+            repo()
+                .join("tests/fixtures/custom-panes")
+                .display()
+                .to_string()
+                .as_str(),
+        ])
+        .output()
+        .expect("running pane pty harness");
+    let screen = String::from_utf8_lossy(&out.stderr).to_string();
+    let code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 0,
+        "pty pane harness failed (menu/progress pane not driven). Screen:\n{screen}"
+    );
+}
+
 #[test]
 fn tui_extension_dialog_roundtrip() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-tui-dlg-{}", std::process::id()));
