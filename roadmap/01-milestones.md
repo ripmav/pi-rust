@@ -14,8 +14,9 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 | M5 | Built-in tool parity | read/write/edit/bash behave like upstream | 501–506 | ✅ done (stack #74, merged) |
 | M6 | Interactive TUI | ratatui REPL: chat, dialogs, editor, keybindings, themes, pickers | 601–610 | ✅ done (stack #59, merged) |
 | M7 | Extension completeness | the remaining contract rows: providers, MCP, compaction, shortcuts | 701–708 | ✅ done (stack #3461256, PRs #83–#91, pending merge) |
-| M8 | Ecosystem | skills, RPC-mode parity, package + export-HTML evaluation | 801–804 | ✅ done (PRs #96–#99, pending merge) |
-| M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | delivered (2026-11-14) |
+| M8 | Ecosystem | skills, RPC-mode parity, package + export-HTML evaluation | 801–804 | ✅ done (PRs #96–#99 merged) |
+| M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | ✅ delivered (2026-11-14, in main) |
+| M10 | v0.1 & ecosystem + platform | pin refresh, v0.1.0, tool-search/codemode/llama, ui.custom pane, oauth, Windows, TUI parity | 1001–1010 | planned (2026-11-14) |
 
 ## Milestone entry/exit
 
@@ -33,4 +34,6 @@ M1 ──► M2 ──┬─► M3 ──► M6 (sessions, models, dialogs in th
 M3+M4 ──► M7 (custom providers need registry; MCP needs config)
 M6 ──► M7 (shortcuts/themes render in TUI)
 M8 ──► M9 (release needs stable feature set)
+M9 ──► M10 (pin refresh → v0.1.0 → ecosystem WPs → platform → close;
+            1003 ─► 1004; 1002 ─► 1008; all ─► 1010)
 ```
