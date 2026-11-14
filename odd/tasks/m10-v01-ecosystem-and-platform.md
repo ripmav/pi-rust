@@ -125,4 +125,9 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   the transcript slot (above editor, below dialogs), owns input while open.
   E2E: PTY round-trip of both WP-707 shapes (mcp-menu cursor+confirm,
   progress live-update+cancel) + headless noOp contract. Dialog regression
-  green.
+  green. Commits: 6049fa8 (pane host + protocol v6), 5625053 (acceptance +
+  docs), fd4b07d (flake fix: pane timeout contract = dialog manager's, the
+  core's 30 s request timeout previously degraded the bridge for
+  unattended interactive panes; PTY needles now only persistent frames —
+  menu answer rides on the progress live line). PR #136 (stacked on
+  feat/wp-1005-llama-native).
