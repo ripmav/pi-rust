@@ -69,3 +69,16 @@ L7 (2026-11-14, el Gentleman — WP-907 delivery):
 - New: `pi-rust --help`/`-h` prints the usage text (exit 0); the stale unknown-arg usage string is replaced by the same text; `docs/cli-reference.md` carries the exact --help output and `tests/cli_help.rs` fails on any drift (WP acceptance "CLI reference matches actual flags, diff-tested").
 - New CI job `fresh-clone` (WP acceptance "fresh-clone setup works by following the README alone, tested on a clean container"): container job (node:26-bookworm, no preinstalled Rust, no caches) following the README "From source" recipe verbatim + smoke subset (fake one-shot, sidecar smoke, cli reference test). Full suite stays in the existing test jobs.
 - Local evidence: full suite green (271 in-crate, 1 cli-help, 38 e2e, 4 rpc, 3 PTY, 3 skills, 68 smoke), clippy 0, fmt clean, YAML valid; fresh-clone recipe executed locally in a temp clone (job-9) — CI container job is the binding proof.
+
+L8 (2026-11-14, el Gentleman — CI/release defect fixes on the stack):
+- WP-903: staging.6 failed the aarch64 smoke because check() passed the
+  qemu runner as a positional argument to the binary (it ran natively with
+  the prompt "qemu-aarch64"; set -e + 2>/dev/null silenced the unknown-arg
+  failure). Runner is now a command prefix, the exit code is captured
+  before set -e, both failure branches print stderr. Tag v0.0.0-staging.7
+  re-runs the release. (commit f4296a6)
+- WP-905: the flat 20% bench band flaked on idle_rss_mb (6.5 vs baseline
+  5.0 on one runner, identical code passing on another — shared-runner RSS
+  jitter ±1.5 MB). Per-metric band: timing/throughput 20%, idle RSS 50%
+  (real regressions still fail: 9.0 vs 5.0 MB, throughput -30%).
+  (commit 243b514)
