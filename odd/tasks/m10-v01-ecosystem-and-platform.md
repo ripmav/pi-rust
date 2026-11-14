@@ -64,7 +64,7 @@ quoted per WP:
 - T4 / WP-1004 — Codemode hosting (factory + model-call bridge) — S2.4 — issue #125 — branch `feat/wp-1004-codemode` — PR #—
 - T5 / WP-1005 — Llama native provider capture — S2.5 — issue #126 — branch `feat/wp-1005-llama-native` — PR #—
 - T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — issue #127 — branch `feat/wp-1006-ui-custom-pane` — PR #—
-- T7 / WP-1007 — OAuth credential support — S2.7 — issue #128 — branch `feat/wp-1007-oauth` — PR #—
+- T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 — branch `feat/wp-1007-oauth-credentials` — PR #—
 - T8 / WP-1008 — Windows support — S2.8 — issue #129 — branch `feat/wp-1008-windows` — PR #—
 - T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #—
 - T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
@@ -102,7 +102,7 @@ tests, docs, src comments, vision. Full suite on the new pin: 271 in-crate,
   test-only). Full suite + 71 smoke green, fmt/clippy clean.
 - **L6** (2026-11-14): slice strategy for the M10 stack: each WP is one stacked PR and one review unit (the ~400-line
 slice rule applies per WP commit, not per accumulated stack; sizes on top of main — 1001: 261, 1002: 139, 1003: 423,
-1004: 190, 1005: 1 commit, 1006: 515 + 402 + 57 lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
+1004: 190, 1005: 1 commit, 1006: 515 + 402 + 57, 1007: 662 + 266 + 50 lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
 via direct merge; PRs closed with explanation.
 
 - **L7** (2026-11-14): **WP-1004 delivered** (codemode hosting). Built-in codemode extension hosted with `models: false`
@@ -131,3 +131,19 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   unattended interactive panes; PTY needles now only persistent frames —
   menu answer rides on the progress live line). PR #136 (stacked on
   feat/wp-1005-llama-native).
+- L10: M10 stack (1004+1005+1006) merged into main as 786bcf7 (2026-11-14);
+  stacked PRs #134/#135/#136 all CI green on the stack head — closed with
+  explanation (same stacked-merge pattern as L6).
+- L11: WP-1007 (OAuth credentials) — delivered (2026-11-14). Issue #137.
+  `pi-rust auth login <provider> [--api-key] [--no-browser]` runs the
+  pinned upstream's terminal login flow unmodified in
+  `sidecar/auth-login.mjs` (core relays prompts over NDJSON, owns the TTY);
+  the five upstream oauth providers (radius, kimi-coding, github-copilot,
+  xai, meta) are exposed in the sidecar providers payload and stream via
+  the upstream runtime — stored-credential refresh (5-min margin) +
+  rotated-token write-back run sidecar-side, no token crosses the wire;
+  core drivers keep a precise typed error for oauth credentials.
+  Acceptance: PTY login e2e (api_key path, no key in output), oauth
+  refresh e2e (mocked KIMI_CODE_OAUTH_HOST, rotated auth.json, typed 401,
+  redaction), in-crate typed-error tests. No bridge protocol bump
+  (payload-only extension, same wire shapes).
