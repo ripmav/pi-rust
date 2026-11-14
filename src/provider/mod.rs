@@ -215,9 +215,280 @@ impl ModelDriver for Arc<AnthropicDriver> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WP-904: provider error classes + one automatic retry.
+
+/// Classified provider failure. The user message never contains the API key
+/// or a URL (redaction requirement).
+#[derive(Clone, Debug)]
+pub enum ProviderFailure {
+    /// Non-retryable HTTP error (401/403 and the other 4xx).
+    Http { status: u16, body: String },
+    /// HTTP 429 — retryable once, honoring Retry-After.
+    RateLimited { retry_after_secs: u64, body: String },
+    /// HTTP 5xx — retryable once.
+    Server { status: u16, body: String },
+    /// Transport-level failure (connect/timeout/reset) — retryable once.
+    Network { detail: String },
+}
+
+impl ProviderFailure {
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::Server { .. } | Self::Network { .. }
+        )
+    }
+
+    /// Delay before the single automatic retry (Retry-After capped, else 1s).
+    pub fn backoff(&self) -> std::time::Duration {
+        match self {
+            Self::RateLimited {
+                retry_after_secs, ..
+            } => std::time::Duration::from_secs((*retry_after_secs).min(30)),
+            _ => std::time::Duration::from_secs(1),
+        }
+    }
+
+    /// Actionable, redacted user-facing message.
+    pub fn message(&self, name: &str) -> String {
+        let clip = |b: &str| b.chars().take(160).collect::<String>();
+        match self {
+            Self::Http { status, body } => {
+                if *status == 401 || *status == 403 {
+                    let mut m = format!(
+                        "provider {name} rejected the API key (HTTP {status}) — check the stored credential or the environment variable"
+                    );
+                    if !body.is_empty() {
+                        m.push_str(&format!(" (provider: {})", clip(body)));
+                    }
+                    m
+                } else {
+                    let mut m = format!("provider {name} error (HTTP {status})");
+                    if !body.is_empty() {
+                        m.push_str(&format!(": {}", clip(body)));
+                    }
+                    m
+                }
+            }
+            Self::RateLimited { retry_after_secs, body } => {
+                let mut m = format!(
+                    "provider {name} rate limit (HTTP 429) — one automatic retry also hit the limit; try again in ~{retry_after_secs}s"
+                );
+                if !body.is_empty() {
+                    m.push_str(&format!(" (provider: {})", clip(body)));
+                }
+                m
+            }
+            Self::Server { status, body } => {
+                let mut m = format!(
+                    "provider {name} returned HTTP {status} — one automatic retry also failed"
+                );
+                if !body.is_empty() {
+                    m.push_str(&format!(" (provider: {})", clip(body)));
+                }
+                m
+            }
+            Self::Network { detail } => format!(
+                "network error talking to provider {name} ({detail}) — one automatic retry also failed"
+            ),
+        }
+    }
+}
+
+/// Send a provider request with ONE automatic retry for transient failures
+/// (429 honoring Retry-After, 5xx, network errors). `build` recreates the
+/// request per attempt (`send` consumes the builder).
+pub async fn send_with_retry(
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ProviderFailure> {
+    for attempt in 0..2u8 {
+        let failure = match build().send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(5);
+                let body = resp.text().await.unwrap_or_default();
+                match status.as_u16() {
+                    429 => ProviderFailure::RateLimited {
+                        retry_after_secs: retry_after,
+                        body,
+                    },
+                    s if (500..600).contains(&s) => ProviderFailure::Server { status: s, body },
+                    s => ProviderFailure::Http { status: s, body },
+                }
+            }
+            Err(e) => {
+                let detail = if e.is_timeout() {
+                    "timeout"
+                } else if e.is_connect() {
+                    "connection failed"
+                } else {
+                    "request failed"
+                };
+                ProviderFailure::Network {
+                    detail: detail.into(),
+                }
+            }
+        };
+        if !failure.retryable() || attempt == 1 {
+            return Err(failure);
+        }
+        tokio::time::sleep(failure.backoff()).await;
+    }
+    unreachable!("the loop returns on attempt 0 or 1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// HTTP mock: serves queued (status, retry-after, body) per request and
+    /// counts the requests. One request per connection (the test clients do
+    /// not pool).
+    fn status_mock(
+        responses: Vec<(u16, Option<u64>, &str)>,
+        max: usize,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let responses: Vec<(u16, Option<u64>, String)> = responses
+            .into_iter()
+            .map(|(st, ra, b)| (st, ra, b.to_string()))
+            .collect();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for n in 0..max {
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = vec![0u8; 65536];
+                let mut have = 0usize;
+                while !buf[..have].windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf[have..]) {
+                        Ok(k) if k > 0 => have += k,
+                        _ => break,
+                    }
+                    if have == buf.len() {
+                        buf.resize(have * 2, 0);
+                    }
+                }
+                if have == 0 {
+                    break;
+                }
+                let (status, retry_after, body) = responses[n % responses.len()].clone();
+                hits2.fetch_add(1, Ordering::SeqCst);
+                let mut resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n",
+                    body.len()
+                );
+                if let Some(secs) = retry_after {
+                    resp += &format!("retry-after: {secs}\r\n");
+                }
+                resp += "\r\n";
+                resp += &body;
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        (base, hits)
+    }
+
+    const ECHO_SSE: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"echo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    fn test_convo() -> Vec<Value> {
+        vec![json!({"role":"user","content":[{"type":"text","text":"hi"}]})]
+    }
+
+    /// WP-904: 401 → key guidance, no retry, redacted.
+    #[tokio::test]
+    async fn wp904_401_fails_fast_with_key_guidance() {
+        let (base, hits) = status_mock(vec![(401, None, "Invalid API key provided")], 4);
+        let d = OpenAiDriver::new(base, "SECRET-KEY-123".into(), "gpt-4o-mini".into());
+        let err = d
+            .complete(&test_convo(), Box::new(|_| {}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rejected the API key"), "{err}");
+        assert!(!err.contains("SECRET-KEY-123"), "redaction: {err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "401 must not be retried");
+    }
+
+    /// WP-904: 429 honors Retry-After, the retry succeeds.
+    #[tokio::test]
+    async fn wp904_429_honors_retry_after_then_succeeds() {
+        let (base, hits) = status_mock(vec![(429, Some(1), "slow down"), (200, None, ECHO_SSE)], 4);
+        let d = OpenAiDriver::new(base, "k".into(), "gpt-4o-mini".into());
+        let t = std::time::Instant::now();
+        let turn = d
+            .complete(&test_convo(), Box::new(|_| {}))
+            .await
+            .expect("the retried request succeeds");
+        assert!(
+            t.elapsed() >= std::time::Duration::from_millis(900),
+            "retry-after not honored: {:?}",
+            t.elapsed()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(turn.text.as_deref(), Some("echo"));
+    }
+
+    /// WP-904: 429 twice → rate-limit guidance after the one retry.
+    #[tokio::test]
+    async fn wp904_429_twice_fails_with_rate_limit_guidance() {
+        let (base, hits) = status_mock(vec![(429, Some(1), "slow down")], 4);
+        let d = OpenAiDriver::new(base, "k".into(), "gpt-4o-mini".into());
+        let err = d
+            .complete(&test_convo(), Box::new(|_| {}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rate limit") && err.contains("429"), "{err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "exactly one retry");
+    }
+
+    /// WP-904: 5xx twice → one retry, then a clean failure.
+    #[tokio::test]
+    async fn wp904_5xx_retries_once_then_fails() {
+        let (base, hits) = status_mock(vec![(500, None, "boom")], 4);
+        let d = OpenAiDriver::new(base, "k".into(), "gpt-4o-mini".into());
+        let err = d
+            .complete(&test_convo(), Box::new(|_| {}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HTTP 500") && err.contains("retry"), "{err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "exactly one retry");
+    }
+
+    /// WP-904: redaction — no key and no creds-bearing URL in error text.
+    #[tokio::test]
+    async fn wp904_redaction_never_leaks_key_or_url_creds() {
+        let (base, _hits) = status_mock(vec![(401, None, "nope")], 4);
+        let port = base.rsplit_once(':').unwrap().1;
+        let creds_base = format!("http://user:pass@127.0.0.1:{port}");
+        let d = OpenAiDriver::new(creds_base, "SECRET-KEY-123".into(), "gpt-4o-mini".into());
+        let err = d
+            .complete(&test_convo(), Box::new(|_| {}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("SECRET-KEY-123"), "key leaked: {err}");
+        assert!(!err.contains("user:pass@"), "url creds leaked: {err}");
+        assert!(err.contains("rejected the API key"), "{err}");
+    }
 
     #[test]
     fn build_cloudflare_requires_account_and_gateway() {
@@ -366,62 +637,70 @@ pub(crate) mod mock {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let (mut sock, _) = match listener.accept().await {
-                Ok(x) => x,
-                Err(_) => return,
-            };
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
+            let mut recorded = false;
             loop {
-                match sock.read(&mut tmp).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        let s = String::from_utf8_lossy(&buf);
-                        if let Some(h) = s.find("\r\n\r\n") {
-                            let head = &s[..h];
-                            let len = head
-                                .lines()
-                                .find_map(|l| {
-                                    let lower = l.to_lowercase();
-                                    lower
-                                        .strip_prefix("content-length:")
-                                        .and_then(|v| v.trim().parse::<usize>().ok())
-                                })
-                                .unwrap_or(0);
-                            if buf.len() >= h + 4 + len {
-                                break;
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 8192];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            let s = String::from_utf8_lossy(&buf);
+                            if let Some(h) = s.find("\r\n\r\n") {
+                                let head = &s[..h];
+                                let len = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        let lower = l.to_lowercase();
+                                        lower
+                                            .strip_prefix("content-length:")
+                                            .and_then(|v| v.trim().parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                                if buf.len() >= h + 4 + len {
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                let s = String::from_utf8_lossy(&buf).to_string();
+                let head = s.split("\r\n\r\n").next().unwrap_or("").to_string();
+                let body = s
+                    .split_once("\r\n\r\n")
+                    .map(|x| x.1.to_string())
+                    .unwrap_or_default();
+                let first = head.lines().next().unwrap_or_default();
+                let mut parts = first.split_whitespace();
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_string(),
+                    parts.next().unwrap_or("").to_string(),
+                );
+                let headers: Vec<String> = head
+                    .lines()
+                    .skip(1)
+                    .map(|l| l.trim().to_lowercase())
+                    .collect();
+                // Record only the first request: test channels are sized 1 and
+                // a full channel would stall the mock on a retried request.
+                if !recorded {
+                    let _ = tx
+                        .send(format!(
+                            "{method} {path}\n{}\n---\n{body}",
+                            headers.join("\n")
+                        ))
+                        .await;
+                    recorded = true;
+                }
+                let _ = sock.write_all(&response).await;
+                let _ = sock.shutdown().await;
             }
-            let s = String::from_utf8_lossy(&buf).to_string();
-            let head = s.split("\r\n\r\n").next().unwrap_or("").to_string();
-            let body = s
-                .split_once("\r\n\r\n")
-                .map(|x| x.1.to_string())
-                .unwrap_or_default();
-            let first = head.lines().next().unwrap_or_default();
-            let mut parts = first.split_whitespace();
-            let (method, path) = (
-                parts.next().unwrap_or("").to_string(),
-                parts.next().unwrap_or("").to_string(),
-            );
-            let headers: Vec<String> = head
-                .lines()
-                .skip(1)
-                .map(|l| l.trim().to_lowercase())
-                .collect();
-            let _ = tx
-                .send(format!(
-                    "{method} {path}\n{}\n---\n{body}",
-                    headers.join("\n")
-                ))
-                .await;
-            let _ = sock.write_all(&response).await;
-            let _ = sock.shutdown().await;
         });
         format!("http://{addr}")
     }

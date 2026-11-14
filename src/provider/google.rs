@@ -171,19 +171,14 @@ impl GoogleDriver {
             self.base_url.trim_end_matches('/'),
             self.model
         );
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("google request failed: {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("google api error {status}: {text}");
-        }
+        let resp = super::send_with_retry(|| {
+            self.client
+                .post(&url)
+                .header("x-goog-api-key", &self.api_key)
+                .json(&body)
+        })
+        .await
+        .map_err(|f| anyhow::anyhow!("{}", f.message("google")))?;
         let mut text = String::new();
         let mut text_started = false;
         let mut tool_calls: Vec<ToolCallSpec> = Vec::new();
