@@ -639,6 +639,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				const tool = state.tools.get(command.toolName);
 				if (!tool) return response(id, type, false, undefined, `Unknown extension tool: ${command.toolName}`);
 				const result = await tool.execute(command.toolCallId, command.input ?? {}, undefined, undefined);
+				// WP-1003 fix: the tool's execute may have changed the active
+				// set (setActiveTools); flush before the response so the core's
+				// drain barrier applies it (decisions flush the same way — the
+				// setImmediate alone races the next turn under load).
+				flushToolsEventsNow();
 				return response(id, type, true, result);
 			}
 			// Returns the final input so the core executes the post-mutation arguments (in-place mutation, no re-validation).
