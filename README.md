@@ -486,8 +486,10 @@ upstream/       earendil-works/pi @ 085c84e (gitignored reference clone)
   error. Error text is redacted: provider name + status + clipped body,
   never the key or the URL.
 - **Bench/regression noise in CI** — the CI `bench` job compares against
-  `benches/baseline.json` with a 20% band; refresh the baseline (re-run +
-  commit) on toolchain bumps or new hardware, not on every flake.
+  `benches/baseline.json` with a per-metric band (timing/throughput 20%,
+  idle RSS 50% — shared runners jitter RSS ±1.5 MB); refresh the
+  baseline (re-run + commit) on toolchain bumps or new hardware, not on
+  every flake.
 
 ## Roadmap status
 
