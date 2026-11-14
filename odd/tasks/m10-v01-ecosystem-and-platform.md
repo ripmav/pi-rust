@@ -134,7 +134,7 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
 - L10: M10 stack (1004+1005+1006) merged into main as 786bcf7 (2026-11-14);
   stacked PRs #134/#135/#136 all CI green on the stack head — closed with
   explanation (same stacked-merge pattern as L6).
-- L11: WP-1007 (OAuth credentials) — delivered (2026-11-14). Issue #137, PR #138 (commits 16ef9fd, 0ccec70, 66b4222, sizes 662+266+50).
+- L11: WP-1007 (OAuth credentials) — delivered (2026-11-14). Issue #137, PR #138 (commits 16ef9fd, 0ccec70, 66b4222, sizes 662+266+50; docs d480735; race-fix 2493616).
   `pi-rust auth login <provider> [--api-key] [--no-browser]` runs the
   pinned upstream's terminal login flow unmodified in
   `sidecar/auth-login.mjs` (core relays prompts over NDJSON, owns the TTY);
@@ -147,3 +147,8 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   refresh e2e (mocked KIMI_CODE_OAUTH_HOST, rotated auth.json, typed 401,
   redaction), in-crate typed-error tests. No bridge protocol bump
   (payload-only extension, same wire shapes).
+  First CI push failed on both platforms — both races root-caused and
+  fixed in 2493616: (a) macOS secret echo (prompt before raw mode),
+  (b) ubuntu stale active-set declaration (tools_activated drain barrier
+  at run/turn start — existing WP-1003 mechanism gap, surfaced by the
+  heavier WP-1007 sidecar init under CI load).

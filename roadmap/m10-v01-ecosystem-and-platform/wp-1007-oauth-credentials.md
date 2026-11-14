@@ -85,3 +85,19 @@ pinned upstream does.
   table + v0-limit note updated.
 - **Non-oauth regression** — the api_key path is unchanged (existing
   resolve tests + full suite green).
+- **CI-found race fixes** (commit 2493616, first push failed on both
+  platforms — root-caused, not flake-waved):
+  - macOS `auth login` secret echo: prompt was printed before
+    `enable_raw_mode`, so the first input bytes were terminal-echoed and
+    the key leaked into the output. Raw mode is now enabled before the
+    prompt; the PTY e2e's key-in-output check pins it.
+  - ubuntu dropped activation: an extension tool's `setActiveTools`
+    flushes `tools_activated` before its `extension_tool_call` response,
+    but the response could wake the agent loop before `event_task`
+    applied the queued event (stale `before_agent_start` declaration,
+    `wp1003_deferred_tool_activated_mid_run`). The agent loop now drains
+    queued sidecar events (existing `sync_tool_set` barrier) before a
+    run's declaration and at every turn start (`build_conversation`
+    reads the active set); agent-loop context only, no self-deadlock.
+  - Post-fix: full suite green (276/2/1/45/4/3/4), smoke 74,
+    fmt + clippy clean; wp1003 3/3 + full-suite-under-load 3/3 locally.
