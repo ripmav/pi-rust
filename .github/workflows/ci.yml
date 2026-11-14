@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build.rs reads the upstream model catalog, which the upstream build
       # generates from TS source into packages/ai/src/providers/data.
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
         uses: actions/cache@v4
@@ -201,7 +201,7 @@ jobs:
     steps:
       - name: Container deps
         run: apt-get update -qq && apt-get install -y -qq build-essential pkg-config python3 git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Build upstream (README "From source", step 1)
         run: |
