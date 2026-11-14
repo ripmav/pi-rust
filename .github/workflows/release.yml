@@ -61,15 +61,24 @@ jobs:
           targets: ${{ join(matrix.targets, ' ') }}
       - uses: Swatinem/rust-cache@v2
 
-      # musl cross: the TLS crate stack compiles C (cc-rs).
-      - name: Install aarch64 musl cross toolchain (linux job)
+      # musl cross: the TLS crate stack compiles C (cc-rs). Ubuntu 24.04 has
+      # no musl-cross apt package (Debian only) — cross (docker) provides the
+      # musl toolchain; pinned prebuilt CLI.
+      - name: Install cross (musl target, linux job)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq aarch64-linux-musl-cross
+        run: |
+          curl -sSL --retry 3 https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz -o /tmp/cross.tar.gz
+          tar xzf /tmp/cross.tar.gz -C /tmp
+          install /tmp/cross /usr/local/bin/cross
 
       - name: Build release targets
         run: |
           for t in ${{ join(matrix.targets, ' ') }}; do
-            cargo build --release --target "$t"
+            if [ "$t" = "aarch64-unknown-linux-musl" ]; then
+              cross build --release --target "$t"
+            else
+              cargo build --release --target "$t"
+            fi
           done
 
       - name: Stage + package
@@ -115,7 +124,33 @@ jobs:
             esac
           done
 
-      - name: Publish release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: dist/*.tar.gz
+
+  publish:
+    # One job publishes: the matrix jobs only build + smoke-check + upload,
+    # so release creation cannot race (staging.4 died on a 422 immutable
+    # upload when two matrix jobs published at once).
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the changelog (git describe --tags)
+      - uses: actions/download-artifact@v4
+        with:
+          name: artifacts-ubuntu-latest
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: artifacts-macos-latest
+          path: dist
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -128,15 +163,5 @@ jobs:
           else
             notes="$(git log --oneline -25 | sed 's/^/- /')"
           fi
-          for f in dist/*.tar.gz install.sh; do
-            if gh release view "$tag" >/dev/null 2>&1; then
-              gh release upload "$tag" "$f" --clobber
-            else
-              # Matrix jobs race on the first create; fall back to upload.
-              if ! gh release create "$tag" --title "pi-rust ${tag}" \
-                    --notes "$notes" $prerelease "$f" 2>/dev/null; then
-                sleep 5
-                gh release upload "$tag" "$f" --clobber
-              fi
-            fi
-          done
+          gh release create "$tag" --title "pi-rust ${tag}" \
+            --notes "$notes" $prerelease dist/*.tar.gz install.sh
