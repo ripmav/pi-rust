@@ -135,6 +135,20 @@ struct BashCapture {
 impl BashCapture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("pi-bash-{}.log", uuid::Uuid::new_v4()));
+        // WP-906: the log can hold echoed secrets — owner-only even though
+        // it lives in the shared temp dir (File::create defaults to 0644).
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .ok()
+        };
+        #[cfg(not(unix))]
         let file = std::fs::File::create(&path).ok();
         Self {
             tail: Vec::new(),
@@ -1764,6 +1778,26 @@ mod tests {
     }
 
     // ---- WP-504: bash tool, mirroring the pinned upstream behavior (bash.ts @ 085c84e) ----
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_capture_full_log_is_owner_only() {
+        // WP-906: the log can hold echoed secrets — 0600 even in the shared
+        // temp dir, and the finish() cleanup still removes it.
+        use std::os::unix::fs::PermissionsExt;
+        let c = BashCapture::new();
+        let path = c.path.clone();
+        let m = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            m & 0o777,
+            0o600,
+            "bash full-output log must be 0600, got {:o}",
+            m & 0o777
+        );
+        let (_, truncation) = c.finish();
+        assert!(truncation.is_none(), "no data -> no truncation");
+        assert!(!path.exists(), "finish must still remove the log");
+    }
 
     /// The `fullOutputPath` details entry (truncated output only).
     fn full_output_path(r: &ExecResult) -> Option<PathBuf> {
