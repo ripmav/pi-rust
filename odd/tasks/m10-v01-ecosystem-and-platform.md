@@ -58,16 +58,16 @@ quoted per WP:
   released)."
 
 ## Tasks
-- T1 / WP-1001 — Upstream pin refresh (085c84e → origin/main) — S2.1 — branch `feat/wp-1001-upstream-pin` — PR #—
-- T2 / WP-1002 — v0.1.0 release — S2.2 — branch `feat/wp-1002-v010-release` — PR #—
-- T3 / WP-1003 — tool-search activation (active-set wire event) — S2.3 — branch `feat/wp-1003-tool-search` — PR #—
-- T4 / WP-1004 — Codemode hosting (factory + model-call bridge) — S2.4 — branch `feat/wp-1004-codemode` — PR #—
-- T5 / WP-1005 — Llama native provider capture — S2.5 — branch `feat/wp-1005-llama-native` — PR #—
-- T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — branch `feat/wp-1006-ui-custom-pane` — PR #—
-- T7 / WP-1007 — OAuth credential support — S2.7 — branch `feat/wp-1007-oauth` — PR #—
-- T8 / WP-1008 — Windows support — S2.8 — branch `feat/wp-1008-windows` — PR #—
-- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — branch `feat/wp-1009-tui-parity` — PR #—
-- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — branch `feat/wp-1010-m10-close` — PR #—
+- T1 / WP-1001 — Upstream pin refresh (085c84e → origin/main) — S2.1 — issue #121 — branch `feat/wp-1001-upstream-pin` — PR #122
+- T2 / WP-1002 — v0.1.0 release — S2.2 — issue #123 — branch `feat/wp-1002-v010-release` — PR #—
+- T3 / WP-1003 — tool-search activation (active-set wire event) — S2.3 — issue #124 — branch `feat/wp-1003-tool-search` — PR #—
+- T4 / WP-1004 — Codemode hosting (factory + model-call bridge) — S2.4 — issue #125 — branch `feat/wp-1004-codemode` — PR #—
+- T5 / WP-1005 — Llama native provider capture — S2.5 — issue #126 — branch `feat/wp-1005-llama-native` — PR #—
+- T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — issue #127 — branch `feat/wp-1006-ui-custom-pane` — PR #—
+- T7 / WP-1007 — OAuth credential support — S2.7 — issue #128 — branch `feat/wp-1007-oauth` — PR #—
+- T8 / WP-1008 — Windows support — S2.8 — issue #129 — branch `feat/wp-1008-windows` — PR #—
+- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #—
+- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
 
 ## Log
 L1 (user, 2026-11-14): "perfekt. Wo sollen wir weiter machen?" → choice:
