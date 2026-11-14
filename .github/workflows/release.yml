@@ -1,0 +1,181 @@
+# M9/WP-903: release pipeline.
+# Tag `v*` (staging tags like v0.0.0-staging.1 use the same path) ->
+# GitHub release with per-architecture tarballs + generated changelog.
+#
+# Package layout (the sidecar resolves ../upstream relative to itself):
+#   pi-rust-<tag>/
+#     pi-rust            (stripped release binary)
+#     sidecar/           (the bridge + original loader wiring)
+#     upstream/          (built pinned upstream tree, dev deps pruned)
+name: release
+
+# gh release (the gh CLI ships on the runners) publishes the artifacts —
+# no third-party release action (softprops/action-github-release vanished
+# from GitHub; 404 at resolve time).
+permissions:
+  contents: write
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  UPSTREAM_SHA: "085c84e98e7f4c950f2be606466fff4f75d8fe7c"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"]
+          - os: macos-latest
+            targets: ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # The sidecar runs the ORIGINAL upstream loader: the package ships the
+      # pinned, built upstream tree (dev deps pruned for size).
+      - name: Fetch pinned upstream
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Upstream npm install + build
+        working-directory: upstream
+        run: |
+          npm ci
+          npm run build
+          npm prune --omit=dev
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ join(matrix.targets, ' ') }}
+      - uses: Swatinem/rust-cache@v2
+
+      # musl cross: the TLS crate stack compiles C (cc-rs). Ubuntu 24.04 has
+      # no musl-cross apt package (Debian only) — cross (docker) provides the
+      # musl toolchain; pinned prebuilt CLI.
+      - name: Install cross (musl target, linux job)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sSL --retry 3 https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz -o /tmp/cross.tar.gz
+          tar xzf /tmp/cross.tar.gz -C /tmp
+          install /tmp/cross /usr/local/bin/cross
+
+      - name: Build release targets
+        run: |
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            if [ "$t" = "aarch64-unknown-linux-musl" ]; then
+              cross build --release --target "$t"
+            else
+              cargo build --release --target "$t"
+            fi
+          done
+
+      - name: Stage + package
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            f="target/$t/release/pi-rust"
+            file "$f" # diagnostic: what did the toolchain actually produce
+            # best effort: a cross-produced binary the host strip cannot read
+            # still ships (unstripped) — the smoke check below is the gate.
+            strip "$f" || echo "WARN: strip failed for $t, packaging unstripped"
+            name="pi-rust-${tag}-${t}"
+            mkdir -p "dist/${name}"
+            install -m 0755 "target/${t}/release/pi-rust" "dist/${name}/pi-rust"
+            cp -r sidecar "dist/${name}/sidecar"
+            mkdir -p "dist/${name}/upstream"
+            cp -r upstream/packages upstream/node_modules upstream/package.json "dist/${name}/upstream/"
+            tar -czf "dist/${name}.tar.gz" -C dist "$name"
+            echo "${name}.tar.gz: $(du -h "dist/${name}.tar.gz" | cut -f1)"
+          done
+
+      # Acceptance: the release artifacts install and run (smoke scenario).
+      # Cross targets run under qemu (linux) / Rosetta (macOS x86_64).
+      - name: Smoke-check artifacts
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # check <dir> [runner...]: run the artifact's pi-rust (under an
+          # optional qemu/Rosetta runner) and expect the fake echo.
+          # The runner is a command prefix — never an argument to the binary.
+          check() {
+            dir="$1"; shift
+            agent_dir="$(mktemp -d)"
+            err="$(mktemp)"
+            rc=0
+            out="$("$@" "$dir/pi-rust" --provider fake --prompt hi --agent-dir "$agent_dir" 2>"$err")" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "smoke FAIL (exit $rc): $dir"
+              head -10 "$err"
+              return 1
+            fi
+            case "$out" in
+              *"echo: hi"*) echo "smoke OK: $dir" ;;
+              *) echo "smoke FAIL: $dir"; printf '%s\n' "$out" | head -5; head -10 "$err"; return 1 ;;
+            esac
+          }
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            name="pi-rust-${tag}-${t}"
+            case "$t" in
+              x86_64-unknown-linux-gnu) check "dist/$name" ;;
+              aarch64-unknown-linux-musl)
+                sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
+                check "dist/$name" qemu-aarch64 # static musl binary under qemu
+                ;;
+              aarch64-apple-darwin) check "dist/$name" ;;
+              x86_64-apple-darwin) check "dist/$name" ;; # Rosetta on the arm64 runner
+            esac
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: dist/*.tar.gz
+
+  publish:
+    # One job publishes: the matrix jobs only build + smoke-check + upload,
+    # so release creation cannot race (staging.4 died on a 422 immutable
+    # upload when two matrix jobs published at once).
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the changelog (git describe --tags)
+      - uses: actions/download-artifact@v4
+        with:
+          name: artifacts-ubuntu-latest
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: artifacts-macos-latest
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$tag" in *staging*) prerelease="--prerelease";; esac
+          prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            notes="$(git log --oneline "${prev}..HEAD" | sed 's/^/- /')"
+          else
+            notes="$(git log --oneline -25 | sed 's/^/- /')"
+          fi
+          gh release create "$tag" --title "pi-rust ${tag}" \
+            --notes "$notes" $prerelease dist/*.tar.gz install.sh
