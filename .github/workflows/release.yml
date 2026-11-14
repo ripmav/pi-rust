@@ -46,7 +46,7 @@ jobs:
           git -C upstream remote add origin https://github.com/earendil-works/pi.git
           git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
           git -C upstream checkout --detach FETCH_HEAD
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
       - name: Upstream npm install + build
