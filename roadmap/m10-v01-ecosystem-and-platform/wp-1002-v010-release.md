@@ -34,13 +34,14 @@ pipeline (M9/WP-903) is proven; this converts it into a stable tag.
   install.sh; per-target smoke in CI (aarch64 under QEMU).
 - Curated notes via RELEASE_NOTES.md (workflow uses it when present at the
   tagged commit; commit-list fallback kept).
-- `--version` flag added (WP-1002 delta): prints `pi-rust 0.1.0`; USAGE +
-  docs/cli-reference.md fence updated in lockstep (cli_help diff-test
-  green).
+- `--version` flag added on this branch (WP-1002 delta): prints
+  `pi-rust 0.1.0`; USAGE + docs/cli-reference.md fence updated in
+  lockstep (cli_help diff-test green). The published v0.1.0 tag points
+  at the release-prep commit (GitHub refuses tag deletion while a
+  release exists and force-push is guarded), so `--version` ships with
+  v0.2.0 (WP-1010); the published v0.1.0 notes make no --version claim.
 - Install→run from the **published artifact** (no container runtime on the
   dev box — the CI fresh-clone job + release build jobs are the clean-OS
   proof): isolated scratch HOME/PI_RUST_INSTALL_ROOT/PI_RUST_BIN_DIR,
   install.sh from the release download URL, then `--version` + one-shot
   fake turn (session file written, clean exit) — green.
-- Tag re-cut onto the `--version` commit; release re-run (second cut of the
-  same new release, no users involved).

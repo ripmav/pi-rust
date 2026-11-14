@@ -32,6 +32,8 @@ curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI
 Targets: Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64.
 Requires bash, curl, tar and **node ≥ 22.19**.
 
+Verify: `pi-rust --version` → `pi-rust 0.1.0`.
+
 From source: see the README ("From source (fresh clone)") — the CI
 `fresh-clone` job follows that recipe in a clean container on every push.
 
