@@ -95,3 +95,17 @@ L9 (2026-11-14, el Gentleman — native review of the M9 stack head):
   12153d30). Advisory findings (non-blocking, follow-up work, recorded
   in the WP-907 file): R2-001/R2-004 (ci.yml), R2-002 (src/config.rs
   330-332), R2-003 (src/tools.rs 141-150), R3-UPSTREAM-SHA (ci.yml:210).
+
+L10 (2026-11-14, el Gentleman — M9 close):
+- All seven WPs delivered (901 CI, 902 clippy/fmt, 903 releases, 904
+  error UX, 905 perf baseline, 906 security audit, 907 docs).
+- Stack #110–#116 (901→907, bottom-up) all CI-green at close time;
+  staging.8 published (4 targets + install.sh, aarch64 smoke under
+  qemu).
+- Native review of the stack head (36a8e28..907): approved
+  (review-265b589651f56ede, L9); the 906 fix itself was reviewed
+  earlier (review-ff617ec3ad6b84bc).
+- Suite at chain head: 271 in-crate, 1 cli-help, 38 e2e, 4 rpc, 3 PTY,
+  3 skills, 68 sidecar smoke — all green.
+- Follow-ups (non-blocking advisories from the stack-head review, see
+  WP-907 file): R2-001/R2-004, R2-002, R2-003, R3-UPSTREAM-SHA.
