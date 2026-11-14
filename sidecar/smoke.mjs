@@ -253,7 +253,7 @@ async function main() {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 4,
+			protocolVersion: 5,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -264,6 +264,15 @@ async function main() {
 		check("ready tools incl. with-deps npm-dep proof", toolNames.includes("hello") && toolNames.includes("parse_duration"), toolNames);
 		const hello = ready.tools.find((t) => t.name === "hello");
 		check("hello keeps TypeBox schema", hello?.parameters?.type === "object" && hello?.parameters?.properties?.name?.type === "string", hello?.parameters);
+		// WP-1003 (v5): the active set + exposure/defaultActive are on the wire.
+		const toolSearch = ready.tools.find((t) => t.name === "tool_search");
+		check("ready carries activeTools array", Array.isArray(ready.activeTools), ready.activeTools);
+		check(
+			"tool_search registered inactive (model-only, defaultActive false)",
+			toolSearch?.exposure === "model-only" && toolSearch?.defaultActive === false && !ready.activeTools.includes("tool_search"),
+			toolSearch,
+		);
+		check("hello is active in ready.activeTools", ready.activeTools.includes("hello"), ready.activeTools);
 		check("ready commands incl. emit", ready.commands.some((c) => c.name === "emit"), ready.commands);
 		check("ready flags incl. probe", ready.flags.some((f) => f.name === "probe" && f.default === true), ready.flags);
 		check(
@@ -271,7 +280,7 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 8 extensions (7 + builtin mcp), no errors", ready.extensions.length === 8 && ready.errors.length === 0, ready.errors);
+		check("ready lists 9 extensions (7 + builtin mcp + builtin tool-search), no errors", ready.extensions.length === 9 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
@@ -524,7 +533,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 4,
+			protocolVersion: 5,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -567,15 +576,15 @@ async function main() {
 		const core3 = new FakeCore(child3);
 		const init3 = await core3.request({
 			type: "init",
-			protocolVersion: 4,
+			protocolVersion: 5,
 			capabilities: { ui: [], timeoutMs: 5000 },
 		});
 		check("gitlab-duo sidecar init", init3.success === true, init3);
 		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
 		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
 		check(
-			"gitlab-duo loads unmodified (1 user extension + builtin mcp, no errors)",
-			ready3.extensions.length === 2 && ready3.errors.length === 0,
+			"gitlab-duo loads unmodified (1 user extension + builtins mcp + tool-search, no errors)",
+			ready3.extensions.length === 3 && ready3.errors.length === 0,
 			ready3.errors,
 		);
 		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
@@ -603,7 +612,7 @@ async function main() {
 		const core4 = new FakeCore(child4);
 		const init4 = await core4.request({
 			type: "init",
-			protocolVersion: 4,
+			protocolVersion: 5,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			mcpConfig: {
 				mcpServers: {
@@ -640,7 +649,7 @@ async function main() {
 		const core5 = new FakeCore(child5);
 		const init5 = await core5.request({
 			type: "init",
-			protocolVersion: 4,
+			protocolVersion: 5,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			keybindings: { "app.clear": ["ctrl+c"] },
 		});

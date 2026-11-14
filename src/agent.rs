@@ -138,6 +138,9 @@ pub struct Core {
     pub session: Arc<Session>,
     pub events: Arc<Mutex<HashSet<String>>>, // ready.events (subscribed event names)
     pub ext_tools: Arc<Mutex<Vec<Value>>>,   // ready.tools entries (pass-through schemas)
+    /// WP-1003 (protocol v5): active extension tool names (ready.activeTools /
+    /// tools_activated). The model-visible ext set = ext_tools ∩ active.
+    pub ext_active_tools: Arc<Mutex<Vec<String>>>,
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
@@ -245,11 +248,13 @@ pub async fn event_task(
     ctx: Arc<Core>,
 ) {
     loop {
-        // The events branch is listed FIRST: a queued sidecar event is
-        // processed before a drain ping is answered, which is what makes
-        // `sync_tool_set` a real "everything written before the ping is
-        // applied" barrier (WP-702).
+        // The events branch is listed FIRST and `biased` pins that priority:
+        // a queued sidecar event is processed before a drain ping is answered,
+        // which is what makes `sync_tool_set` a real "everything written before
+        // the ping is applied" barrier (WP-702; WP-1003 relies on it for
+        // `tools_activated` emitted before decision responses).
         tokio::select! {
+            biased;
             ev = events.recv() => {
                 let Some(ev) = ev else { break };
                 match ev.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -259,6 +264,22 @@ pub async fn event_task(
                         .iter().filter_map(Value::as_str).map(str::to_string).collect();
                     ctx.events.lock().unwrap().extend(names.iter().cloned());
                     ctx.ext_tools.lock().unwrap().clone_from(ev.get("tools").and_then(Value::as_array).unwrap_or(&empty));
+                    // WP-1003: initial active set; pre-v5 sidecars (should not
+                    // happen, protocol is lockstep) fall back to all active.
+                    let initial_active = ev
+                        .get("activeTools")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+                        .unwrap_or_else(|| {
+                            ev.get("tools")
+                                .and_then(Value::as_array)
+                                .unwrap_or(&empty)
+                                .iter()
+                                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                                .map(str::to_string)
+                                .collect()
+                        });
+                    ctx.ext_active_tools.lock().unwrap().clone_from(&initial_active);
                     // WP-701: extension-registered models become routable.
                     *ctx.ext_models.lock().unwrap() = parse_providers(&ev);
                     crate::corelog::line(&format!(
@@ -334,6 +355,27 @@ pub async fn event_task(
                     let next = ev.get("tools").and_then(Value::as_array).cloned().unwrap_or_default();
                     crate::corelog::line(&format!("[core] tools_changed: {} extension tool(s)", next.len()));
                     ctx.ext_tools.lock().unwrap().clone_from(&next);
+                    // WP-1003: drop active entries for tools that no longer
+                    // exist (the sidecar sends the matching tools_activated in
+                    // the same tick, which then replaces the set).
+                    let known: Vec<&str> = next.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).collect();
+                    ctx.ext_active_tools.lock().unwrap().retain(|a| known.contains(&a.as_str()));
+                }
+                "tools_activated" => {
+                    // WP-1003 (protocol v5): the active set changed (setActiveTools
+                    // or registration) — the model-visible ext set is filtered
+                    // by it in merged_tool_defs.
+                    let names: Vec<String> = ev
+                        .get("active")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    crate::corelog::line(&format!("[core] tools_activated: {} tool(s) active", names.len()));
+                    ctx.ext_active_tools.lock().unwrap().clone_from(&names);
                 }
                 "set_model_request" => {
                     let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -1704,7 +1746,20 @@ async fn run_compaction(
 /// tools are dropped from the set.
 fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
     let ext = if ctx.client.state() == State::Running {
-        ctx.ext_tools.lock().unwrap().clone()
+        // WP-1003: only ACTIVE extension tools are declared to the model
+        // (upstream: the active set is the set declared to the model).
+        let active = ctx.ext_active_tools.lock().unwrap().clone();
+        ctx.ext_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| active.iter().any(|a| a.as_str() == n))
+            })
+            .cloned()
+            .collect()
     } else {
         Vec::new()
     };
