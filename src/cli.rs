@@ -82,7 +82,10 @@ fn read_image_attachment(path: &Path) -> Result<(String, String)> {
 /// numbers; the fake model has no catalog contextWindow, so the override
 /// drives the auto trigger) and `compact_summary` (the fake's summary text).
 /// Returns (runs, the compact override).
-fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> {
+/// Scenario compaction-trigger override (WP-405).
+type CompactOverride = Option<(u64, u64, u64)>;
+
+fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, CompactOverride)> {
     let user_messages = v
         .get("user_messages")
         .and_then(Value::as_array)
@@ -163,7 +166,36 @@ fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
 }
 
 /// Non-interactive scenario runner (no REPL in v0).
+pub const USAGE: &str = "usage: pi-rust [options]
+
+  --extension-dir <path>    extension directory (repeatable; after the project .pi/extensions and the agent dir)
+  --agent-dir <path>        agent directory (default: $PI_CODING_AGENT_DIR or ~/.pi/agent)
+  --isolated                use a fresh temporary agent dir (hermetic)
+  --scenario <path>         scenario JSON (one of --scenario/--prompt/--template)
+  --prompt <text>           one prompt (one of --scenario/--prompt/--template)
+  --template <name> [args]  expand a prompt template into the prompt (one of the three; args map to $1..$9)
+  --image <path>            attach an image to the prompt (repeatable; png/jpeg/gif/webp; needs --prompt/--template)
+  --provider <id>           model provider (default: settings or fake)
+  --model <id>              model id (default: settings defaultModel)
+  --command <name> [args]   run an extension command after ready (repeatable)
+  --session-file <path>     explicit session file location
+  --resume <file|id>        resume an existing session
+  --fork <file|id>          fork a new session from an existing one
+  --list-sessions           print the session listing as NDJSON, then exit
+  --print-usage             emit a cumulative usage event before the transcript
+  -p, --print               print mode: stdout = final assistant text only (same as --mode text)
+  --mode <m>                text|json|rpc — text = --print; json = upstream-shaped event stream; rpc = the upstream NDJSON command protocol on stdin/stdout (no --prompt/--scenario)
+  --bench                   measure the perf baseline (cold start, idle RSS, bridge throughput), then exit
+  -h, --help                show this help and exit
+
+env: PI_CODING_AGENT_DIR (agent dir, upstream name), PI_RUST_SIDECAR (sidecar entry), PI_RUST_NODE (node binary).
+exit codes: 0 clean · 1 fatal (startup/config) · 2 model-script or shutdown failure · 3 degraded (sidecar crashed mid-run; built-ins kept working)
+";
+
 pub async fn run() -> Result<i32> {
+    // WP-905: cold-start anchor (arg parsing is negligible; sidecar spawn,
+    // node startup and init dominate).
+    let t0 = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
@@ -178,6 +210,7 @@ pub async fn run() -> Result<i32> {
     let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut bench = false;
     let mut image_paths: Vec<PathBuf> = Vec::new();
     let mut out_mode: Option<crate::agent::OutputMode> = None;
     let mut template_name: Option<String> = None;
@@ -189,6 +222,10 @@ pub async fn run() -> Result<i32> {
             args.get(*i).cloned().context("missing value for argument")
         };
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}"); // USAGE already ends with a newline
+                return Ok(0);
+            }
             "--extension-dir" => ext_dirs.push(val(&args, &mut i)?),
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
             "--isolated" => isolated = true,
@@ -201,10 +238,16 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            // WP-905: perf baseline run (no prompt/scenario; exits after
+            // measuring cold start, idle RSS and bridge throughput).
+            "--bench" => bench = true,
             // WP-610: one-shot stdout variants (upstream print-mode parity).
             "-p" | "--print" => {
                 let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
-                anyhow::ensure!(m == crate::agent::OutputMode::Text, "--mode json conflicts with --print (text)");
+                anyhow::ensure!(
+                    m == crate::agent::OutputMode::Text,
+                    "--mode json conflicts with --print (text)"
+                );
                 out_mode = Some(crate::agent::OutputMode::Text);
             }
             "--mode" => {
@@ -215,7 +258,10 @@ pub async fn run() -> Result<i32> {
                     "rpc" => crate::agent::OutputMode::Rpc,
                     other => bail!("invalid --mode '{other}' (valid: text, json, rpc)"),
                 };
-                anyhow::ensure!(out_mode.map(|o| o == m).unwrap_or(true), "--mode conflicts with --print (text)");
+                anyhow::ensure!(
+                    out_mode.map(|o| o == m).unwrap_or(true),
+                    "--mode conflicts with --print (text)"
+                );
                 out_mode = Some(m);
             }
             "--image" => image_paths.push(PathBuf::from(val(&args, &mut i)?)),
@@ -237,7 +283,7 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [-p|--print] [--mode text|json] [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
+            other => bail!("unknown argument: {other}\n{USAGE}"),
         }
         i += 1;
     }
@@ -277,8 +323,7 @@ pub async fn run() -> Result<i32> {
             &home,
         )
     };
-    std::fs::create_dir_all(&agent_dir)
-        .with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+    crate::config::ensure_agent_dir(&agent_dir)?;
 
     // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
     // skills are skipped with a core-log warning (upstream diagnostics).
@@ -326,12 +371,14 @@ pub async fn run() -> Result<i32> {
             None,
         ),
         (None, None) => {
-            if out_mode == Some(crate::agent::OutputMode::Rpc) {
-                (Vec::new(), None) // rpc: prompts arrive over stdin
-            } else if list_sessions {
-                (Vec::new(), None) // --list-sessions needs no scenario
-            } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                (Vec::new(), None) // interactive TUI (WP-601)
+            if out_mode == Some(crate::agent::OutputMode::Rpc)
+                || bench
+                || list_sessions
+                || std::io::IsTerminal::is_terminal(&std::io::stdin())
+            {
+                // rpc: prompts arrive over stdin; --bench / --list-sessions /
+                // interactive TUI: no seeded runs.
+                (Vec::new(), None)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -505,6 +552,7 @@ pub async fn run() -> Result<i32> {
     // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
     let tui_mode = scenario_path.is_none()
         && prompt.is_none()
+        && !bench
         && !list_sessions
         && out_mode != Some(crate::agent::OutputMode::Rpc);
 
@@ -714,6 +762,28 @@ pub async fn run() -> Result<i32> {
                 json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
             );
         }
+    }
+
+    // WP-905: --bench — measure at idle (no model I/O), print one JSON line,
+    // then fall through: no runs are seeded, so the normal shutdown path
+    // ends the process.
+    if bench {
+        let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let rss_mb = bench_rss_mb();
+        let cycles = 200u32;
+        let bt = std::time::Instant::now();
+        for _ in 0..cycles {
+            let req = json!({"event":{"type":"before_agent_start","messageType":"user","prompt":"bench"},
+                "systemPrompt":"","systemPromptOptions":{"cwd":"","selectedTools":[],"sections":{}}});
+            let _ = client.request("before_agent_start", req).await;
+        }
+        let eps = cycles as f64 / bt.elapsed().as_secs_f64().max(1e-9);
+        println!(
+            "{}",
+            json!({"cold_start_ms": (cold_ms * 10.0).round() / 10.0,
+                   "idle_rss_mb": rss_mb,
+                   "bridge_events_per_sec": (eps * 10.0).round() / 10.0})
+        );
     }
 
     // WP-705: extension shortcuts (the sidecar applied the upstream
@@ -1061,9 +1131,9 @@ pub async fn run() -> Result<i32> {
 
     // Final event: the full session (acked: written+flushed before exit).
     // WP-610: print/json keep stdout clean — no usage/transcript events.
-    if ctx.out_mode == crate::agent::OutputMode::Ndjson {
+    if !bench && ctx.out_mode == crate::agent::OutputMode::Ndjson {
         if print_usage {
-            let u = ctx.usage_total.lock().unwrap().clone();
+            let u = *ctx.usage_total.lock().unwrap();
             let cost = *ctx.cost_total.lock().unwrap();
             log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
                 "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
@@ -1145,6 +1215,20 @@ async fn rpc_command_loop(ctx: Arc<crate::agent::Core>) -> i32 {
     }
     let _ = Ordering::SeqCst; // (flag reads happen in handle_rpc_line)
     exit_code
+}
+
+/// WP-905: resident set size in MiB (Linux: /proc/self/status VmRSS;
+/// other platforms: 0 — the CI bench job runs on Linux).
+fn bench_rss_mb() -> f64 {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0.0;
+    };
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .and_then(|l| l.trim().trim_end_matches(" kB").parse::<f64>().ok())
+        .map(|kb| (kb / 1024.0 * 10.0).round() / 10.0)
+        .unwrap_or(0.0)
 }
 
 fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {

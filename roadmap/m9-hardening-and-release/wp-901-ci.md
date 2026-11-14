@@ -1,6 +1,6 @@
 # WP-901 — CI pipeline
 
-**Milestone:** M9 · **Size:** S · **Status:** open · **Depends on:** —
+**Milestone:** M9 · **Size:** S · **Status:** delivered (2026-11-14, PR #110) · **Depends on:** —
 
 ## Goal
 GitHub Actions: `cargo build` + `cargo test` + clippy + `node

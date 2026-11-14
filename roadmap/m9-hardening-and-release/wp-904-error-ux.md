@@ -1,6 +1,6 @@
 # WP-904 — Error UX & retry
 
-**Milestone:** M9 · **Size:** M · **Status:** open · **Depends on:** M2
+**Milestone:** M9 · **Size:** M · **Status:** delivered (2026-11-14, PR #113) · **Depends on:** M2
 
 ## Goal
 Friendly, actionable errors (no raw panics to users): provider 401/429/5xx

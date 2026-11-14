@@ -115,3 +115,104 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  bench:
+    name: bench (baseline compare)
+    # WP-905: perf baseline — cold start to ready, idle RSS, bridge
+    # throughput; fails on a per-metric band vs benches/baseline.json
+    # (timing/throughput 20%, idle RSS 50% — RSS jitters ±1.5 MB across
+    # shared runners, 20% was flaky).
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upstream (pinned clone + npm install + build, cached)
+        id: upstream
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/node_modules
+            upstream/packages
+          key: upstream-085c84e9-ubuntu-latest-v1
+      - name: Fetch pinned upstream (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Upstream npm install + build (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        working-directory: upstream
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release
+      - name: Bench + compare against baseline
+        run: |
+          set +e
+          out="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>bench-stderr.log | grep '"cold_start_ms"')"
+          set -e
+          if [ -z "$out" ]; then
+            echo "bench produced no usable output; stderr:"
+            cat bench-stderr.log
+            exit 1
+          fi
+          echo "$out"
+          python3 - "$out" <<'EOF'
+          import json, sys
+          got = json.loads(sys.argv[1])
+          base = json.load(open("benches/baseline.json"))
+          # Per-metric band: idle RSS is noisy on shared runners (±1.5 MB
+          # jitter on a ~5 MB baseline) — a 50% band still catches real
+          # allocation regressions without flaking on runner variance.
+          BAND = {"idle_rss_mb": 0.5}
+          def band(k): return BAND.get(k, 0.2)
+          bad = []
+          for k, v in base.items():
+              g = got[k]
+              ok = g >= v * (1 - band(k)) if k.endswith("_per_sec") else g <= v * (1 + band(k))
+              if not ok:
+                  bad.append(f"{k}={g} (baseline {v}, >{int(band(k) * 100)}% band)")
+          if bad:
+              print("BENCH REGRESSION:")
+              for b in bad:
+                  print(" -", b)
+              sys.exit(1)
+          print("bench within band of baseline")
+          EOF
+
+  fresh-clone:
+    name: fresh-clone (README in a clean container)
+    # WP-907 acceptance: a fresh-clone setup works by following the README
+    # alone. Container job = clean OS (no preinstalled Rust, no caches);
+    # the steps after the toolchain follow the README "From source" recipe
+    # verbatim. The full suite is covered by the test jobs; here a smoke
+    # subset (fake one-shot, sidecar smoke, CLI reference diff test).
+    runs-on: ubuntu-latest
+    container: node:26-bookworm
+    timeout-minutes: 40
+    steps:
+      - name: Container deps
+        run: apt-get update -qq && apt-get install -y -qq build-essential pkg-config python3 git
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Build upstream (README "From source", step 1)
+        run: |
+          mkdir upstream && git -C upstream init
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+          cd upstream && npm ci --no-audit --no-fund && npm run build
+      - name: Build + smoke (README "From source", step 2 + quickstart)
+        run: |
+          cargo build --release
+          ./target/release/pi-rust --provider fake --prompt "hi"
+          node sidecar/smoke.mjs
+          cargo test --test cli_help

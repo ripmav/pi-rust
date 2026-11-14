@@ -256,6 +256,42 @@ mod agent_dir_tests {
     use super::resolve_agent_dir;
     use std::path::Path;
 
+    #[cfg(unix)]
+    #[test]
+    fn ensure_agent_dir_new_is_owner_only() {
+        use super::ensure_agent_dir;
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("pi-rust-agentdir-{}", uuid::Uuid::new_v4()));
+        ensure_agent_dir(&d).unwrap();
+        let m = std::fs::metadata(&d).unwrap().permissions().mode();
+        assert_eq!(
+            m & 0o777,
+            0o700,
+            "fresh agent dir must be 0700, got {:o}",
+            m & 0o777
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_agent_dir_existing_keeps_mode() {
+        use super::ensure_agent_dir;
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("pi-rust-agentdir2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_agent_dir(&d).unwrap();
+        let m = std::fs::metadata(&d).unwrap().permissions().mode();
+        assert_eq!(
+            m & 0o777,
+            0o755,
+            "pre-existing dir must keep its mode, got {:o}",
+            m & 0o777
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn flag_beats_env_and_home() {
         let p = resolve_agent_dir(
@@ -291,6 +327,24 @@ mod agent_dir_tests {
 
 /// Upstream `getAgentDir` resolution (without the flag, which the caller
 /// passes): env `PI_CODING_AGENT_DIR` > `~/.pi/agent`.
+/// WP-906: create the agent dir; owner-only (0700) when pi-rust created it.
+/// The dir holds auth.json (API keys) and session transcripts, which must not
+/// be world-readable on shared hosts. Pre-existing dirs keep their mode.
+pub fn ensure_agent_dir(path: &std::path::Path) -> Result<()> {
+    let existed = path.exists();
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("creating agent dir {}", path.display()))?;
+    if !existed {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("setting 0700 on agent dir {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn resolve_agent_dir(
     flag: Option<&std::path::Path>,
     env_dir: Option<&str>,
