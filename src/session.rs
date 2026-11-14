@@ -49,7 +49,7 @@ struct Inner {
 
 impl Inner {
     fn write_line(file: &mut File, v: &Value) {
-        let _ = writeln!(file, "{}", v.to_string());
+        let _ = writeln!(file, "{}", v);
         let _ = file.flush();
     }
 
@@ -66,7 +66,9 @@ impl Inner {
         let ts = now_iso();
         let role = msg.get("role").and_then(Value::as_str);
         let e = match role {
-            Some("user" | "assistant" | "toolResult") => json!({"type":"message","id":id,"parentId":self.leaf_id,"timestamp":ts,"message":msg}),
+            Some("user" | "assistant" | "toolResult") => {
+                json!({"type":"message","id":id,"parentId":self.leaf_id,"timestamp":ts,"message":msg})
+            }
             _ => json!({"type":"custom_message","id":id,"parentId":self.leaf_id,"timestamp":ts,
                 "customType":"pi-rust","role":role.unwrap_or("unknown"),"message":msg}),
         };
@@ -82,8 +84,10 @@ impl Inner {
     fn append_entry(&mut self, entry: Value) {
         let custom_type = entry.get("customType").cloned().unwrap_or(json!("pi-rust"));
         let data = entry.get("data").cloned().unwrap_or(Value::Null);
-        self.push(json!({"type":"custom","id":new_entry_id(),"parentId":self.leaf_id,
-            "timestamp":now_iso(),"customType":custom_type,"data":data}));
+        self.push(
+            json!({"type":"custom","id":new_entry_id(),"parentId":self.leaf_id,
+            "timestamp":now_iso(),"customType":custom_type,"data":data}),
+        );
     }
 
     fn set_name(&mut self, name: Option<String>) {
@@ -91,26 +95,34 @@ impl Inner {
             return;
         }
         self.name = name.clone();
-        self.push(json!({"type":"session_info","id":new_entry_id(),"parentId":self.leaf_id,
-            "timestamp":now_iso(),"name":name}));
+        self.push(
+            json!({"type":"session_info","id":new_entry_id(),"parentId":self.leaf_id,
+            "timestamp":now_iso(),"name":name}),
+        );
     }
 
     fn set_thinking_level(&mut self, level: &str) {
-        self.push(json!({"type":"thinking_level_change","id":new_entry_id(),"parentId":self.leaf_id,
-            "timestamp":now_iso(),"thinkingLevel":level}));
+        self.push(
+            json!({"type":"thinking_level_change","id":new_entry_id(),"parentId":self.leaf_id,
+            "timestamp":now_iso(),"thinkingLevel":level}),
+        );
     }
 
     fn set_model(&mut self, provider: &str, model: &str) {
-        self.push(json!({"type":"model_change","id":new_entry_id(),"parentId":self.leaf_id,
-            "timestamp":now_iso(),"provider":provider,"modelId":model}));
+        self.push(
+            json!({"type":"model_change","id":new_entry_id(),"parentId":self.leaf_id,
+            "timestamp":now_iso(),"provider":provider,"modelId":model}),
+        );
     }
 
     fn set_usage(&mut self, usage: &crate::model::Usage, cost_usd: f64) {
-        self.push(json!({"type":"usage","id":new_entry_id(),"parentId":self.leaf_id,
+        self.push(
+            json!({"type":"usage","id":new_entry_id(),"parentId":self.leaf_id,
             "timestamp":now_iso(),
             "usage":{"input":usage.input,"output":usage.output,
                      "cacheRead":usage.cache_read,"cacheWrite":usage.cache_write},
-            "costUsd":cost_usd}));
+            "costUsd":cost_usd}),
+        );
     }
 
     /// WP-704: append a compaction entry (upstream CompactionEntry shape)
@@ -155,8 +167,10 @@ pub fn now_iso() -> String {
 
 /// WP-802: epoch-milliseconds timestamp (the upstream wire form).
 pub fn epoch_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// ISO-8601 UTC from unix seconds (list-sessions `updated`).
@@ -177,14 +191,16 @@ pub fn now_ms() -> u64 {
 /// Upstream `getDefaultSessionDirPath` encoding: `--<cwd>` with the leading
 /// `/` (or `\`) removed and every `/ \ :` replaced by `-`, wrapped in `--`.
 pub fn encode_cwd(cwd: &str) -> String {
-    let stripped = cwd.trim_start_matches(|c| c == '/' || c == '\\');
-    let safe: String = stripped.chars().map(|c| match c {
-        '/' | '\\' | ':' => '-',
-        c => c,
-    }).collect();
+    let stripped = cwd.trim_start_matches(['/', '\\']);
+    let safe: String = stripped
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            c => c,
+        })
+        .collect();
     format!("--{safe}--")
 }
-
 
 // ============================================================================
 // WP-704: context compaction — port of upstream core/compaction (pin 085c84e):
@@ -286,7 +302,11 @@ fn content_chars(content: &Value) -> u64 {
         Value::Array(blocks) => blocks
             .iter()
             .map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => b.get("text").and_then(Value::as_str).map(|t| t.chars().count() as u64).unwrap_or(0),
+                Some("text") => b
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|t| t.chars().count() as u64)
+                    .unwrap_or(0),
                 Some("image") => ESTIMATED_IMAGE_CHARS,
                 _ => 0,
             })
@@ -313,10 +333,26 @@ pub fn estimate_tokens(msg: &Value) -> u64 {
             if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
                 for b in blocks {
                     match b.get("type").and_then(Value::as_str).unwrap_or("") {
-                        "text" => chars += b.get("text").and_then(Value::as_str).map(|t| t.chars().count() as u64).unwrap_or(0),
-                        "thinking" => chars += b.get("thinking").and_then(Value::as_str).map(|t| t.chars().count() as u64).unwrap_or(0),
+                        "text" => {
+                            chars += b
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map(|t| t.chars().count() as u64)
+                                .unwrap_or(0)
+                        }
+                        "thinking" => {
+                            chars += b
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .map(|t| t.chars().count() as u64)
+                                .unwrap_or(0)
+                        }
                         "toolCall" => {
-                            chars += b.get("name").and_then(Value::as_str).map(|n| n.chars().count() as u64).unwrap_or(0);
+                            chars += b
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .map(|n| n.chars().count() as u64)
+                                .unwrap_or(0);
                             // pi-rust session files carry the arguments as `input`
                             // (upstream LLM shape: `arguments`).
                             if let Some(args) = b.get("arguments").or_else(|| b.get("input")) {
@@ -340,16 +376,22 @@ fn assistant_usage_tokens(m: &Value) -> Option<u64> {
     if m.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    if m.get("stopReason").and_then(Value::as_str).is_some_and(|s| s == "aborted" || s == "error") {
+    if m.get("stopReason")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s == "aborted" || s == "error")
+    {
         return None;
     }
     let u = m.get("usage")?;
-    let tokens = u.get("totalTokens").and_then(Value::as_u64).unwrap_or_else(|| {
-        u.get("input").and_then(Value::as_u64).unwrap_or(0)
-            + u.get("output").and_then(Value::as_u64).unwrap_or(0)
-            + u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0)
-            + u.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0)
-    });
+    let tokens = u
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            u.get("input").and_then(Value::as_u64).unwrap_or(0)
+                + u.get("output").and_then(Value::as_u64).unwrap_or(0)
+                + u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0)
+                + u.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0)
+        });
     (tokens > 0).then_some(tokens)
 }
 
@@ -363,7 +405,9 @@ pub fn estimate_context_tokens(messages: &[Value]) -> u64 {
         }
     }
     match last_usage {
-        Some((i, usage_tokens)) => usage_tokens + messages[i + 1..].iter().map(estimate_tokens).sum::<u64>(),
+        Some((i, usage_tokens)) => {
+            usage_tokens + messages[i + 1..].iter().map(estimate_tokens).sum::<u64>()
+        }
         None => messages.iter().map(estimate_tokens).sum(),
     }
 }
@@ -388,7 +432,10 @@ fn entry_message(entry: &Value) -> Option<&Value> {
 /// points; toolResult never is (it must follow its tool call). pi-rust v0
 /// stores only user/assistant/toolResult messages.
 fn is_cut_point(msg: &Value) -> bool {
-    matches!(msg.get("role").and_then(Value::as_str), Some("user") | Some("assistant"))
+    matches!(
+        msg.get("role").and_then(Value::as_str),
+        Some("user") | Some("assistant")
+    )
 }
 
 /// Upstream isTurnStartMessage for pi-rust roles: a user message.
@@ -413,12 +460,21 @@ pub struct CutPoint {
 /// closest valid cut point at or after that entry (never a tool result; an
 /// assistant with tool calls keeps its results). Adjacent context-invisible
 /// metadata entries are included in the kept range.
-pub fn find_cut_point(entries: &[Value], start: usize, end: usize, keep_recent_tokens: u64) -> CutPoint {
+pub fn find_cut_point(
+    entries: &[Value],
+    start: usize,
+    end: usize,
+    keep_recent_tokens: u64,
+) -> CutPoint {
     let cut_points: Vec<usize> = (start..end)
         .filter(|&i| entry_message(entries.get(i).unwrap()).is_some_and(is_cut_point))
         .collect();
     if cut_points.is_empty() {
-        return CutPoint { first_kept_index: start, turn_start_index: None, is_split_turn: false };
+        return CutPoint {
+            first_kept_index: start,
+            turn_start_index: None,
+            is_split_turn: false,
+        };
     }
 
     let mut accumulated = 0u64;
@@ -430,14 +486,20 @@ pub fn find_cut_point(entries: &[Value], start: usize, end: usize, keep_recent_t
         }
         accumulated += tokens;
         if accumulated >= keep_recent_tokens {
-            cut_index = cut_points.iter().copied().find(|&c| c >= i).unwrap_or(*cut_points.last().unwrap());
+            cut_index = cut_points
+                .iter()
+                .copied()
+                .find(|&c| c >= i)
+                .unwrap_or(*cut_points.last().unwrap());
             break;
         }
     }
 
     while cut_index > start {
         let prev = &entries[cut_index - 1];
-        if prev.get("type").and_then(Value::as_str) == Some("compaction") || entry_message(prev).is_some() {
+        if prev.get("type").and_then(Value::as_str) == Some("compaction")
+            || entry_message(prev).is_some()
+        {
             break;
         }
         cut_index -= 1;
@@ -447,7 +509,9 @@ pub fn find_cut_point(entries: &[Value], start: usize, end: usize, keep_recent_t
     let turn_start_index = if starts_turn {
         None
     } else {
-        (start..=cut_index).rev().find(|&i| entry_message(&entries[i]).is_some_and(is_turn_start))
+        (start..=cut_index)
+            .rev()
+            .find(|&i| entry_message(&entries[i]).is_some_and(is_turn_start))
     };
     CutPoint {
         first_kept_index: cut_index,
@@ -474,22 +538,47 @@ pub struct CompactionPreparation {
 /// a split-turn cut snaps back to the turn start (v0: no TURN_PREFIX summary,
 /// so a turn is never half-kept). None when the session ends at a compaction
 /// or there is nothing to summarize.
-pub fn prepare_compaction(entries: &[Value], system_message: &Value, keep_recent_tokens: u64) -> Option<CompactionPreparation> {
+pub fn prepare_compaction(
+    entries: &[Value],
+    system_message: &Value,
+    keep_recent_tokens: u64,
+) -> Option<CompactionPreparation> {
     let last = entries.last()?;
     if last.get("type").and_then(Value::as_str) == Some("compaction") {
         return None; // already compacted (upstream: "Already compacted")
     }
-    let compaction_idx = entries.iter().rposition(|e| e.get("type").and_then(Value::as_str) == Some("compaction"));
+    let compaction_idx = entries
+        .iter()
+        .rposition(|e| e.get("type").and_then(Value::as_str) == Some("compaction"));
     let (domain_start, previous_summary) = match compaction_idx {
         Some(ci) => {
-            let first_kept = entries[ci].get("firstKeptEntryId").and_then(Value::as_str).unwrap_or("");
-            let start = entries[..ci].iter().position(|e| e.get("id").and_then(Value::as_str) == Some(first_kept)).unwrap_or(0);
-            (start, Some(entries[ci].get("summary").and_then(Value::as_str).unwrap_or_default().to_string()))
+            let first_kept = entries[ci]
+                .get("firstKeptEntryId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let start = entries[..ci]
+                .iter()
+                .position(|e| e.get("id").and_then(Value::as_str) == Some(first_kept))
+                .unwrap_or(0);
+            (
+                start,
+                Some(
+                    entries[ci]
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            )
         }
         None => (0, None),
     };
     let domain: Vec<Value> = match compaction_idx {
-        Some(ci) => entries[domain_start..ci].iter().chain(entries[ci + 1..].iter()).cloned().collect(),
+        Some(ci) => entries[domain_start..ci]
+            .iter()
+            .chain(entries[ci + 1..].iter())
+            .cloned()
+            .collect(),
         None => entries.to_vec(),
     };
     // Upstream estimateProjectedContextTokens over the projected context:
@@ -501,11 +590,15 @@ pub fn prepare_compaction(entries: &[Value], system_message: &Value, keep_recent
     let cut = find_cut_point(&domain, 0, domain.len(), keep_recent_tokens);
     let first_kept = if cut.is_split_turn {
         // v0 non-goal: the split-turn TURN_PREFIX summary — keep the whole turn.
-        cut.turn_start_index.expect("is_split_turn requires a turn start")
+        cut.turn_start_index
+            .expect("is_split_turn requires a turn start")
     } else {
         cut.first_kept_index
     };
-    let first_kept_entry_id = domain[first_kept].get("id").and_then(Value::as_str)?.to_string();
+    let first_kept_entry_id = domain[first_kept]
+        .get("id")
+        .and_then(Value::as_str)?
+        .to_string();
     let messages_to_summarize: Vec<Value> = domain[..first_kept]
         .iter()
         .filter_map(|e| entry_message(e).cloned())
@@ -514,7 +607,12 @@ pub fn prepare_compaction(entries: &[Value], system_message: &Value, keep_recent
     if messages_to_summarize.is_empty() {
         return None; // nothing to compact (session too small)
     }
-    Some(CompactionPreparation { first_kept_entry_id, messages_to_summarize, tokens_before, previous_summary })
+    Some(CompactionPreparation {
+        first_kept_entry_id,
+        messages_to_summarize,
+        tokens_before,
+        previous_summary,
+    })
 }
 
 /// Upstream contentText: text blocks joined with `separator`.
@@ -538,7 +636,10 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     let head: String = text.chars().take(max_chars).collect();
-    format!("{head}\n\n[... {} more characters truncated]", total - max_chars)
+    format!(
+        "{head}\n\n[... {} more characters truncated]",
+        total - max_chars
+    )
 }
 
 /// Upstream serializeConversation: [User] / [Assistant] / [Assistant tool
@@ -556,16 +657,24 @@ pub fn serialize_conversation(messages: &[Value]) -> String {
                 }
             }
             "assistant" => {
-                let blocks = m.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+                let blocks = m
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut tool_calls: Vec<String> = Vec::new();
                 for b in &blocks {
                     if b.get("type").and_then(Value::as_str) == Some("toolCall") {
                         let name = b.get("name").and_then(Value::as_str).unwrap_or_default();
-                        let args = b.get("arguments").cloned().or_else(|| b.get("input").cloned()).unwrap_or_else(|| json!({}));
+                        let args = b
+                            .get("arguments")
+                            .cloned()
+                            .or_else(|| b.get("input").cloned())
+                            .unwrap_or_else(|| json!({}));
                         let args_str = match args {
                             Value::Object(map) => map
                                 .iter()
-                                .map(|(k, v)| format!("{k}={}", v.to_string()))
+                                .map(|(k, v)| format!("{k}={}", v))
                                 .collect::<Vec<_>>()
                                 .join(", "),
                             other => other.to_string(),
@@ -573,8 +682,14 @@ pub fn serialize_conversation(messages: &[Value]) -> String {
                         tool_calls.push(format!("{name}({args_str})"));
                     }
                 }
-                if blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")) {
-                    parts.push(format!("[Assistant]: {}", content_text(m.get("content").unwrap_or(&Value::Null), "\n")));
+                if blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                {
+                    parts.push(format!(
+                        "[Assistant]: {}",
+                        content_text(m.get("content").unwrap_or(&Value::Null), "\n")
+                    ));
                 }
                 if !tool_calls.is_empty() {
                     parts.push(format!("[Assistant tool calls]: {}", tool_calls.join("; ")));
@@ -583,7 +698,10 @@ pub fn serialize_conversation(messages: &[Value]) -> String {
             "toolResult" => {
                 let text = content_text(m.get("content").unwrap_or(&Value::Null), "");
                 if !text.is_empty() {
-                    parts.push(format!("[Tool result]: {}", truncate_for_summary(&text, TOOL_RESULT_MAX_CHARS)));
+                    parts.push(format!(
+                        "[Tool result]: {}",
+                        truncate_for_summary(&text, TOOL_RESULT_MAX_CHARS)
+                    ));
                 }
             }
             _ => {}
@@ -600,12 +718,20 @@ pub fn serialize_conversation(messages: &[Value]) -> String {
 /// kept range contributes nothing (upstream: only the newest at index 0
 /// contributes its checkpoint). Applies to fresh runs AND resume-from-file.
 pub fn project_messages(entries: &[Value]) -> Vec<Value> {
-    let Some(compaction_idx) = entries.iter().rposition(|e| e.get("type").and_then(Value::as_str) == Some("compaction"))
+    let Some(compaction_idx) = entries
+        .iter()
+        .rposition(|e| e.get("type").and_then(Value::as_str) == Some("compaction"))
     else {
-        return entries.iter().filter_map(|e| entry_message(e).cloned()).collect();
+        return entries
+            .iter()
+            .filter_map(|e| entry_message(e).cloned())
+            .collect();
     };
     let compaction = &entries[compaction_idx];
-    let first_kept = compaction.get("firstKeptEntryId").and_then(Value::as_str).unwrap_or("");
+    let first_kept = compaction
+        .get("firstKeptEntryId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let mut out: Vec<Value> = vec![json!({
         "role": "compactionSummary",
         "content": [{"type": "text", "text": compaction.get("summary").and_then(Value::as_str).unwrap_or_default()}],
@@ -635,14 +761,30 @@ impl Session {
     /// created.
     pub fn create(path: PathBuf, cwd: &str) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let file = OpenOptions::new().create(true).append(true).open(&path)
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
             .with_context(|| format!("opening session file {}", path.display()))?;
         let header = json!({"type":"session","version":3,"id":id,"timestamp":now_iso(),"cwd":cwd});
-        let inner = Inner { name: None, entries: Vec::new(), messages: Vec::new(), leaf_id: None, file };
-        let mut s = Self { path: Mutex::new(path), id: Mutex::new(id.clone()), cwd: Mutex::new(cwd.to_string()), parent_session: Mutex::new(None), inner: Mutex::new(inner) };
+        let inner = Inner {
+            name: None,
+            entries: Vec::new(),
+            messages: Vec::new(),
+            leaf_id: None,
+            file,
+        };
+        let s = Self {
+            path: Mutex::new(path),
+            id: Mutex::new(id.clone()),
+            cwd: Mutex::new(cwd.to_string()),
+            parent_session: Mutex::new(None),
+            inner: Mutex::new(inner),
+        };
         {
             let mut inner = s.inner.lock().unwrap();
             Inner::write_line(&mut inner.file, &header);
@@ -654,40 +796,78 @@ impl Session {
     /// leaf of the entry tree. v0-format files are rejected with a typed
     /// error (migration is a documented follow-up, not implicit).
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path).with_context(|| format!("reading session file {}", path.display()))?;
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading session file {}", path.display()))?;
         let mut lines = raw.lines();
         let first = lines.next().context("session file is empty")?;
-        let header: Value = serde_json::from_str(first).with_context(|| "session header is not valid JSON")?;
+        let header: Value =
+            serde_json::from_str(first).with_context(|| "session header is not valid JSON")?;
         if header.get("type").and_then(Value::as_str) != Some("session") {
-            bail!("{} is not a v3 session file (missing session header) — v0 files need migration", path.display());
+            bail!(
+                "{} is not a v3 session file (missing session header) — v0 files need migration",
+                path.display()
+            );
         }
-        let version = header.get("version").and_then(Value::as_u64).context("session header has no version")?;
+        let version = header
+            .get("version")
+            .and_then(Value::as_u64)
+            .context("session header has no version")?;
         if version != 3 {
-            bail!("unsupported session version {} in {}", version, path.display());
+            bail!(
+                "unsupported session version {} in {}",
+                version,
+                path.display()
+            );
         }
-        let id = header.get("id").and_then(Value::as_str).context("header has no id")?.to_string();
-        let cwd = header.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
-        let parent_session = header.get("parentSession").and_then(Value::as_str).map(str::to_string);
+        let id = header
+            .get("id")
+            .and_then(Value::as_str)
+            .context("header has no id")?
+            .to_string();
+        let cwd = header
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let parent_session = header
+            .get("parentSession")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         let mut entries: Vec<Value> = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
                 continue;
             }
-            let e: Value = serde_json::from_str(line).with_context(|| "session entry is not valid JSON")?;
+            let e: Value =
+                serde_json::from_str(line).with_context(|| "session entry is not valid JSON")?;
             entries.push(e);
         }
         // Follow the leaf chain back to the root (handles branches; linear
         // files are the common case).
         let by_id: std::collections::HashMap<String, Value> = entries
             .iter()
-            .filter_map(|e| e.get("id").and_then(Value::as_str).map(|i| (i.to_string(), e.clone())))
+            .filter_map(|e| {
+                e.get("id")
+                    .and_then(Value::as_str)
+                    .map(|i| (i.to_string(), e.clone()))
+            })
             .collect();
-        let mut cur: Option<String> = entries.last().and_then(|e| e.get("id").and_then(Value::as_str)).map(str::to_string);
+        let mut cur: Option<String> = entries
+            .last()
+            .and_then(|e| e.get("id").and_then(Value::as_str))
+            .map(str::to_string);
         let mut chain: Vec<Value> = Vec::new();
         while let Some(cid) = cur {
-            let e = by_id.get(&cid).context("session entry references unknown parent")?.clone();
-            let next = e.get("parentId").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string);
+            let e = by_id
+                .get(&cid)
+                .context("session entry references unknown parent")?
+                .clone();
+            let next = e
+                .get("parentId")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
             chain.push(e);
             cur = next;
         }
@@ -703,11 +883,28 @@ impl Session {
         // buildContextEntries projects it).
         let messages = project_messages(&chain);
 
-        let file = OpenOptions::new().append(true).open(path)
+        let file = OpenOptions::new()
+            .append(true)
+            .open(path)
             .with_context(|| format!("reopening session file {}", path.display()))?;
-        let leaf_id = chain.last().and_then(|e| e.get("id").and_then(Value::as_str)).map(str::to_string);
-        let inner = Inner { name, entries, messages, leaf_id, file };
-        Ok(Self { path: Mutex::new(path.to_path_buf()), id: Mutex::new(id), cwd: Mutex::new(cwd), parent_session: Mutex::new(parent_session), inner: Mutex::new(inner) })
+        let leaf_id = chain
+            .last()
+            .and_then(|e| e.get("id").and_then(Value::as_str))
+            .map(str::to_string);
+        let inner = Inner {
+            name,
+            entries,
+            messages,
+            leaf_id,
+            file,
+        };
+        Ok(Self {
+            path: Mutex::new(path.to_path_buf()),
+            id: Mutex::new(id),
+            cwd: Mutex::new(cwd),
+            parent_session: Mutex::new(parent_session),
+            inner: Mutex::new(inner),
+        })
     }
 
     /// Creates a fork of an existing session: a NEW file (new id) whose
@@ -725,7 +922,10 @@ impl Session {
         inner.entries = std::mem::take(&mut next_inner.entries);
         inner.messages = std::mem::take(&mut next_inner.messages);
         inner.leaf_id = next_inner.leaf_id.clone();
-        inner.file = OpenOptions::new().create(true).append(true).open(next.path.lock().unwrap().clone())
+        inner.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(next.path.lock().unwrap().clone())
             .with_context(|| format!("opening session file {}", path.display()))?;
         drop(inner);
         *self.path.lock().unwrap() = next.path.lock().unwrap().clone();
@@ -740,16 +940,31 @@ impl Session {
             .with_context(|| format!("reading session file {}", old_path.display()))?;
         let mut lines = raw.lines();
         let first = lines.next().context("session file is empty")?;
-        let header: Value = serde_json::from_str(first).context("fork source has no JSON header")?;
+        let header: Value =
+            serde_json::from_str(first).context("fork source has no JSON header")?;
         if header.get("type").and_then(Value::as_str) != Some("session") {
-            bail!("{} is not a v3 session file — cannot fork", old_path.display());
+            bail!(
+                "{} is not a v3 session file — cannot fork",
+                old_path.display()
+            );
         }
-        let old_id = header.get("id").and_then(Value::as_str).context("fork source has no id")?;
-        let cwd = header.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+        let old_id = header
+            .get("id")
+            .and_then(Value::as_str)
+            .context("fork source has no id")?;
+        let cwd = header
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if let Some(parent) = new_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(new_path)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(new_path)
             .with_context(|| format!("opening fork target {}", new_path.display()))?;
         let new_id = uuid::Uuid::new_v4().to_string();
         let h = json!({"type":"session","version":3,"id":new_id,"timestamp":now_iso(),
@@ -817,7 +1032,14 @@ impl Session {
         from_hook: bool,
         system_message: Option<&Value>,
     ) -> String {
-        self.inner.lock().unwrap().append_compaction(summary, first_kept_entry_id, tokens_before, usage, from_hook, system_message)
+        self.inner.lock().unwrap().append_compaction(
+            summary,
+            first_kept_entry_id,
+            tokens_before,
+            usage,
+            from_hook,
+            system_message,
+        )
     }
 
     /// WP-704: the session entry path (root→leaf order) — compaction
@@ -857,68 +1079,95 @@ pub fn extract_text(msg: &Value) -> String {
 /// `--list-sessions` and the TUI session picker, WP-609).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionInfo {
-	pub path: PathBuf,
-	pub id: String,
-	pub name: Option<String>,
-	pub cwd: String,
-	pub parent_session: Option<String>,
-	pub updated: Option<String>,
-	pub entries: usize,
+    pub path: PathBuf,
+    pub id: String,
+    pub name: Option<String>,
+    pub cwd: String,
+    pub parent_session: Option<String>,
+    pub updated: Option<String>,
+    pub entries: usize,
 }
 
 /// Lists session files under `<agentDir>/sessions/` (recursive), most
 /// recently modified first. Unreadable/unparseable files are skipped.
 pub fn list(agent_dir: &Path) -> Vec<SessionInfo> {
-	let root = agent_dir.join("sessions");
-	let mut files = Vec::new();
-	if root.exists() {
-		collect_session_files(&root, &mut files);
-	}
-	let mut out = Vec::new();
-	for f in &files {
-		let Ok(raw) = std::fs::read_to_string(f) else { continue };
-		let Some(first) = raw.lines().next() else { continue };
-		let Ok(h) = serde_json::from_str::<Value>(first) else { continue };
-		if h.get("type").and_then(Value::as_str) != Some("session") {
-			continue;
-		}
-		let id = h.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-		let cwd = h.get("cwd").and_then(Value::as_str).unwrap_or_default().to_string();
-		let parent_session = h.get("parentSession").and_then(Value::as_str).map(str::to_string);
-		let mut name: Option<String> = None;
-		let mut entries = 0usize;
-		for line in raw.lines().skip(1) {
-			if line.trim().is_empty() {
-				continue;
-			}
-			entries += 1;
-			if let Ok(e) = serde_json::from_str::<Value>(line) {
-				if e.get("type").and_then(Value::as_str) == Some("session_info") {
-					name = e.get("name").and_then(Value::as_str).map(str::to_string);
-				}
-			}
-		}
-		let updated = std::fs::metadata(f)
-			.and_then(|m| m.modified())
-			.ok()
-			.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-			.map(|d| iso_from_secs(d.as_secs()));
-		out.push(SessionInfo { path: f.clone(), id, name, cwd, parent_session, updated, entries });
-	}
-	out.sort_by(|a, b| b.path.cmp(&a.path)); // most recently modified first (path-embedded timestamp, as before)
-	out
+    let root = agent_dir.join("sessions");
+    let mut files = Vec::new();
+    if root.exists() {
+        collect_session_files(&root, &mut files);
+    }
+    let mut out = Vec::new();
+    for f in &files {
+        let Ok(raw) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let Some(first) = raw.lines().next() else {
+            continue;
+        };
+        let Ok(h) = serde_json::from_str::<Value>(first) else {
+            continue;
+        };
+        if h.get("type").and_then(Value::as_str) != Some("session") {
+            continue;
+        }
+        let id = h
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let cwd = h
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let parent_session = h
+            .get("parentSession")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut name: Option<String> = None;
+        let mut entries = 0usize;
+        for line in raw.lines().skip(1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            entries += 1;
+            if let Ok(e) = serde_json::from_str::<Value>(line) {
+                if e.get("type").and_then(Value::as_str) == Some("session_info") {
+                    name = e.get("name").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+        }
+        let updated = std::fs::metadata(f)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| iso_from_secs(d.as_secs()));
+        out.push(SessionInfo {
+            path: f.clone(),
+            id,
+            name,
+            cwd,
+            parent_session,
+            updated,
+            entries,
+        });
+    }
+    out.sort_by(|a, b| b.path.cmp(&a.path)); // most recently modified first (path-embedded timestamp, as before)
+    out
 }
 
 fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
-	let Ok(rd) = std::fs::read_dir(dir) else { return };
-	for e in rd.flatten() {
-		let p = e.path();
-		if p.is_dir() {
-			collect_session_files(&p, out);
-		} else if p.extension().is_some_and(|x| x == "jsonl") {
-			out.push(p);
-		}
-	}
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_session_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -956,10 +1205,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
-
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pi-rust-sess-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!(
+            "pi-rust-sess-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -974,12 +1225,12 @@ mod tests {
     }
 
     #[test]
-	fn creates_v3_header_and_entry_chain() {
+    fn creates_v3_header_and_entry_chain() {
         let d = tmpdir();
         let path = d.join("s.jsonl");
         let s = Session::create(path.clone(), "/work/demo").unwrap();
         let id1 = s.append_message(&user("hi"));
-        let id2 = s.append_message(&assistant("hello"));
+        let _id2 = s.append_message(&assistant("hello"));
         s.set_name(Some("n".into()));
         let raw = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
@@ -997,11 +1248,14 @@ mod tests {
         let e3: Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(e3["type"], "session_info");
         assert_eq!(e3["name"], "n");
-        assert!(lines[0].contains("timestamp"), "ISO timestamps present: {e1}");
+        assert!(
+            lines[0].contains("timestamp"),
+            "ISO timestamps present: {e1}"
+        );
     }
 
     #[test]
-	fn round_trip_load_rebuilds_transcript_and_name() {
+    fn round_trip_load_rebuilds_transcript_and_name() {
         let d = tmpdir();
         let path = d.join("rt.jsonl");
         {
@@ -1013,7 +1267,14 @@ mod tests {
         }
         let s = Session::load(&path).unwrap();
         assert_eq!(s.id.lock().unwrap().clone(), {
-            let h: Value = serde_json::from_str(std::fs::read_to_string(&path).unwrap().lines().next().unwrap()).unwrap();
+            let h: Value = serde_json::from_str(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
             h["id"].as_str().unwrap().to_string()
         });
         assert_eq!(s.transcript().len(), 2);
@@ -1031,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-	fn golden_upstream_shaped_file_loads() {
+    fn golden_upstream_shaped_file_loads() {
         // Hand-written in the documented upstream v3 shapes (incl. toolCall
         // with `input` and a custom entry), as pi would have written it.
         let d = tmpdir();
@@ -1057,16 +1318,23 @@ mod tests {
     }
 
     #[test]
-	fn v0_file_rejected_with_typed_error() {
+    fn v0_file_rejected_with_typed_error() {
         let d = tmpdir();
         let path = d.join("v0.jsonl");
-        std::fs::write(&path, "{\"type\":\"user\",\"id\":\"e1\",\"timestamp\":1,\"text\":\"x\"}\n").unwrap();
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"id\":\"e1\",\"timestamp\":1,\"text\":\"x\"}\n",
+        )
+        .unwrap();
         let err = Session::load(&path).unwrap_err().to_string();
-        assert!(err.contains("migration") || err.contains("not a v3 session"), "{err}");
+        assert!(
+            err.contains("migration") || err.contains("not a v3 session"),
+            "{err}"
+        );
     }
 
     #[test]
-	fn encode_cwd_matches_upstream() {
+    fn encode_cwd_matches_upstream() {
         assert_eq!(encode_cwd("/home/user/proj"), "--home-user-proj--");
         assert_eq!(encode_cwd("relative/x"), "--relative-x--");
     }
@@ -1077,7 +1345,11 @@ mod wp704_tests {
     use super::*;
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pi-rust-wp704-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!(
+            "pi-rust-wp704-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -1089,10 +1361,22 @@ mod wp704_tests {
 
     #[test]
     fn estimate_tokens_uses_chars_div_4() {
-        assert_eq!(estimate_tokens(&json!({"role":"user","content":[{"type":"text","text":"abcd"}]})), 1);
-        assert_eq!(estimate_tokens(&json!({"role":"user","content":[{"type":"text","text":"abcde"}]})), 2, "ceil(chars/4)");
+        assert_eq!(
+            estimate_tokens(&json!({"role":"user","content":[{"type":"text","text":"abcd"}]})),
+            1
+        );
+        assert_eq!(
+            estimate_tokens(&json!({"role":"user","content":[{"type":"text","text":"abcde"}]})),
+            2,
+            "ceil(chars/4)"
+        );
         // An image block counts as 4800 chars (1200 tokens).
-        assert_eq!(estimate_tokens(&json!({"role":"user","content":[{"type":"image","mimeType":"image/png","data":"x"}]})), 1200);
+        assert_eq!(
+            estimate_tokens(
+                &json!({"role":"user","content":[{"type":"image","mimeType":"image/png","data":"x"}]})
+            ),
+            1200
+        );
         // assistant: text + thinking + toolCall (name + args JSON).
         let a = json!({"role":"assistant","content":[
             {"type":"text","text":"ab"},
@@ -1104,32 +1388,72 @@ mod wp704_tests {
         let s = json!({"role":"system","content":"abcd","toolsAdded":[{"name":"bash"}]});
         assert_eq!(estimate_tokens(&s), 6, "4+17=21 -> 6");
         // compactionSummary counts the summary text; unknown roles are 0.
-        assert_eq!(estimate_tokens(&json!({"role":"compactionSummary","content":[{"type":"text","text":"abcd"}]})), 1);
+        assert_eq!(
+            estimate_tokens(
+                &json!({"role":"compactionSummary","content":[{"type":"text","text":"abcd"}]})
+            ),
+            1
+        );
         assert_eq!(estimate_tokens(&json!({"role":"weird"})), 0);
     }
 
     #[test]
     fn estimate_context_tokens_uses_last_valid_assistant_usage() {
         let user = || json!({"role":"user","content":[{"type":"text","text":"abcd"}]}); // 1 token
-        let assistant = |usage: Value, stop: &str| {
-            json!({"role":"assistant","content":[{"type":"text","text":"abcd"}],"usage":usage,"stopReason":stop})
-        };
+        let assistant = |usage: Value, stop: &str| json!({"role":"assistant","content":[{"type":"text","text":"abcd"}],"usage":usage,"stopReason":stop});
         let zero = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0});
         // No (or zero) usage: plain sum of estimates.
-        assert_eq!(estimate_context_tokens(&[user(), assistant(zero.clone(), "stop")]), 2);
+        assert_eq!(
+            estimate_context_tokens(&[user(), assistant(zero.clone(), "stop")]),
+            2
+        );
         // Valid usage: usage tokens + the estimate of the trailing message.
-        assert_eq!(estimate_context_tokens(&[user(), assistant(json!({"input":10,"output":2,"cacheRead":0,"cacheWrite":0}), "stop"), user()]), 13);
+        assert_eq!(
+            estimate_context_tokens(&[
+                user(),
+                assistant(
+                    json!({"input":10,"output":2,"cacheRead":0,"cacheWrite":0}),
+                    "stop"
+                ),
+                user()
+            ]),
+            13
+        );
         // totalTokens wins; error/aborted usages are invalid.
-        assert_eq!(estimate_context_tokens(&[assistant(json!({"totalTokens":7}), "stop"), user()]), 8);
-        assert_eq!(estimate_context_tokens(&[assistant(json!({"input":50,"output":0,"cacheRead":0,"cacheWrite":0}), "error"), user()]), 2);
-        assert_eq!(estimate_context_tokens(&[assistant(json!({"input":50,"output":0,"cacheRead":0,"cacheWrite":0}), "aborted"), user()]), 2);
+        assert_eq!(
+            estimate_context_tokens(&[assistant(json!({"totalTokens":7}), "stop"), user()]),
+            8
+        );
+        assert_eq!(
+            estimate_context_tokens(&[
+                assistant(
+                    json!({"input":50,"output":0,"cacheRead":0,"cacheWrite":0}),
+                    "error"
+                ),
+                user()
+            ]),
+            2
+        );
+        assert_eq!(
+            estimate_context_tokens(&[
+                assistant(
+                    json!({"input":50,"output":0,"cacheRead":0,"cacheWrite":0}),
+                    "aborted"
+                ),
+                user()
+            ]),
+            2
+        );
     }
 
     #[test]
     fn should_compact_threshold_boundary() {
         assert!(should_compact(1101, 1500, 400));
         assert!(!should_compact(1100, 1500, 400), "strictly greater");
-        assert!(should_compact(0, 100, 300), "reserve > window saturates to 0");
+        assert!(
+            should_compact(0, 100, 300),
+            "reserve > window saturates to 0"
+        );
     }
 
     #[test]
@@ -1145,28 +1469,70 @@ mod wp704_tests {
 
         // keep=0: the walk lands on a2 (assistant) — a split turn at u2.
         let cut = find_cut_point(&entries, 0, 5, 0);
-        assert_eq!(cut, CutPoint { first_kept_index: 4, turn_start_index: Some(3), is_split_turn: true });
+        assert_eq!(
+            cut,
+            CutPoint {
+                first_kept_index: 4,
+                turn_start_index: Some(3),
+                is_split_turn: true
+            }
+        );
 
         // A budget met at the tool result keeps the NEXT cut point (u2); the
         // tool pair before it is summarized together, never split.
         let cut = find_cut_point(&entries, 0, 5, 250);
-        assert_eq!(cut, CutPoint { first_kept_index: 3, turn_start_index: None, is_split_turn: false });
+        assert_eq!(
+            cut,
+            CutPoint {
+                first_kept_index: 3,
+                turn_start_index: None,
+                is_split_turn: false
+            }
+        );
 
         // A big budget keeps from the first cut point.
-        assert_eq!(find_cut_point(&entries, 0, 5, 10_000), CutPoint { first_kept_index: 0, turn_start_index: None, is_split_turn: false });
+        assert_eq!(
+            find_cut_point(&entries, 0, 5, 10_000),
+            CutPoint {
+                first_kept_index: 0,
+                turn_start_index: None,
+                is_split_turn: false
+            }
+        );
 
         // An assistant with tool calls keeps its result (no user before it:
         // not a split turn, the result is kept with the call).
         let pair = vec![a1.clone(), tr1.clone()];
-        assert_eq!(find_cut_point(&pair, 0, 2, 0), CutPoint { first_kept_index: 0, turn_start_index: None, is_split_turn: false });
+        assert_eq!(
+            find_cut_point(&pair, 0, 2, 0),
+            CutPoint {
+                first_kept_index: 0,
+                turn_start_index: None,
+                is_split_turn: false
+            }
+        );
 
         // No cut points (only a tool result): keep from the start.
-        assert_eq!(find_cut_point(&[tr1.clone()], 0, 1, 0), CutPoint { first_kept_index: 0, turn_start_index: None, is_split_turn: false });
+        assert_eq!(
+            find_cut_point(std::slice::from_ref(&tr1), 0, 1, 0),
+            CutPoint {
+                first_kept_index: 0,
+                turn_start_index: None,
+                is_split_turn: false
+            }
+        );
 
         // Adjacent context-invisible metadata entries are included in the kept range.
         let custom = json!({"type":"custom","id":"c1","parentId":"u1","timestamp":"t","customType":"x","data":{}});
         let entries = vec![u1.clone(), custom, u2.clone()];
-        assert_eq!(find_cut_point(&entries, 0, 3, 0), CutPoint { first_kept_index: 1, turn_start_index: Some(0), is_split_turn: true });
+        assert_eq!(
+            find_cut_point(&entries, 0, 3, 0),
+            CutPoint {
+                first_kept_index: 1,
+                turn_start_index: Some(0),
+                is_split_turn: true
+            }
+        );
     }
 
     #[test]
@@ -1181,23 +1547,54 @@ mod wp704_tests {
         let a3 = msg_entry("a3", Some("u3"), "assistant", "done");
 
         // Fresh: everything before the last turn is summarized.
-        let pre = prepare_compaction(&[u1.clone(), a1.clone(), u2.clone()], &system, 0).expect("prepares");
+        let pre = prepare_compaction(&[u1.clone(), a1.clone(), u2.clone()], &system, 0)
+            .expect("prepares");
         assert_eq!(pre.first_kept_entry_id, "u2");
         assert_eq!(pre.messages_to_summarize.len(), 2);
         assert!(pre.tokens_before > 0);
         assert!(pre.previous_summary.is_none());
 
         // Single-turn session: nothing to summarize.
-        assert!(prepare_compaction(&[u2.clone()], &system, 0).is_none());
+        assert!(prepare_compaction(std::slice::from_ref(&u2), &system, 0).is_none());
         // Last entry is a compaction: already compacted.
         assert!(prepare_compaction(&[u1.clone(), a1.clone(), comp.clone()], &system, 0).is_none());
         // A previous compaction: domain = kept tail + after; previous summary carried;
         // a split cut snaps to the turn start (v0: no TURN_PREFIX).
-        let pre = prepare_compaction(&[u1.clone(), a1.clone(), u2.clone(), comp.clone(), a2.clone(), u3.clone(), a3.clone()], &system, 0).expect("prepares after a compaction");
+        let pre = prepare_compaction(
+            &[
+                u1.clone(),
+                a1.clone(),
+                u2.clone(),
+                comp.clone(),
+                a2.clone(),
+                u3.clone(),
+                a3.clone(),
+            ],
+            &system,
+            0,
+        )
+        .expect("prepares after a compaction");
         assert_eq!(pre.previous_summary.as_deref(), Some("S"));
         assert_eq!(pre.first_kept_entry_id, "u3");
-        let ids: Vec<&str> = pre.messages_to_summarize.iter().map(|m| m.get("content").and_then(Value::as_array).unwrap().first().unwrap().get("text").and_then(Value::as_str).unwrap()).collect();
-        assert_eq!(ids, vec!["next", "four"], "the kept tail + the turn before the new user turn");
+        let ids: Vec<&str> = pre
+            .messages_to_summarize
+            .iter()
+            .map(|m| {
+                m.get("content")
+                    .and_then(Value::as_array)
+                    .unwrap()
+                    .first()
+                    .unwrap()
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["next", "four"],
+            "the kept tail + the turn before the new user turn"
+        );
     }
 
     #[test]
@@ -1221,7 +1618,10 @@ mod wp704_tests {
         assert!(!out.contains("secret reasoning"), "thinking omitted");
         // No text at all: only the tool call line.
         let calls_only = json!({"role":"assistant","content":[{"type":"toolCall","id":"t2","name":"bash","input":{"command":"ls -la"}}]});
-        assert_eq!(serialize_conversation(&vec![calls_only]), "[Assistant tool calls]: bash(command=\"ls -la\")");
+        assert_eq!(
+            serialize_conversation(&[calls_only]),
+            "[Assistant tool calls]: bash(command=\"ls -la\")"
+        );
     }
 
     #[test]
@@ -1235,10 +1635,24 @@ mod wp704_tests {
 
         // Fresh: every message, in order.
         let p = project_messages(&[u1.clone(), a1.clone(), u2.clone()]);
-        assert_eq!(p, [u1["message"].clone(), a1["message"].clone(), u2["message"].clone()]);
+        assert_eq!(
+            p,
+            [
+                u1["message"].clone(),
+                a1["message"].clone(),
+                u2["message"].clone()
+            ]
+        );
 
         // Compacted: summary + kept (u2, a2) + after (u3).
-        let p = project_messages(&[u1.clone(), a1.clone(), u2.clone(), a2.clone(), comp.clone(), u3.clone()]);
+        let p = project_messages(&[
+            u1.clone(),
+            a1.clone(),
+            u2.clone(),
+            a2.clone(),
+            comp.clone(),
+            u3.clone(),
+        ]);
         assert_eq!(p.len(), 4);
         assert_eq!(p[0]["role"], "compactionSummary");
         assert_eq!(p[0]["content"][0]["text"], "SUMMARY");
@@ -1246,14 +1660,27 @@ mod wp704_tests {
         assert_eq!(p[2]["content"][0]["text"], "four");
         assert_eq!(p[3]["content"][0]["text"], "five");
         let all = p.iter().map(|m| m.to_string()).collect::<Vec<_>>().join("");
-        assert!(!all.contains("one") && !all.contains("two"), "summarized messages projected out: {all}");
+        assert!(
+            !all.contains("one") && !all.contains("two"),
+            "summarized messages projected out: {all}"
+        );
 
         // An older compaction inside the kept range contributes nothing.
         let comp_old = json!({"type":"compaction","id":"c0","parentId":"u1","timestamp":"t","summary":"OLD","firstKeptEntryId":"a1","tokensBefore":1});
-        let p = project_messages(&[u1.clone(), comp_old.clone(), u2.clone(), a2.clone(), comp.clone(), u3.clone()]);
+        let p = project_messages(&[
+            u1.clone(),
+            comp_old.clone(),
+            u2.clone(),
+            a2.clone(),
+            comp.clone(),
+            u3.clone(),
+        ]);
         let all = p.iter().map(|m| m.to_string()).collect::<Vec<_>>().join("");
         assert_eq!(p.len(), 4, "{p:?}");
-        assert!(!all.contains("OLD"), "older compaction contributes nothing: {all}");
+        assert!(
+            !all.contains("OLD"),
+            "older compaction contributes nothing: {all}"
+        );
 
         // A missing firstKeptEntryId keeps nothing before the compaction.
         let comp_bad = json!({"type":"compaction","id":"c1","parentId":"a2","timestamp":"t","summary":"S","firstKeptEntryId":"nope","tokensBefore":1});
@@ -1268,10 +1695,24 @@ mod wp704_tests {
         let d = tmpdir();
         let path = d.join("comp.jsonl");
         let s = Session::create(path.clone(), "/work/comp").unwrap();
-        let _id_u2 = s.append_message(&msg_entry("x", None, "user", "keep me").get("message").cloned().unwrap());
-        let leaf_id = s.append_message(&msg_entry("x", None, "assistant", "drop me").get("message").cloned().unwrap());
+        let _id_u2 = s.append_message(
+            &msg_entry("x", None, "user", "keep me")
+                .get("message")
+                .cloned()
+                .unwrap(),
+        );
+        let leaf_id = s.append_message(
+            &msg_entry("x", None, "assistant", "drop me")
+                .get("message")
+                .cloned()
+                .unwrap(),
+        );
         let entries = s.entries();
-        let u2_id = entries[0].get("id").and_then(Value::as_str).unwrap().to_string();
+        let u2_id = entries[0]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
         let system = json!({"role":"system","content":"sys","toolsAdded":[],"timestamp":1});
         let entry_id = s.append_compaction("SUM", &u2_id, 77, None, false, Some(&system));
         let file = std::fs::read_to_string(&path).unwrap();
@@ -1282,21 +1723,35 @@ mod wp704_tests {
         assert_eq!(last["summary"], "SUM");
         assert_eq!(last["firstKeptEntryId"], u2_id);
         assert_eq!(last["tokensBefore"], 77);
-        assert!(last.get("fromHook").is_none(), "core compaction: no fromHook");
+        assert!(
+            last.get("fromHook").is_none(),
+            "core compaction: no fromHook"
+        );
         assert!(last.get("usage").is_none(), "zero usage: omitted");
         assert_eq!(last["systemMessage"]["content"], "sys");
         // fromHook + usage are written when given.
         let s2 = Session::create(d.join("comp2.jsonl"), "/work/comp").unwrap();
         let e2 = s2.entries()[..0].len(); // no entries: firstKept = the new entry id
         let _ = e2;
-        let u = crate::model::Usage { input: 3, output: 4, cache_read: 0, cache_write: 0 };
+        let u = crate::model::Usage {
+            input: 3,
+            output: 4,
+            cache_read: 0,
+            cache_write: 0,
+        };
         let entry_id = s2.append_compaction("S", "abc", 1, Some(&u), true, None);
         let file = std::fs::read_to_string(d.join("comp2.jsonl")).unwrap();
         let last: Value = serde_json::from_str(file.lines().last().unwrap()).unwrap();
         assert_eq!(last["fromHook"], json!(true));
-        assert_eq!(last["usage"], json!({"input":3,"output":4,"cacheRead":0,"cacheWrite":0}));
+        assert_eq!(
+            last["usage"],
+            json!({"input":3,"output":4,"cacheRead":0,"cacheWrite":0})
+        );
         assert!(last.get("systemMessage").is_none());
-        assert!(!last["id"].as_str().unwrap().is_empty() && last["id"].as_str().unwrap() != "abc", "firstKeptEntryId is stored verbatim");
+        assert!(
+            !last["id"].as_str().unwrap().is_empty() && last["id"].as_str().unwrap() != "abc",
+            "firstKeptEntryId is stored verbatim"
+        );
         let _ = entry_id;
         // The transcript is re-projected: compactionSummary + the kept range
         // (from firstKeptEntryId to the compaction, inclusive).

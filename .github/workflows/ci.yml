@@ -74,10 +74,8 @@ jobs:
         run: node sidecar/smoke.mjs
 
   clippy:
-    name: clippy (report only until WP-902)
-    # Report-only: this branch predates the fmt/clippy baseline (WP-902);
-    # the job must not block the stack bottom, it only reports the state.
-    continue-on-error: true
+    name: clippy
+    # Hard gate from WP-902: the clippy baseline (0 warnings) landed here.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -107,10 +105,10 @@ jobs:
       - run: cargo clippy --all-targets
 
   fmt:
-    name: rustfmt (report only until WP-902)
+    name: rustfmt
+    # Hard gate from WP-902: the fmt baseline landed here.
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1

@@ -22,7 +22,6 @@ use super::theme::Theme;
 pub fn md_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut in_code = false;
-    let mut code_lang: Option<String> = None;
 
     for raw in text.lines() {
         let line = raw;
@@ -32,15 +31,16 @@ pub fn md_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
                 in_code = false;
             } else {
                 in_code = true;
-                let lang = line.trim_start().trim_start_matches("```").trim().to_string();
+                let lang = line
+                    .trim_start()
+                    .trim_start_matches("```")
+                    .trim()
+                    .to_string();
                 if !lang.is_empty() {
-                    code_lang = Some(lang.clone());
                     out.push(Line::from(Span::styled(
                         lang,
                         theme.fg("mdCodeBlockBorder"),
                     )));
-                } else {
-                    code_lang = None;
                 }
             }
             continue;
@@ -64,10 +64,7 @@ pub fn md_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
             let content = inline(trimmed[hashes + 1..].trim(), theme);
             let style = theme.fg_bold("mdHeading");
             out.push(Line::from({
-                let mut spans = vec![Span::styled(
-                    format!("{hashes} "),
-                    theme.fg("muted"),
-                )];
+                let mut spans = vec![Span::styled(format!("{hashes} "), theme.fg("muted"))];
                 spans.extend(content.into_iter().map(|mut s| {
                     s.style = s.style.patch(style);
                     s
@@ -80,12 +77,12 @@ pub fn md_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
         if let Some(rest) = trimmed.strip_prefix('>') {
             let content = inline(rest.trim(), theme);
             out.push(Line::from({
-                let mut spans = vec![Span::styled(
-                    "> ".to_string(),
-                    theme.fg("mdQuoteBorder"),
-                )];
+                let mut spans = vec![Span::styled("> ".to_string(), theme.fg("mdQuoteBorder"))];
                 spans.extend(content.into_iter().map(|mut s| {
-                    s.style = s.style.patch(theme.fg("mdQuote")).add_modifier(Modifier::ITALIC);
+                    s.style = s
+                        .style
+                        .patch(theme.fg("mdQuote"))
+                        .add_modifier(Modifier::ITALIC);
                     s
                 }));
                 spans
@@ -95,13 +92,14 @@ pub fn md_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
         // List item: '- ', '* ', '+ ', 'N. ' / 'N) ' — nesting by 2-space steps.
         let indent = (line.len() - trimmed.len()) / 2;
         let is_marker = |m: &str| {
-            m == "-" || m == "*" || m == "+"
-                || m
-                    .trim_end_matches(['.', ')'])
+            m == "-"
+                || m == "*"
+                || m == "+"
+                || m.trim_end_matches(['.', ')'])
                     .chars()
                     .all(|c| c.is_ascii_digit())
                     && !m.is_empty()
-                    && m.ends_with(|c| c == '.' || c == ')')
+                    && m.ends_with(['.', ')'])
         };
         let (marker, rest) = match trimmed.split_once(' ') {
             Some((m, r)) if is_marker(m) => (Some(m), r),
@@ -132,7 +130,7 @@ fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     let mut i = 0usize;
     let mut plain: String = String::new();
 
-    let mut flush = |spans: &mut Vec<Span<'static>>, plain: &mut String| {
+    let flush = |spans: &mut Vec<Span<'static>>, plain: &mut String| {
         if !plain.is_empty() {
             spans.push(Span::raw(std::mem::take(plain)));
         }
@@ -146,10 +144,7 @@ fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
             if let Some(end) = chars[i + 1..].iter().position(|&ch| ch == '`') {
                 let code: String = chars[i + 1..i + 1 + end].iter().collect();
                 flush(&mut spans, &mut plain);
-                spans.push(Span::styled(
-                    format!("`{code}`"),
-                    theme.fg("mdCode"),
-                ));
+                spans.push(Span::styled(format!("`{code}`"), theme.fg("mdCode")));
                 i += end + 2;
                 continue;
             }
@@ -160,18 +155,24 @@ fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
             if let Some(end) = rest[2..].find("**") {
                 let inner: String = chars[i + 2..i + 2 + end].iter().collect();
                 flush(&mut spans, &mut plain);
-                spans.push(Span::styled(inner, Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    inner,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
                 i += end + 4;
                 continue;
             }
         }
         // *italic* / _italic_
-        if (c == '*' || c == '_') {
+        if c == '*' || c == '_' {
             if let Some(end) = chars[i + 1..].iter().position(|&ch| ch == c) {
                 let inner: String = chars[i + 1..i + 1 + end].iter().collect();
                 if !inner.is_empty() && !inner.ends_with(' ') {
                     flush(&mut spans, &mut plain);
-                    spans.push(Span::styled(inner, Style::default().add_modifier(Modifier::ITALIC)));
+                    spans.push(Span::styled(
+                        inner,
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ));
                     i += end + 2;
                     continue;
                 }
@@ -183,20 +184,14 @@ fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
                 let close_abs = i + 1 + close; // index of ']'
                 let paren_abs = close_abs + 1; // index of '('
                 if chars.get(paren_abs) == Some(&'(') {
-                    if let Some(url_end) = chars[paren_abs + 1..]
-                        .iter()
-                        .position(|&ch| ch == ')')
-                    {
+                    if let Some(url_end) = chars[paren_abs + 1..].iter().position(|&ch| ch == ')') {
                         let link_text: String = chars[i + 1..close_abs].iter().collect();
                         let url: String = chars[paren_abs + 1..paren_abs + 1 + url_end]
                             .iter()
                             .collect();
                         flush(&mut spans, &mut plain);
                         spans.push(Span::styled(link_text, theme.fg("mdLink")));
-                        spans.push(Span::styled(
-                            format!(" ({url})"),
-                            theme.fg("mdLinkUrl"),
-                        ));
+                        spans.push(Span::styled(format!(" ({url})"), theme.fg("mdLinkUrl")));
                         i = paren_abs + 1 + url_end + 1;
                         continue;
                     }
@@ -244,20 +239,24 @@ mod tests {
             .join("\n")
     }
 
-    fn style_of(line: &Line<'_>, span: usize) -> Style {
-        line.spans[span].style
-    }
-
     #[test]
     fn headings_are_bold_md_heading() {
         let theme = dark();
         let lines = md_lines("# Title\n## Sub", &theme);
         assert_eq!(lines.len(), 2);
-        let t = lines[0].spans.iter().find(|s| s.content.as_ref() == "Title").unwrap();
+        let t = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Title")
+            .unwrap();
         // Golden (dark): mdHeading = yellow var = okhsl(83 88% 67%).
         assert_eq!(t.style.fg, Some(Color::Rgb(205, 154, 34)));
         assert!(t.style.add_modifier.contains(Modifier::BOLD));
-        let t2 = lines[1].spans.iter().find(|s| s.content.as_ref() == "Sub").unwrap();
+        let t2 = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Sub")
+            .unwrap();
         assert_eq!(t2.style.fg, Some(Color::Rgb(205, 154, 34)));
         assert!(t2.style.add_modifier.contains(Modifier::BOLD));
     }
@@ -269,12 +268,21 @@ mod tests {
         assert_eq!(lines.len(), 4);
         let l0 = &lines[0];
         // Golden (dark): mdListBullet = violet var = okhsl(295 50% 67%).
-        assert!(l0.spans.iter().any(|s| s.content.as_ref() == "- "
-            && s.style.fg == Some(Color::Rgb(167, 152, 215))));
-        assert_eq!(flat_text(&lines[0..1]), "- one".to_string() + "\n".trim_end());
+        assert!(l0
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == "- " && s.style.fg == Some(Color::Rgb(167, 152, 215))));
+        assert_eq!(
+            flat_text(&lines[0..1]),
+            "- one".to_string() + "\n".trim_end()
+        );
         let nested = &lines[2];
         assert!(
-            nested.spans.first().map(|s| s.content.as_ref().contains(' ')).unwrap_or(false),
+            nested
+                .spans
+                .first()
+                .map(|s| s.content.as_ref().contains(' '))
+                .unwrap_or(false),
             "nested item is indented: {nested:?}"
         );
         let numbered = &lines[3];
@@ -288,10 +296,16 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert_eq!(spans_of(&lines, 0)[0].content.as_ref(), "rust");
         // Golden (dark): mdCodeBlockBorder = muted = okhsl(229 6% 67%).
-        assert_eq!(spans_of(&lines, 0)[0].style.fg, Some(Color::Rgb(157, 165, 169)));
+        assert_eq!(
+            spans_of(&lines, 0)[0].style.fg,
+            Some(Color::Rgb(157, 165, 169))
+        );
         assert_eq!(spans_of(&lines, 1)[0].content.as_ref(), "fn main() {}");
         // Golden (dark): mdCodeBlock = green var = okhsl(159 59% 67%).
-        assert_eq!(spans_of(&lines, 1)[0].style.fg, Some(Color::Rgb(104, 183, 141)));
+        assert_eq!(
+            spans_of(&lines, 1)[0].style.fg,
+            Some(Color::Rgb(104, 183, 141))
+        );
     }
 
     #[test]
@@ -301,7 +315,10 @@ mod tests {
         let theme = dark();
         let lines = md_lines("```py\nprint(1)", &theme);
         assert_eq!(lines.len(), 2, "{lines:?}");
-        assert_eq!(spans_of(&lines, 1)[0].style.fg, Some(Color::Rgb(104, 183, 141)));
+        assert_eq!(
+            spans_of(&lines, 1)[0].style.fg,
+            Some(Color::Rgb(104, 183, 141))
+        );
     }
 
     #[test]
@@ -310,7 +327,10 @@ mod tests {
         let lines = md_lines("use `cargo build` now", &theme);
         assert_eq!(lines.len(), 1);
         let s = &lines[0].spans;
-        let code = s.iter().find(|s| s.content.as_ref() == "`cargo build`").unwrap();
+        let code = s
+            .iter()
+            .find(|s| s.content.as_ref() == "`cargo build`")
+            .unwrap();
         // Golden (dark): mdCode = violet var = okhsl(295 50% 67%).
         assert_eq!(code.style.fg, Some(Color::Rgb(167, 152, 215)));
     }
@@ -345,7 +365,10 @@ mod tests {
         let t = s.iter().find(|s| s.content.as_ref() == "docs").unwrap();
         // Golden (dark): mdLink = blue var = okhsl(232 54% 67%).
         assert_eq!(t.style.fg, Some(Color::Rgb(105, 173, 208)));
-        let u = s.iter().find(|s| s.content.as_ref() == " (https://example.com/x)").unwrap();
+        let u = s
+            .iter()
+            .find(|s| s.content.as_ref() == " (https://example.com/x)")
+            .unwrap();
         // Golden (dark): mdLinkUrl = muted var = okhsl(229 6% 67%).
         assert_eq!(u.style.fg, Some(Color::Rgb(157, 165, 169)));
     }
@@ -359,7 +382,10 @@ mod tests {
         assert_eq!(s[0].content.as_ref(), "> ");
         // Golden (dark): mdQuoteBorder = muted var.
         assert_eq!(s[0].style.fg, Some(Color::Rgb(157, 165, 169)));
-        let q = s.iter().find(|s| s.content.as_ref() == "quoted words").unwrap();
+        let q = s
+            .iter()
+            .find(|s| s.content.as_ref() == "quoted words")
+            .unwrap();
         assert!(q.style.add_modifier.contains(Modifier::ITALIC));
         // Golden (dark): mdQuote = muted var.
         assert_eq!(q.style.fg, Some(Color::Rgb(157, 165, 169)));
@@ -380,8 +406,7 @@ mod tests {
         let theme = dark();
         let text = flat_text(&md_lines(md, &theme));
         assert_eq!(
-            text,
-            "1 Plan\n- do `x` now\n  - detail\nsh\necho hi\n> note",
+            text, "1 Plan\n- do `x` now\n  - detail\nsh\necho hi\n> note",
             "layout: {text}"
         );
     }
@@ -396,11 +421,7 @@ mod tests {
         let lines = md_lines("你好 👍 world", &theme);
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
         Paragraph::new(lines).render(Rect::new(0, 0, 20, 1), &mut buf);
-        let row: String = buf
-            .content
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect();
+        let row: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
         // 你好 (4 cells) + space + 👍 (2 cells) + space + world (5) = 13 used.
         // Wide chars leave a blank continuation cell in the buffer, so the
         // raw row reads "你 好  👍  world".

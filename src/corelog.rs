@@ -11,9 +11,8 @@ static SINK: Mutex<Option<File>> = Mutex::new(None);
 /// Route subsequent lines to `path` (created/appended) instead of stderr.
 /// Keeps stderr if the file cannot be opened.
 pub fn set_log_file(path: impl AsRef<std::path::Path>) {
-    match File::options().create(true).append(true).open(path) {
-        Ok(f) => *SINK.lock().unwrap() = Some(f),
-        Err(_) => {}
+    if let Ok(f) = File::options().create(true).append(true).open(path) {
+        *SINK.lock().unwrap() = Some(f)
     }
 }
 

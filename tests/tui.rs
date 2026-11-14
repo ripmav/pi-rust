@@ -366,13 +366,20 @@ fn tui_extension_dialog_roundtrip() {
             repo().display().to_string().as_str(),
             tmp.display().to_string().as_str(),
             tmp.join("agent-dir").display().to_string().as_str(),
-            repo().join("tests/fixtures/dialogs").display().to_string().as_str(),
+            repo()
+                .join("tests/fixtures/dialogs")
+                .display()
+                .to_string()
+                .as_str(),
         ])
         .output()
         .expect("running pty harness");
     let screen = String::from_utf8_lossy(&out.stderr).to_string();
     let code = out.status.code().unwrap_or(-1);
-    assert_eq!(code, 0, "pty dialog harness failed (child exit/dialog not answered). Screen:\n{screen}");
+    assert_eq!(
+        code, 0,
+        "pty dialog harness failed (child exit/dialog not answered). Screen:\n{screen}"
+    );
 }
 
 #[test]
@@ -395,8 +402,14 @@ fn tui_interactive_smoke() {
         .expect("running pty harness");
     let screen = String::from_utf8_lossy(&out.stderr).to_string();
     let code = out.status.code().unwrap_or(-1);
-    assert_eq!(code, 0, "pty harness failed (child exit/missing content). Screen:\n{screen}");
-    assert!(screen.contains("OK=1"), "harness did not confirm TUI interaction:\n{screen}");
+    assert_eq!(
+        code, 0,
+        "pty harness failed (child exit/missing content). Screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("OK=1"),
+        "harness did not confirm TUI interaction:\n{screen}"
+    );
 }
 
 #[test]
@@ -414,11 +427,18 @@ fn tui_slash_command_roundtrip() {
             repo().display().to_string().as_str(),
             tmp.display().to_string().as_str(),
             tmp.join("agent-dir").display().to_string().as_str(),
-            repo().join("tests/fixtures/cmd").display().to_string().as_str(),
+            repo()
+                .join("tests/fixtures/cmd")
+                .display()
+                .to_string()
+                .as_str(),
         ])
         .output()
         .expect("running pty harness");
     let screen = String::from_utf8_lossy(&out.stderr).to_string();
     let code = out.status.code().unwrap_or(-1);
-    assert_eq!(code, 0, "pty slash-command harness failed (menu/result missing). Screen:\n{screen}");
+    assert_eq!(
+        code, 0,
+        "pty slash-command harness failed (menu/result missing). Screen:\n{screen}"
+    );
 }

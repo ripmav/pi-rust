@@ -16,7 +16,11 @@ pub async fn spawn(
     sidecar_args: &[String],
     cwd: &Path,
     stderr: Stdio,
-) -> Result<(Child, mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<Value>)> {
+) -> Result<(
+    Child,
+    mpsc::UnboundedSender<String>,
+    mpsc::UnboundedReceiver<Value>,
+)> {
     let mut child = Command::new(node)
         .arg(sidecar)
         .args(sidecar_args)
@@ -57,7 +61,9 @@ pub async fn spawn(
                         break;
                     }
                 }
-                Err(e) => crate::corelog::line(&format!("[core] dropping unreadable sidecar line: {e}")),
+                Err(e) => {
+                    crate::corelog::line(&format!("[core] dropping unreadable sidecar line: {e}"))
+                }
             }
         }
     });

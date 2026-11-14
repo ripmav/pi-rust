@@ -53,9 +53,11 @@ impl BridgeClient {
         let (events, events_rx) = mpsc::unbounded_channel::<Value>();
         let (state_tx, state_rx) = watch::channel(State::Stopped);
         let (exit_tx, exit_rx) = watch::channel(None::<i32>);
-        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let degraded_seen = Arc::new(AtomicBool::new(false));
-        let streams: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let streams: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Demux: responses correlate strictly by id (a response for an unknown
         // or already-timed-out id is ignored — protocol rule); WP-701 provider
@@ -105,7 +107,15 @@ impl BridgeClient {
         });
 
         (
-            Self { tx, pending, state_tx, state_rx, exit_rx, degraded_seen, streams },
+            Self {
+                tx,
+                pending,
+                state_tx,
+                state_rx,
+                exit_rx,
+                degraded_seen,
+                streams,
+            },
             events_rx,
         )
     }
@@ -113,7 +123,7 @@ impl BridgeClient {
     fn degrade(st: &watch::Sender<State>, seen: &AtomicBool) {
         if *st.borrow() == State::Running {
             seen.store(true, Ordering::SeqCst);
-            crate::corelog::line(&format!("[core] bridge DEGRADED: sidecar transport lost; built-ins continue, extension tools unavailable, no respawn"));
+            crate::corelog::line("[core] bridge DEGRADED: sidecar transport lost; built-ins continue, extension tools unavailable, no respawn");
             let _ = st.send(State::Degraded);
         }
     }
@@ -139,7 +149,10 @@ impl BridgeClient {
     /// line matches the id; per-request timeout = the negotiated init timeoutMs.
     pub async fn request(&self, ty: &str, payload: Value) -> Decision {
         if self.state() != State::Running {
-            crate::corelog::line(&format!("[core] {ty} dropped (bridge {:?}): protocol default applies", self.state()));
+            crate::corelog::line(&format!(
+                "[core] {ty} dropped (bridge {:?}): protocol default applies",
+                self.state()
+            ));
             return Decision::Unavailable;
         }
         self.request_inner(ty, payload).await
@@ -177,7 +190,11 @@ impl BridgeClient {
     /// in `Degraded`/`Stopped`.
     pub fn fire(&self, line: Value) {
         if self.state() != State::Running {
-            crate::corelog::line(&format!("[core] F&F dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?")));
+            crate::corelog::line(&format!(
+                "[core] F&F dropped (bridge {:?}): {}",
+                self.state(),
+                line.get("type").and_then(Value::as_str).unwrap_or("?")
+            ));
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
@@ -189,7 +206,11 @@ impl BridgeClient {
     /// set_model_request, set_thinking_level_request) or an extension_ui_response.
     pub fn send(&self, line: Value) {
         if self.state() != State::Running {
-            crate::corelog::line(&format!("[core] reply dropped (bridge {:?}): {}", self.state(), line.get("type").and_then(Value::as_str).unwrap_or("?")));
+            crate::corelog::line(&format!(
+                "[core] reply dropped (bridge {:?}): {}",
+                self.state(),
+                line.get("type").and_then(Value::as_str).unwrap_or("?")
+            ));
             return;
         }
         if self.tx.send(line.to_string()).is_err() {
@@ -202,7 +223,10 @@ impl BridgeClient {
     /// early event cannot be dropped by the demux.
     pub fn attach_stream(&self, stream_id: &str) -> mpsc::UnboundedReceiver<Value> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.streams.lock().unwrap().insert(stream_id.to_string(), tx);
+        self.streams
+            .lock()
+            .unwrap()
+            .insert(stream_id.to_string(), tx);
         rx
     }
 

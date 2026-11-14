@@ -4,7 +4,7 @@
 //! start(), `prompt` = the command, tool-result = observed events
 //! (toolCallId correlation), quit = SIGTERM -> exit 143.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -19,13 +19,11 @@ fn spawn_rpc(args: &[&str], env: &[(&str, &str)]) -> Child {
     for (k, v) in env {
         cmd.env(k, v);
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     cmd.spawn().expect("spawning pi-rust rpc")
 }
-
-/// Line-reading helper: pumps stdout into a shared vec; `read_until` polls
-/// for a predicate line (bounded by the caller's overall test timeout).
-struct Lines(Arc<Mutex<Vec<String>>>);
 
 fn pump(child: &mut Child, sink: Arc<Mutex<Vec<String>>>) -> std::thread::JoinHandle<()> {
     let out = child.stdout.take().unwrap();
@@ -49,7 +47,11 @@ fn wait_for(sink: &Arc<Mutex<Vec<String>>>, what: &str, pred: impl Fn(&Value) ->
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<Value>(t) {
-                if v.get(what).and_then(Value::as_str).is_some_and(|x| x == "response") && pred(&v) {
+                if v.get(what)
+                    .and_then(Value::as_str)
+                    .is_some_and(|x| x == "response")
+                    && pred(&v)
+                {
                     return v;
                 }
                 if pred(&v) {
@@ -57,7 +59,10 @@ fn wait_for(sink: &Arc<Mutex<Vec<String>>>, what: &str, pred: impl Fn(&Value) ->
                 }
             }
         }
-        assert!(std::time::Instant::now() < deadline, "timeout waiting for predicate; lines: {lines:?}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout waiting for predicate; lines: {lines:?}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
@@ -79,7 +84,12 @@ fn wp802_rpc_prompt_roundtrip_echo() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let mut child = spawn_rpc(
-        &["--agent-dir", &tmp.join("agent").to_string_lossy(), "--session-file", &tmp.join("s.jsonl").to_string_lossy()],
+        &[
+            "--agent-dir",
+            &tmp.join("agent").to_string_lossy(),
+            "--session-file",
+            &tmp.join("s.jsonl").to_string_lossy(),
+        ],
         &[],
     );
     let sink = Arc::new(Mutex::new(Vec::new()));
@@ -87,8 +97,14 @@ fn wp802_rpc_prompt_roundtrip_echo() {
     let mut stdin = child.stdin.take().unwrap();
 
     // init = just spawn: the process idles on stdin (upstream: no handshake).
-    writeln!(stdin, r#"{{"id":"req_1","type":"prompt","message":"hello"}}"#).unwrap();
-    let resp = wait_for(&sink, "id", |v| v.get("id").and_then(Value::as_str) == Some("req_1") && v["type"] == "response");
+    writeln!(
+        stdin,
+        r#"{{"id":"req_1","type":"prompt","message":"hello"}}"#
+    )
+    .unwrap();
+    let resp = wait_for(&sink, "id", |v| {
+        v.get("id").and_then(Value::as_str) == Some("req_1") && v["type"] == "response"
+    });
     assert_eq!(resp["command"], "prompt", "{resp}");
     assert_eq!(resp["success"], true, "{resp}");
     assert_eq!(resp["data"]["disposition"], "started", "{resp}");
@@ -98,19 +114,38 @@ fn wp802_rpc_prompt_roundtrip_echo() {
     assert_eq!(settled["aborted"], false, "{settled}");
 
     let lines = lines_json(&sink);
-    let types: Vec<&str> = lines.iter().filter_map(|v| v.get("type").and_then(Value::as_str)).collect();
-    for expected in ["agent_start", "turn_start", "message_start", "message_end", "turn_end", "agent_end", "agent_settled"] {
-        assert!(types.iter().any(|t| *t == expected), "missing {expected}: {types:?}");
+    let types: Vec<&str> = lines
+        .iter()
+        .filter_map(|v| v.get("type").and_then(Value::as_str))
+        .collect();
+    for expected in [
+        "agent_start",
+        "turn_start",
+        "message_start",
+        "message_end",
+        "turn_end",
+        "agent_end",
+        "agent_settled",
+    ] {
+        assert!(types.contains(&expected), "missing {expected}: {types:?}");
     }
     // User message event carries the prompt text; the echo turn answered it.
-    let user = lines.iter().find(|v| v["type"] == "message_start" && v["message"]["role"] == "user").expect("user message_start");
+    let user = lines
+        .iter()
+        .find(|v| v["type"] == "message_start" && v["message"]["role"] == "user")
+        .expect("user message_start");
     assert!(user.to_string().contains("hello"), "{user}");
-    let assistant = lines.iter().find(|v| v["type"] == "message_end" && v["message"]["role"] == "assistant").expect("assistant message_end");
+    let assistant = lines
+        .iter()
+        .find(|v| v["type"] == "message_end" && v["message"]["role"] == "assistant")
+        .expect("assistant message_end");
     assert!(assistant.to_string().contains("echo: hello"), "{assistant}");
 
     // Unknown command: the upstream error response shape.
     writeln!(stdin, r#"{{"id":"req_2","type":"nope"}}"#).unwrap();
-    let err = wait_for(&sink, "id", |v| v.get("id").and_then(Value::as_str) == Some("req_2") && v["type"] == "response");
+    let err = wait_for(&sink, "id", |v| {
+        v.get("id").and_then(Value::as_str) == Some("req_2") && v["type"] == "response"
+    });
     assert_eq!(err["success"], false, "{err}");
     assert_eq!(err["error"], "Unknown command: nope", "{err}");
 
@@ -138,9 +173,10 @@ fn sse_mock(responses: Vec<String>, max: usize) -> (String, std::thread::JoinHan
     let base = format!("http://{}", listener.local_addr().unwrap());
     let h = std::thread::spawn(move || {
         use std::io::Read;
-        let mut conn = 0usize;
-        for _ in 0..max {
-            let Ok((mut s, _)) = listener.accept() else { break };
+        for conns in 0..max {
+            let Ok((mut s, _)) = listener.accept() else {
+                break;
+            };
             let mut buf = vec![0u8; 65536];
             let mut n = 0usize;
             loop {
@@ -155,8 +191,7 @@ fn sse_mock(responses: Vec<String>, max: usize) -> (String, std::thread::JoinHan
                 }
             }
             let _ = s.set_nodelay(true);
-            let resp = &responses[conn % responses.len()];
-            conn += 1;
+            let resp = &responses[conns % responses.len()];
             let _ = s.write_all(resp.as_bytes());
             let _ = s.flush();
         }
@@ -180,7 +215,16 @@ fn wp802_rpc_tool_events_via_mock() {
     let (base, _server) = sse_mock(vec![turn1, turn2], 4);
 
     let mut child = spawn_rpc(
-        &["--provider", "openai", "--model", "gpt-4o-mini", "--agent-dir", &tmp.join("agent").to_string_lossy(), "--session-file", &tmp.join("s.jsonl").to_string_lossy()],
+        &[
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-4o-mini",
+            "--agent-dir",
+            &tmp.join("agent").to_string_lossy(),
+            "--session-file",
+            &tmp.join("s.jsonl").to_string_lossy(),
+        ],
         &[("OPENAI_API_KEY", "e2e-key"), ("OPENAI_BASE_URL", &base)],
     );
     let sink = Arc::new(Mutex::new(Vec::new()));
@@ -202,7 +246,11 @@ fn wp802_rpc_tool_events_via_mock() {
         })
     };
     let mut stdin = child.stdin.take().unwrap();
-    writeln!(stdin, r#"{{"id":"req_1","type":"prompt","message":"run it"}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"id":"req_1","type":"prompt","message":"run it"}}"#
+    )
+    .unwrap();
     wait_for(&sink, "type", |v| v["type"] == "agent_settled");
     drop(stdin);
     let status = child.wait().expect("wait");
@@ -211,21 +259,56 @@ fn wp802_rpc_tool_events_via_mock() {
     let child_err = err_sink.lock().unwrap().clone();
 
     let lines = lines_json(&sink);
-    let start = lines.iter().find(|v| v["type"] == "tool_execution_start")
-        .unwrap_or_else(|| panic!("no tool_execution_start:\nlines: {lines:?}\nchild stderr: {}", String::from_utf8_lossy(&child_err)));
+    let start = lines
+        .iter()
+        .find(|v| v["type"] == "tool_execution_start")
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool_execution_start:\nlines: {lines:?}\nchild stderr: {}",
+                String::from_utf8_lossy(&child_err)
+            )
+        });
     assert_eq!(start["toolName"], "bash", "{start}");
     let tool_call_id = start["toolCallId"].to_string();
-    assert!(!tool_call_id.is_empty() && tool_call_id != "null", "{start}");
-    let end = lines.iter().find(|v| v["type"] == "tool_execution_end").expect("tool_execution_end");
-    assert_eq!(end["toolCallId"].to_string(), tool_call_id, "correlation: {end} vs {start}");
+    assert!(
+        !tool_call_id.is_empty() && tool_call_id != "null",
+        "{start}"
+    );
+    let end = lines
+        .iter()
+        .find(|v| v["type"] == "tool_execution_end")
+        .expect("tool_execution_end");
+    assert_eq!(
+        end["toolCallId"].to_string(),
+        tool_call_id,
+        "correlation: {end} vs {start}"
+    );
     assert_eq!(end["isError"], false, "{end}");
     // The toolResult message events carry the same toolCallId.
-    let tr_start = lines.iter().find(|v| v["type"] == "message_start" && v["message"]["role"] == "toolResult").expect("toolResult message_start");
-    assert_eq!(tr_start["message"]["toolCallId"].to_string(), tool_call_id, "{tr_start}");
-    let tr_end = lines.iter().find(|v| v["type"] == "message_end" && v["message"]["role"] == "toolResult").expect("toolResult message_end");
-    assert_eq!(tr_end["message"]["toolCallId"].to_string(), tool_call_id, "{tr_end}");
+    let tr_start = lines
+        .iter()
+        .find(|v| v["type"] == "message_start" && v["message"]["role"] == "toolResult")
+        .expect("toolResult message_start");
+    assert_eq!(
+        tr_start["message"]["toolCallId"].to_string(),
+        tool_call_id,
+        "{tr_start}"
+    );
+    let tr_end = lines
+        .iter()
+        .find(|v| v["type"] == "message_end" && v["message"]["role"] == "toolResult")
+        .expect("toolResult message_end");
+    assert_eq!(
+        tr_end["message"]["toolCallId"].to_string(),
+        tool_call_id,
+        "{tr_end}"
+    );
     // Two turns ran (tool turn + final text turn).
-    assert_eq!(lines.iter().filter(|v| v["type"] == "turn_end").count(), 2, "{lines:?}");
+    assert_eq!(
+        lines.iter().filter(|v| v["type"] == "turn_end").count(),
+        2,
+        "{lines:?}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -266,18 +349,30 @@ console.log(JSON.stringify({ ok: true, exitCode, types }));
     std::fs::write(&script_path, script).unwrap();
     let out = Command::new("node")
         .current_dir(&tmp)
-        .env("SHIM", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rpc-shim.mjs"))
+        .env(
+            "SHIM",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rpc-shim.mjs"),
+        )
         .env("PI_RUST_BIN", env!("CARGO_BIN_EXE_pi-rust"))
-        .env("UPSTREAM_INDEX", concat!(env!("CARGO_MANIFEST_DIR"), "/upstream/packages/coding-agent/dist/index.js"))
+        .env(
+            "UPSTREAM_INDEX",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/upstream/packages/coding-agent/dist/index.js"
+            ),
+        )
         .arg(&script_path)
-        .arg("--agent-dir").arg(tmp.join("agent"))
-        .arg("--session-file").arg(tmp.join("s.jsonl"))
+        .arg("--agent-dir")
+        .arg(tmp.join("agent"))
+        .arg("--session-file")
+        .arg(tmp.join("s.jsonl"))
         .output()
         .expect("running node");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: Value = serde_json::from_str(stdout.trim().lines().next().unwrap()).unwrap_or_else(|e| panic!("bad stdout {stdout:?}: {e}"));
+    let v: Value = serde_json::from_str(stdout.trim().lines().next().unwrap())
+        .unwrap_or_else(|e| panic!("bad stdout {stdout:?}: {e}"));
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["exitCode"], 143, "SIGTERM -> 143: {v}");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -295,12 +390,23 @@ fn wp802_protocol_diff_vs_upstream() {
     let out = Command::new("node")
         .current_dir(&tmp)
         .env("PI_RUST_BIN", env!("CARGO_BIN_EXE_pi-rust"))
-        .env("UPSTREAM_CLI", concat!(env!("CARGO_MANIFEST_DIR"), "/upstream/packages/coding-agent/dist/cli.js"))
+        .env(
+            "UPSTREAM_CLI",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/upstream/packages/coding-agent/dist/cli.js"
+            ),
+        )
         .env("TMPDIR", &tmp)
         .arg(harness)
         .output()
         .expect("running node diff harness");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert_eq!(out.status.code(), Some(0), "diff harness failed\n{stderr}\nstdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "diff harness failed\n{stderr}\nstdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }

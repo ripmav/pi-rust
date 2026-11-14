@@ -28,14 +28,41 @@ pub struct ParsedKey {
 const MODIFIERS: [&str; 4] = ["ctrl", "shift", "alt", "super"];
 
 const SPECIAL_KEYS: &[&str] = &[
-    "escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert",
-    "clear", "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
-    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+    "escape",
+    "esc",
+    "enter",
+    "return",
+    "tab",
+    "space",
+    "backspace",
+    "delete",
+    "insert",
+    "clear",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "up",
+    "down",
+    "left",
+    "right",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
 ];
 
 const SYMBOL_KEYS: &[char] = &[
-    '`', '-', '=', '[', ']', '\\', ';', '\'', ',', '.', '/', '!', '@', '#', '$', '%', '^',
-    '&', '*', '(', ')', '_', '+', '|', '~', '{', '}', ':', '<', '>', '?',
+    '`', '-', '=', '[', ']', '\\', ';', '\'', ',', '.', '/', '!', '@', '#', '$', '%', '^', '&',
+    '*', '(', ')', '_', '+', '|', '~', '{', '}', ':', '<', '>', '?',
 ];
 
 /// Upstream `parseKeyId` grammar: modifiers stripped from the front in any
@@ -82,7 +109,13 @@ pub fn parse_key_id(key_id: &str) -> Option<ParsedKey> {
     if !valid_base {
         return None;
     }
-    Some(ParsedKey { base: key, ctrl, shift, alt, super_ })
+    Some(ParsedKey {
+        base: key,
+        ctrl,
+        shift,
+        alt,
+        super_,
+    })
 }
 
 /// The pinned-upstream golden table (linux, non-WSL): `TUI_KEYBINDINGS`
@@ -91,29 +124,101 @@ pub const KEYBINDINGS: &[(&str, &[&str], &str)] = &[
     // ---- editor (upstream packages/tui/src/keybindings.ts) ----
     ("tui.editor.cursorUp", &["up"], "Move cursor up"),
     ("tui.editor.cursorDown", &["down"], "Move cursor down"),
-    ("tui.editor.historyPrevious", &[], "Select previous prompt history entry"),
-    ("tui.editor.historyNext", &[], "Select next prompt history entry"),
-    ("tui.editor.cursorLeft", &["left", "ctrl+b"], "Move cursor left"),
-    ("tui.editor.cursorRight", &["right", "ctrl+f"], "Move cursor right"),
-    ("tui.editor.cursorWordLeft", &["alt+left", "ctrl+left", "alt+b"], "Move cursor word left"),
-    ("tui.editor.cursorWordRight", &["alt+right", "ctrl+right", "alt+f"], "Move cursor word right"),
-    ("tui.editor.cursorLineStart", &["home", "ctrl+a"], "Move to line start"),
-    ("tui.editor.cursorLineEnd", &["end", "ctrl+e"], "Move to line end"),
-    ("tui.editor.jumpForward", &["ctrl+]"], "Jump forward to character"),
-    ("tui.editor.jumpBackward", &["ctrl+alt+]"], "Jump backward to character"),
+    (
+        "tui.editor.historyPrevious",
+        &[],
+        "Select previous prompt history entry",
+    ),
+    (
+        "tui.editor.historyNext",
+        &[],
+        "Select next prompt history entry",
+    ),
+    (
+        "tui.editor.cursorLeft",
+        &["left", "ctrl+b"],
+        "Move cursor left",
+    ),
+    (
+        "tui.editor.cursorRight",
+        &["right", "ctrl+f"],
+        "Move cursor right",
+    ),
+    (
+        "tui.editor.cursorWordLeft",
+        &["alt+left", "ctrl+left", "alt+b"],
+        "Move cursor word left",
+    ),
+    (
+        "tui.editor.cursorWordRight",
+        &["alt+right", "ctrl+right", "alt+f"],
+        "Move cursor word right",
+    ),
+    (
+        "tui.editor.cursorLineStart",
+        &["home", "ctrl+a"],
+        "Move to line start",
+    ),
+    (
+        "tui.editor.cursorLineEnd",
+        &["end", "ctrl+e"],
+        "Move to line end",
+    ),
+    (
+        "tui.editor.jumpForward",
+        &["ctrl+]"],
+        "Jump forward to character",
+    ),
+    (
+        "tui.editor.jumpBackward",
+        &["ctrl+alt+]"],
+        "Jump backward to character",
+    ),
     ("tui.editor.pageUp", &["pageUp", "ctrl+pageUp"], "Page up"),
-    ("tui.editor.pageDown", &["pageDown", "ctrl+pageDown"], "Page down"),
-    ("tui.editor.deleteCharBackward", &["backspace"], "Delete character backward"),
-    ("tui.editor.deleteCharForward", &["delete", "ctrl+d"], "Delete character forward"),
-    ("tui.editor.deleteWordBackward", &["ctrl+w", "alt+backspace"], "Delete word backward"),
-    ("tui.editor.deleteWordForward", &["alt+d", "alt+delete"], "Delete word forward"),
-    ("tui.editor.deleteToLineStart", &["ctrl+u"], "Delete to line start"),
-    ("tui.editor.deleteToLineEnd", &["ctrl+k"], "Delete to line end"),
+    (
+        "tui.editor.pageDown",
+        &["pageDown", "ctrl+pageDown"],
+        "Page down",
+    ),
+    (
+        "tui.editor.deleteCharBackward",
+        &["backspace"],
+        "Delete character backward",
+    ),
+    (
+        "tui.editor.deleteCharForward",
+        &["delete", "ctrl+d"],
+        "Delete character forward",
+    ),
+    (
+        "tui.editor.deleteWordBackward",
+        &["ctrl+w", "alt+backspace"],
+        "Delete word backward",
+    ),
+    (
+        "tui.editor.deleteWordForward",
+        &["alt+d", "alt+delete"],
+        "Delete word forward",
+    ),
+    (
+        "tui.editor.deleteToLineStart",
+        &["ctrl+u"],
+        "Delete to line start",
+    ),
+    (
+        "tui.editor.deleteToLineEnd",
+        &["ctrl+k"],
+        "Delete to line end",
+    ),
     ("tui.editor.yank", &["ctrl+y"], "Yank"),
     ("tui.editor.yankPop", &["alt+y"], "Yank pop"),
     ("tui.editor.undo", &["ctrl+-"], "Undo"),
     // ---- input ----
-    ("tui.input.newLine", &["shift+enter", "ctrl+j"], "Insert newline"),
+    (
+        "tui.input.newLine",
+        &["shift+enter", "ctrl+j"],
+        "Insert newline",
+    ),
     ("tui.input.submit", &["enter"], "Submit input"),
     ("tui.input.tab", &["tab"], "Tab / autocomplete"),
     ("tui.input.copy", &["ctrl+c"], "Copy selection"),
@@ -123,22 +228,78 @@ pub const KEYBINDINGS: &[(&str, &[&str], &str)] = &[
     ("tui.select.pageUp", &["pageUp"], "Selection page up"),
     ("tui.select.pageDown", &["pageDown"], "Selection page down"),
     ("tui.select.confirm", &["enter"], "Confirm selection"),
-    ("tui.select.cancel", &["escape", "ctrl+c"], "Cancel selection"),
+    (
+        "tui.select.cancel",
+        &["escape", "ctrl+c"],
+        "Cancel selection",
+    ),
     // ---- alternate-screen viewport ----
-    ("tui.altScreen.pageUp", &["pageUp"], "Scroll viewport up one page"),
-    ("tui.altScreen.pageDown", &["pageDown"], "Scroll viewport down one page"),
-    ("tui.altScreen.halfPageUp", &[], "Scroll viewport up half a page"),
-    ("tui.altScreen.halfPageDown", &[], "Scroll viewport down half a page"),
+    (
+        "tui.altScreen.pageUp",
+        &["pageUp"],
+        "Scroll viewport up one page",
+    ),
+    (
+        "tui.altScreen.pageDown",
+        &["pageDown"],
+        "Scroll viewport down one page",
+    ),
+    (
+        "tui.altScreen.halfPageUp",
+        &[],
+        "Scroll viewport up half a page",
+    ),
+    (
+        "tui.altScreen.halfPageDown",
+        &[],
+        "Scroll viewport down half a page",
+    ),
     ("tui.altScreen.lineUp", &[], "Scroll viewport up one line"),
-    ("tui.altScreen.lineDown", &[], "Scroll viewport down one line"),
-    ("tui.altScreen.previousPrompt", &["ctrl+shift+up", "ctrl+up"], "Jump to previous semantic prompt"),
-    ("tui.altScreen.nextPrompt", &["ctrl+shift+down", "ctrl+down"], "Jump to next semantic prompt"),
-    ("tui.altScreen.search", &["ctrl+shift+f"], "Search the primary scroll view"),
-    ("tui.altScreen.searchNext", &["enter", "ctrl+g"], "Select the next search match"),
-    ("tui.altScreen.searchPrevious", &["shift+enter", "ctrl+shift+g"], "Select the previous search match"),
-    ("tui.altScreen.searchClose", &["escape"], "Close transcript search"),
-    ("tui.altScreen.top", &["ctrl+home"], "Scroll viewport to top"),
-    ("tui.altScreen.bottom", &["ctrl+end"], "Scroll viewport to bottom"),
+    (
+        "tui.altScreen.lineDown",
+        &[],
+        "Scroll viewport down one line",
+    ),
+    (
+        "tui.altScreen.previousPrompt",
+        &["ctrl+shift+up", "ctrl+up"],
+        "Jump to previous semantic prompt",
+    ),
+    (
+        "tui.altScreen.nextPrompt",
+        &["ctrl+shift+down", "ctrl+down"],
+        "Jump to next semantic prompt",
+    ),
+    (
+        "tui.altScreen.search",
+        &["ctrl+shift+f"],
+        "Search the primary scroll view",
+    ),
+    (
+        "tui.altScreen.searchNext",
+        &["enter", "ctrl+g"],
+        "Select the next search match",
+    ),
+    (
+        "tui.altScreen.searchPrevious",
+        &["shift+enter", "ctrl+shift+g"],
+        "Select the previous search match",
+    ),
+    (
+        "tui.altScreen.searchClose",
+        &["escape"],
+        "Close transcript search",
+    ),
+    (
+        "tui.altScreen.top",
+        &["ctrl+home"],
+        "Scroll viewport to top",
+    ),
+    (
+        "tui.altScreen.bottom",
+        &["ctrl+end"],
+        "Scroll viewport to bottom",
+    ),
     // ---- app (upstream packages/coding-agent/src/core/keybindings.ts, linux) ----
     ("app.interrupt", &["escape"], "Cancel or abort"),
     ("app.clear", &["ctrl+c"], "Clear editor"),
@@ -147,42 +308,130 @@ pub const KEYBINDINGS: &[(&str, &[&str], &str)] = &[
     ("app.thinking.cycle", &["shift+tab"], "Cycle thinking level"),
     ("app.thinking.save", &["ctrl+s"], "Save thinking level"),
     ("app.model.cycleForward", &["ctrl+p"], "Cycle to next model"),
-    ("app.model.cycleBackward", &["shift+ctrl+p"], "Cycle to previous model"),
+    (
+        "app.model.cycleBackward",
+        &["shift+ctrl+p"],
+        "Cycle to previous model",
+    ),
     ("app.model.select", &["ctrl+l"], "Open model selector"),
     ("app.tools.expand", &["ctrl+o"], "Toggle tool output"),
     ("app.thinking.toggle", &["ctrl+t"], "Toggle thinking blocks"),
-    ("app.session.toggleNamedFilter", &["ctrl+n"], "Toggle named session filter"),
+    (
+        "app.session.toggleNamedFilter",
+        &["ctrl+n"],
+        "Toggle named session filter",
+    ),
     ("app.editor.external", &["ctrl+g"], "Open external editor"),
-    ("app.message.copy", &["ctrl+x"], "Copy selection or last assistant message"),
-    ("app.message.followUp", &["alt+enter"], "Queue follow-up message"),
-    ("app.message.dequeue", &["alt+up"], "Restore queued messages"),
-    ("app.clipboard.pasteImage", &["ctrl+v"], "Paste files on macOS, images, or text from clipboard"),
+    (
+        "app.message.copy",
+        &["ctrl+x"],
+        "Copy selection or last assistant message",
+    ),
+    (
+        "app.message.followUp",
+        &["alt+enter"],
+        "Queue follow-up message",
+    ),
+    (
+        "app.message.dequeue",
+        &["alt+up"],
+        "Restore queued messages",
+    ),
+    (
+        "app.clipboard.pasteImage",
+        &["ctrl+v"],
+        "Paste files on macOS, images, or text from clipboard",
+    ),
     ("app.session.new", &[], "Start a new session"),
     ("app.session.tree", &[], "Open session tree"),
     ("app.session.fork", &[], "Fork current session"),
     ("app.session.resume", &[], "Resume last session"),
-    ("app.tree.foldOrUp", &["ctrl+left", "alt+left"], "Fold tree branch or move up"),
-    ("app.tree.unfoldOrDown", &["ctrl+right", "alt+right"], "Unfold tree branch or move down"),
+    (
+        "app.tree.foldOrUp",
+        &["ctrl+left", "alt+left"],
+        "Fold tree branch or move up",
+    ),
+    (
+        "app.tree.unfoldOrDown",
+        &["ctrl+right", "alt+right"],
+        "Unfold tree branch or move down",
+    ),
     ("app.tree.editLabel", &["shift+l"], "Edit tree label"),
-    ("app.tree.toggleLabelTimestamp", &["shift+t"], "Toggle tree label timestamps"),
-    ("app.session.togglePath", &["ctrl+p"], "Toggle session path display"),
-    ("app.session.toggleSort", &["ctrl+s"], "Toggle session sort mode"),
+    (
+        "app.tree.toggleLabelTimestamp",
+        &["shift+t"],
+        "Toggle tree label timestamps",
+    ),
+    (
+        "app.session.togglePath",
+        &["ctrl+p"],
+        "Toggle session path display",
+    ),
+    (
+        "app.session.toggleSort",
+        &["ctrl+s"],
+        "Toggle session sort mode",
+    ),
     ("app.session.rename", &["ctrl+r"], "Rename session"),
     ("app.session.delete", &["ctrl+d"], "Delete session"),
-    ("app.session.deleteNoninvasive", &["ctrl+backspace"], "Delete session when query is empty"),
+    (
+        "app.session.deleteNoninvasive",
+        &["ctrl+backspace"],
+        "Delete session when query is empty",
+    ),
     ("app.models.save", &["ctrl+s"], "Save model selection"),
     ("app.models.enableAll", &["ctrl+a"], "Enable all models"),
     ("app.models.clearAll", &["ctrl+x"], "Clear all models"),
-    ("app.models.toggleProvider", &["ctrl+p"], "Toggle all models for provider"),
-    ("app.models.reorderUp", &["alt+up"], "Move model up in order"),
-    ("app.models.reorderDown", &["alt+down"], "Move model down in order"),
-    ("app.tree.filter.default", &["ctrl+d"], "Tree filter: default view"),
-    ("app.tree.filter.noTools", &["ctrl+t"], "Tree filter: hide tool results"),
-    ("app.tree.filter.userOnly", &["ctrl+u"], "Tree filter: user messages only"),
-    ("app.tree.filter.labeledOnly", &["ctrl+l"], "Tree filter: labeled entries only"),
-    ("app.tree.filter.all", &["ctrl+a"], "Tree filter: show all entries"),
-    ("app.tree.filter.cycleForward", &["ctrl+o"], "Tree filter: cycle forward"),
-    ("app.tree.filter.cycleBackward", &["shift+ctrl+o"], "Tree filter: cycle backward"),
+    (
+        "app.models.toggleProvider",
+        &["ctrl+p"],
+        "Toggle all models for provider",
+    ),
+    (
+        "app.models.reorderUp",
+        &["alt+up"],
+        "Move model up in order",
+    ),
+    (
+        "app.models.reorderDown",
+        &["alt+down"],
+        "Move model down in order",
+    ),
+    (
+        "app.tree.filter.default",
+        &["ctrl+d"],
+        "Tree filter: default view",
+    ),
+    (
+        "app.tree.filter.noTools",
+        &["ctrl+t"],
+        "Tree filter: hide tool results",
+    ),
+    (
+        "app.tree.filter.userOnly",
+        &["ctrl+u"],
+        "Tree filter: user messages only",
+    ),
+    (
+        "app.tree.filter.labeledOnly",
+        &["ctrl+l"],
+        "Tree filter: labeled entries only",
+    ),
+    (
+        "app.tree.filter.all",
+        &["ctrl+a"],
+        "Tree filter: show all entries",
+    ),
+    (
+        "app.tree.filter.cycleForward",
+        &["ctrl+o"],
+        "Tree filter: cycle forward",
+    ),
+    (
+        "app.tree.filter.cycleBackward",
+        &["shift+ctrl+o"],
+        "Tree filter: cycle backward",
+    ),
 ];
 
 /// Upstream `KEYBINDING_NAME_MIGRATIONS` (legacy flat names -> namespaced).
@@ -263,7 +512,8 @@ pub fn valid_actions() -> Vec<String> {
 pub struct KeybindingManager {
     /// action -> resolved keys (user keys or the golden defaults).
     resolved: BTreeMap<String, Vec<String>>,
-    /// (key, [actions claiming it]) — user claims only (upstream).
+    /// (key, [actions claiming it]) — user claims only (upstream); read by the in-crate tests.
+    #[allow(dead_code)]
     conflicts: Vec<(String, Vec<String>)>,
 }
 
@@ -280,7 +530,10 @@ impl KeybindingManager {
     pub fn new(user: &KeybindingsConfig) -> Result<Self, String> {
         let mut resolved: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (action, defaults, _) in KEYBINDINGS {
-            resolved.insert(action.to_string(), defaults.iter().map(|s| s.to_string()).collect());
+            resolved.insert(
+                action.to_string(),
+                defaults.iter().map(|s| s.to_string()).collect(),
+            );
         }
         // Validate + apply user bindings (legacy names migrate here,
         // idempotently — upstream migrates at load, both paths converge).
@@ -313,7 +566,10 @@ impl KeybindingManager {
                 }
             }
             for k in &norm {
-                user_claims.entry(k.clone()).or_default().push(action.clone());
+                user_claims
+                    .entry(k.clone())
+                    .or_default()
+                    .push(action.clone());
             }
             resolved.insert(action.clone(), norm);
         }
@@ -325,7 +581,10 @@ impl KeybindingManager {
                 (key, claimants)
             })
             .collect();
-        Ok(Self { resolved, conflicts })
+        Ok(Self {
+            resolved,
+            conflicts,
+        })
     }
 
     /// Load `<agentDir>/keybindings.json` (upstream path). A missing file
@@ -369,7 +628,8 @@ impl KeybindingManager {
         self.resolved.get(action).cloned().unwrap_or_default()
     }
 
-    /// Upstream conflict report: user bindings only.
+    /// Upstream conflict report: user bindings only; read by the in-crate tests.
+    #[allow(dead_code)]
     pub fn conflicts(&self) -> &[(String, Vec<String>)] {
         &self.conflicts
     }
@@ -379,9 +639,7 @@ impl KeybindingManager {
     /// (KeyCode, KeyModifiers) instead of raw escape data: exact modifier
     /// state, shift+letter via the uppercase char or the SHIFT flag.
     pub fn matches(&self, ev: &KeyEvent, action: &str) -> bool {
-        self.get_keys(action)
-            .iter()
-            .any(|k| matches_event(ev, k))
+        self.get_keys(action).iter().any(|k| matches_event(ev, k))
     }
 }
 
@@ -417,7 +675,7 @@ pub fn matches_event(ev: &KeyEvent, key_id: &str) -> bool {
                 }
                 base if base.len() == 1 && base.chars().next().unwrap().is_ascii_digit() => {
                     // Digits: shift is cosmetic (same char); accept either.
-                    c.to_digit(10).is_some() && lower == base.chars().next().unwrap()
+                    c.is_ascii_digit() && lower == base.chars().next().unwrap()
                 }
                 base if base.len() == 1 => {
                     // Symbol: exact char; shift state must match (shifted
@@ -428,9 +686,7 @@ pub fn matches_event(ev: &KeyEvent, key_id: &str) -> bool {
                 _ => false,
             }
         }
-        KeyCode::Enter => {
-            pk.base == "enter" || pk.base == "return"
-        }
+        KeyCode::Enter => pk.base == "enter" || pk.base == "return",
         KeyCode::Esc => (pk.base == "escape" || pk.base == "esc") && !pk.shift,
         KeyCode::Tab => pk.base == "tab",
         KeyCode::Backspace => pk.base == "backspace",
@@ -465,7 +721,10 @@ mod tests {
     }
 
     fn config(pairs: &[(&str, Vec<String>)]) -> KeybindingsConfig {
-        pairs.iter().map(|(a, k)| (a.to_string(), k.clone())).collect()
+        pairs
+            .iter()
+            .map(|(a, k)| (a.to_string(), k.clone()))
+            .collect()
     }
 
     #[test]
@@ -473,17 +732,32 @@ mod tests {
         // Spot-checks of the pinned upstream defaults (linux, non-WSL).
         let m = KeybindingManager::default();
         assert_eq!(m.get_keys("tui.input.submit"), vec!["enter"]);
-        assert_eq!(m.get_keys("tui.input.newLine"), vec!["shift+enter", "ctrl+j"]);
-        assert_eq!(m.get_keys("tui.editor.deleteWordBackward"), vec!["ctrl+w", "alt+backspace"]);
-        assert_eq!(m.get_keys("tui.editor.deleteWordForward"), vec!["alt+d", "alt+delete"]);
+        assert_eq!(
+            m.get_keys("tui.input.newLine"),
+            vec!["shift+enter", "ctrl+j"]
+        );
+        assert_eq!(
+            m.get_keys("tui.editor.deleteWordBackward"),
+            vec!["ctrl+w", "alt+backspace"]
+        );
+        assert_eq!(
+            m.get_keys("tui.editor.deleteWordForward"),
+            vec!["alt+d", "alt+delete"]
+        );
         assert_eq!(m.get_keys("tui.editor.cursorLeft"), vec!["left", "ctrl+b"]);
         assert_eq!(m.get_keys("app.exit"), vec!["ctrl+d"]);
         assert_eq!(m.get_keys("app.clear"), vec!["ctrl+c"]);
         assert_eq!(m.get_keys("tui.editor.undo"), vec!["ctrl+-"]);
-        assert_eq!(m.get_keys("tui.altScreen.previousPrompt"), vec!["ctrl+shift+up", "ctrl+up"]);
+        assert_eq!(
+            m.get_keys("tui.altScreen.previousPrompt"),
+            vec!["ctrl+shift+up", "ctrl+up"]
+        );
         assert_eq!(m.get_keys("app.model.cycleBackward"), vec!["shift+ctrl+p"]);
         assert_eq!(m.get_keys("app.message.followUp"), vec!["alt+enter"]);
-        assert_eq!(m.get_keys("app.tree.foldOrUp"), vec!["ctrl+left", "alt+left"]);
+        assert_eq!(
+            m.get_keys("app.tree.foldOrUp"),
+            vec!["ctrl+left", "alt+left"]
+        );
         assert!(m.get_keys("tui.editor.historyPrevious").is_empty());
         assert_eq!(KEYBINDINGS.len(), 90, "TUI (47) + APP (43) actions");
         // Every default must parse.
@@ -500,7 +774,10 @@ mod tests {
         assert!(parse_key_id("shift+ctrl+p").is_some());
         assert!(parse_key_id("ctrl+shift+p").is_some());
         let p = parse_key_id("ctrl+shift+p").unwrap();
-        assert_eq!((p.base.clone(), p.ctrl, p.shift), ("p".to_string(), true, true));
+        assert_eq!(
+            (p.base.clone(), p.ctrl, p.shift),
+            ("p".to_string(), true, true)
+        );
         assert!(parse_key_id("ctrl+ctrl+p").is_none(), "duplicate modifier");
         assert!(parse_key_id("ctrl+").is_none(), "missing base");
         assert!(parse_key_id("ctrl++").is_some(), "literal + base");
@@ -519,20 +796,53 @@ mod tests {
         // Letters: shift+letter vs letter.
         // Plain 'a' is not ctrl+a; shift+a is not plain 'a' either.
         assert!(!m.matches(&key('a'), "tui.editor.cursorLineStart"));
-        assert!(!m.matches(&key_mod('A', KeyModifiers::SHIFT), "tui.editor.cursorLineStart"));
-        assert!(m.matches(&key_mod('a', KeyModifiers::CONTROL), "tui.editor.cursorLineStart"));
-        assert!(!m.matches(&key('b'), "tui.editor.cursorLeft"), "plain b is not ctrl+b");
-        assert!(m.matches(&key_mod('b', KeyModifiers::CONTROL), "tui.editor.cursorLeft"));
-        assert!(m.matches(&key_code(KeyCode::Left, KeyModifiers::NONE), "tui.editor.cursorLeft"));
+        assert!(!m.matches(
+            &key_mod('A', KeyModifiers::SHIFT),
+            "tui.editor.cursorLineStart"
+        ));
+        assert!(m.matches(
+            &key_mod('a', KeyModifiers::CONTROL),
+            "tui.editor.cursorLineStart"
+        ));
+        assert!(
+            !m.matches(&key('b'), "tui.editor.cursorLeft"),
+            "plain b is not ctrl+b"
+        );
+        assert!(m.matches(
+            &key_mod('b', KeyModifiers::CONTROL),
+            "tui.editor.cursorLeft"
+        ));
+        assert!(m.matches(
+            &key_code(KeyCode::Left, KeyModifiers::NONE),
+            "tui.editor.cursorLeft"
+        ));
         // Special keys + modifier exactness.
-        assert!(m.matches(&key_code(KeyCode::Up, KeyModifiers::CONTROL), "tui.altScreen.previousPrompt"));
-        assert!(!m.matches(&key_code(KeyCode::Up, KeyModifiers::NONE), "tui.altScreen.previousPrompt"));
-        assert!(m.matches(&key_code(KeyCode::Enter, KeyModifiers::SHIFT), "tui.input.newLine"));
-        assert!(m.matches(&key_code(KeyCode::Enter, KeyModifiers::NONE), "tui.input.submit"));
+        assert!(m.matches(
+            &key_code(KeyCode::Up, KeyModifiers::CONTROL),
+            "tui.altScreen.previousPrompt"
+        ));
+        assert!(!m.matches(
+            &key_code(KeyCode::Up, KeyModifiers::NONE),
+            "tui.altScreen.previousPrompt"
+        ));
+        assert!(m.matches(
+            &key_code(KeyCode::Enter, KeyModifiers::SHIFT),
+            "tui.input.newLine"
+        ));
+        assert!(m.matches(
+            &key_code(KeyCode::Enter, KeyModifiers::NONE),
+            "tui.input.submit"
+        ));
         assert!(m.matches(&key_code(KeyCode::Esc, KeyModifiers::NONE), "app.interrupt"));
         // ctrl+letter via the CONTROL flag.
-        assert!(m.matches(&key_mod('w', KeyModifiers::CONTROL), "tui.editor.deleteWordBackward"));
-        assert!(m.matches(&key_mod('d', KeyModifiers::ALT), "tui.editor.deleteWordForward"));
+        assert!(m.matches(
+            &key_mod('w', KeyModifiers::CONTROL),
+            "tui.editor.deleteWordBackward"
+        ));
+        assert!(m.matches(
+            &key_mod('d', KeyModifiers::ALT),
+            "tui.editor.deleteWordForward"
+        ));
         // ctrl+- (symbol base with ctrl).
         assert!(m.matches(&key_mod('-', KeyModifiers::CONTROL), "tui.editor.undo"));
     }
@@ -545,23 +855,41 @@ mod tests {
         ]);
         let m = KeybindingManager::new(&user).unwrap();
         // The old default no longer binds the action...
-        assert!(!m.matches(&key_code(KeyCode::Enter, KeyModifiers::SHIFT), "tui.input.newLine"));
-        assert!(!m.matches(&key_mod('w', KeyModifiers::CONTROL), "tui.editor.deleteWordBackward"));
+        assert!(!m.matches(
+            &key_code(KeyCode::Enter, KeyModifiers::SHIFT),
+            "tui.input.newLine"
+        ));
+        assert!(!m.matches(
+            &key_mod('w', KeyModifiers::CONTROL),
+            "tui.editor.deleteWordBackward"
+        ));
         // ...and the new keys do.
         assert!(m.matches(&key_mod('m', KeyModifiers::CONTROL), "tui.input.newLine"));
-        assert!(m.matches(&key_mod('y', KeyModifiers::CONTROL), "tui.editor.deleteWordBackward"));
+        assert!(m.matches(
+            &key_mod('y', KeyModifiers::CONTROL),
+            "tui.editor.deleteWordBackward"
+        ));
         // Unbinding via an empty list.
         let user = config(&[("tui.input.submit", vec![])]);
         let m = KeybindingManager::new(&user).unwrap();
-        assert!(!m.matches(&key_code(KeyCode::Enter, KeyModifiers::NONE), "tui.input.submit"));
+        assert!(!m.matches(
+            &key_code(KeyCode::Enter, KeyModifiers::NONE),
+            "tui.input.submit"
+        ));
     }
 
     #[test]
     fn invalid_binding_errors_list_valid_actions() {
-        let err = KeybindingManager::new(&config(&[("not.an.action", vec!["ctrl+z".into()])])).unwrap_err();
+        let err = KeybindingManager::new(&config(&[("not.an.action", vec!["ctrl+z".into()])]))
+            .unwrap_err();
         assert!(err.contains("not.an.action"), "{err}");
-        assert!(err.contains("tui.input.submit"), "lists valid actions: {err}");
-        let err = KeybindingManager::new(&config(&[("tui.input.submit", vec!["ctrl+ctrl+q".into()])])).unwrap_err();
+        assert!(
+            err.contains("tui.input.submit"),
+            "lists valid actions: {err}"
+        );
+        let err =
+            KeybindingManager::new(&config(&[("tui.input.submit", vec!["ctrl+ctrl+q".into()])]))
+                .unwrap_err();
         assert!(err.contains("ctrl+ctrl+q"), "{err}");
         assert!(err.contains("tui.input.submit"), "{err}");
     }
@@ -606,13 +934,20 @@ mod tests {
         let m = KeybindingManager::load(&dir).unwrap();
         assert_eq!(m.get_keys("tui.input.submit"), vec!["enter"]);
         // Valid file -> applied.
-        std::fs::write(dir.join("keybindings.json"), r#"{"tui.input.submit":"ctrl+enter"}"#).unwrap();
+        std::fs::write(
+            dir.join("keybindings.json"),
+            r#"{"tui.input.submit":"ctrl+enter"}"#,
+        )
+        .unwrap();
         let m = KeybindingManager::load(&dir).unwrap();
         assert_eq!(m.get_keys("tui.input.submit"), vec!["ctrl+enter"]);
         // Invalid file -> error listing valid actions.
         std::fs::write(dir.join("keybindings.json"), r#"{"nope":"ctrl+z"}"#).unwrap();
         let err = KeybindingManager::load(&dir).unwrap_err();
-        assert!(err.contains("nope") && err.contains("tui.input.submit"), "{err}");
+        assert!(
+            err.contains("nope") && err.contains("tui.input.submit"),
+            "{err}"
+        );
         // Malformed JSON -> error.
         std::fs::write(dir.join("keybindings.json"), "not json").unwrap();
         assert!(KeybindingManager::load(&dir).is_err());
