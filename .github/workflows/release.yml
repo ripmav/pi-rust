@@ -114,7 +114,7 @@ jobs:
             agent_dir="$(mktemp -d)"
             err="$(mktemp)"
             rc=0
-            out="$("$dir/pi-rust" "$@" --provider fake --prompt hi --agent-dir "$agent_dir" 2>"$err")" || rc=$?
+            out="$("$@" "$dir/pi-rust" --provider fake --prompt hi --agent-dir "$agent_dir" 2>"$err")" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "smoke FAIL (exit $rc): $dir"
               head -10 "$err"
