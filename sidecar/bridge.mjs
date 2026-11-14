@@ -132,6 +132,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		shuttingDown = true;
 		if (exitScheduled) return;
 		exitScheduled = true;
+		// WP-1007: let an in-flight credential write (rotated token) finish.
+		void modelRuntime?.settleCredentialWrites?.();
 		void (async () => {
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(0);
@@ -158,6 +160,14 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	};
 
 	// ---- WP-701: extension-registered providers (legacy config form) ----
+
+	// WP-1007: the five oauth-capable upstream built-in providers. Their
+	// models are exposed in the providers payload and stream through the
+	// upstream runtime, whose auth resolution performs the stored-credential
+	// refresh (5-minute validity margin, per-provider refresh flow) and
+	// writes the rotated token back to auth.json — all sidecar-side, so no
+	// token crosses the wire.
+	const OAUTH_BUILTIN_PROVIDERS = ["radius", "kimi-coding", "github-copilot", "xai", "meta"];
 
 	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
 	const providersPayload = () => {
@@ -187,7 +197,25 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name && m.name !== m.id ? { name: m.name } : {}),
 				})),
 		}));
-		return [...legacy, ...native];
+		// WP-1007: the upstream built-in oauth providers (extension-registered
+		// providers keep priority — this only adds what the extension layer
+		// did not already claim).
+		const builtinOauth = (modelRuntime?.getProviders?.() ?? [])
+			.filter((p) => OAUTH_BUILTIN_PROVIDERS.includes(p.id) && !state.nativeProviders.has(p.id) && !state.providers.has(p.id))
+			.map((p) => ({
+				name: p.id,
+				// Runtime providers are the upstream Provider object form (no
+				// static `models` field) — same shape as the native branch.
+				models: (p.getModels?.() ?? [])
+				.filter((m) => m?.id)
+				.map((m) => ({
+					provider: p.id,
+					id: m.id,
+					api: m.api,
+					...(m.name && m.name !== m.id ? { name: m.name } : {}),
+				})),
+			}));
+		return [...legacy, ...native, ...builtinOauth];
 	};
 
 	// WP-1005: capture the native Provider OBJECT form (upstream
@@ -299,6 +327,30 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				return;
 			}
 			forwardStream(streamId, stream, full);
+			return;
+		}
+		// WP-1007: the upstream built-in oauth providers (radius, kimi-coding,
+		// github-copilot, xai, meta). The stream runs in the upstream runtime,
+		// whose auth resolution refreshes an expired stored credential (5-min
+		// validity margin, per-provider flow) and writes the rotated token
+		// back to auth.json — sidecar-side, unmodified upstream code.
+		if (modelRuntime && OAUTH_BUILTIN_PROVIDERS.includes(model.provider)) {
+			const providerDef = modelRuntime.getProviders().find((p) => p.id === model.provider);
+			const builtin = (providerDef?.getModels?.() ?? []).find((m) => m?.id === model.id);
+			if (!builtin) {
+				return output(response(id, "provider_stream", false, undefined, `builtin provider ${model.provider} has no model ${model.id} (catalog may still be empty until the first authenticated refresh)`));
+			}
+			const streamId = command.streamId ?? crypto.randomUUID();
+			output(response(id, "provider_stream", true, { ok: true, streamId }));
+			let stream;
+			try {
+				stream = modelRuntime.streamSimple(builtin, { messages: command.messages ?? [] }, { ...(command.options ?? {}) });
+			} catch (err) {
+				stream = (async function* () {
+					yield providerErrorEvent(builtin, err instanceof Error ? err : new Error(String(err)));
+				})();
+			}
+			forwardStream(streamId, stream, builtin);
 			return;
 		}
 		const config = state.providers.get(model.provider);
@@ -479,6 +531,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return extension;
 	}
 
+	let modelRuntime = null; // WP-1007: upstream runtime for the builtin oauth providers
+
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
 		if (command.protocolVersion !== 6) {
@@ -494,6 +548,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		loaded.errors.forEach((e) => log(`extension load error ${e.path}: ${e.error}`));
 		session = createSessionView(cwd);
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
+
+		// WP-1007: the upstream runtime for the built-in oauth providers. No
+		// network at creation (static catalogs stay, dynamic ones stay empty
+		// until the first authenticated refresh after login).
+		modelRuntime = await ca.ModelRuntime.create({ allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
 
 		// WP-702: the built-in mcp extension (after the runner, before ready):
 		// its handlers subscribe to session_start / mcp_servers_change and it
