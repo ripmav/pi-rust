@@ -105,3 +105,9 @@ slice rule applies per WP commit, not per accumulated stack; 1001: 261, 1002: 13
 main). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
 via direct merge; PRs closed with explanation.
 
+- **L7** (2026-11-14): **WP-1004 delivered** (codemode hosting). Built-in codemode extension hosted with `models: false`
+(after `bindCore` — the factory needs `runtime.appendEntry`/`getSettings`); registers inactive like tool_search
+(v5 activation path); sandbox (QuickJS wasm) executes scripts, nested `tools.<name>()` round-trips through the
+existing `tool_call_request` wire event (zero new wire events, protocol stays v5). E2E: codemode script awaits
+`tools.echo_param` + computes in the sandbox. Full suite + 72 smoke green, fmt/clippy clean. v0 cut: `models.*`
+namespace (needs a model-API wire event) + prepareLoadout/reachesTools/constrainedSampling (not serialized).

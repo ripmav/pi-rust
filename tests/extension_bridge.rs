@@ -3231,3 +3231,88 @@ fn wp1003_deferred_tool_activated_mid_run() {
         "deferred_echo result missing\n{execs:?}"
     );
 }
+
+// ---- WP-1004 (codemode hosting): sandbox execution + nested tools -----------
+
+/// The built-in codemode extension is hosted by the sidecar: a codemode tool
+/// call runs the QuickJS sandbox, and a `tools.<name>(...)` call inside the
+/// script round-trips through the bridge (tool_call_request → core → the
+/// normal tool_call decision → back into the sandbox).
+#[test]
+fn wp1004_codemode_runs_script_and_nested_tool() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1004-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({
+        "user_messages": ["run the script"],
+        "model_scripts": [[
+            { "tool_call": { "name": "codemode", "input": { "code": "const r = await tools.echo_param({ text: \"x\" }); return JSON.stringify(r) + \" | 1+1=\" + (1 + 1);" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(repo().join("tests/fixtures/codemode-nested.ts"))
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The nested call went through the normal tool_call decision path.
+    let nested_decisions: Vec<&Value> = lines
+        .iter()
+        .filter(|l| {
+            l.get("kind").and_then(Value::as_str) == Some("decision")
+                && l.get("name").and_then(Value::as_str) == Some("tool_call")
+                && l.get("request")
+                    .and_then(|r| r.get("toolName"))
+                    .and_then(Value::as_str)
+                    == Some("echo_param")
+        })
+        .collect();
+    assert_eq!(
+        nested_decisions.len(),
+        1,
+        "exactly one nested tool_call decision for echo_param\n{stdout}"
+    );
+
+    // The sandbox ran: the codemode result carries the nested tool's output
+    // and the pure JS arithmetic.
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "codemode")
+        .collect();
+    assert_eq!(
+        execs.len(),
+        1,
+        "codemode must execute exactly once\n{stdout}"
+    );
+    let summary = execs[0]["result_summary"].to_string();
+    assert!(
+        summary.contains("echo-param:x"),
+        "nested tool result missing from the sandbox output\n{summary}"
+    );
+    assert!(
+        summary.contains("1+1=2"),
+        "sandbox JS evaluation missing\n{summary}"
+    );
+}

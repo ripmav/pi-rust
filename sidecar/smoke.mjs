@@ -273,6 +273,13 @@ async function main() {
 			toolSearch,
 		);
 		check("hello is active in ready.activeTools", ready.activeTools.includes("hello"), ready.activeTools);
+		// WP-1004: codemode registers inactive like tool_search (model-only, defaultActive false).
+		const codemode = ready.tools.find((t) => t.name === "codemode");
+		check(
+			"codemode registered inactive (model-only, defaultActive false)",
+			codemode?.exposure === "model-only" && codemode?.defaultActive === false && !ready.activeTools.includes("codemode"),
+			codemode,
+		);
 		check("ready commands incl. emit", ready.commands.some((c) => c.name === "emit"), ready.commands);
 		check("ready flags incl. probe", ready.flags.some((f) => f.name === "probe" && f.default === true), ready.flags);
 		check(
@@ -280,7 +287,7 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 9 extensions (7 + builtin mcp + builtin tool-search), no errors", ready.extensions.length === 9 && ready.errors.length === 0, ready.errors);
+		check("ready lists 10 extensions (7 + builtins mcp/tool-search/codemode), no errors", ready.extensions.length === 10 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
@@ -583,8 +590,8 @@ async function main() {
 		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
 		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
 		check(
-			"gitlab-duo loads unmodified (1 user extension + builtins mcp + tool-search, no errors)",
-			ready3.extensions.length === 3 && ready3.errors.length === 0,
+			"gitlab-duo loads unmodified (1 user extension + builtins mcp/tool-search/codemode, no errors)",
+			ready3.extensions.length === 4 && ready3.errors.length === 0,
 			ready3.errors,
 		);
 		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);

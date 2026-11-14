@@ -297,6 +297,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			getAllTools: () => runtime.getAllTools(),
 			getActiveTools: () => runtime.getActiveTools(),
 			setActiveTools: (names) => runtime.setActiveTools(names),
+			// WP-1004: the codemode factory needs the pi surface bound by
+			// bindCore (runner.ts:431/437) — it is loaded after bindCore.
+			appendEntry: (entry) => runtime.appendEntry(entry),
+			getSettings: () => runtime.getSettings(),
 		};
 	}
 
@@ -340,6 +344,20 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	async function loadBuiltinToolSearchExtension(runtime) {
 		const extension = createBuiltinExtension("tool-search");
 		const factory = ca.createToolSearchExtension();
+		await factory(createBuiltinMcpApi(extension, runtime));
+		return extension;
+	}
+
+	// WP-1004: host the BUILT-IN codemode extension (upstream main.ts auto-loads
+	// it with the models namespace). pi-rust hosts it with models: false —
+	// the models.* namespace needs model-API calls the v0 bridge cannot serve
+	// (a new wire event; follow-up). It registers INACTIVE (model-only,
+	// defaultActive false) like tool_search; activation goes through the
+	// v5 active-set path. The factory needs runtime.appendEntry/getSettings,
+	// which bindCore wires, so it loads AFTER bindCore.
+	async function loadBuiltinCodemodeExtension(runtime) {
+		const extension = createBuiltinExtension("codemode");
+		const factory = ca.createCodemodeExtension({ models: false });
 		await factory(createBuiltinMcpApi(extension, runtime));
 		return extension;
 	}
@@ -409,6 +427,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		};
 		runner.bindCore(createBridgeActions({ output, sendRequest, session, state, onActiveToolsChanged: (names) => applyActiveTools(names) }), contextActions, providerActions);
 		runner.bindCommandContext();
+		// WP-1004: after bindCore (the factory needs runtime.appendEntry/getSettings).
+		extensions.push(await loadBuiltinCodemodeExtension(loaded.runtime));
 
 		// ---- WP-702: dynamic extension tool set (bridge protocol v2) ----
 		// MCP tools register AFTER ready (on connection, lazy reconnect,

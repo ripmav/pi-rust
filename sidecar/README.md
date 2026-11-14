@@ -47,8 +47,9 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 ## What the sidecar does
 
 - `init` (protocolVersion 5) → loads extensions with the original loader,
-  hosts the built-in mcp extension and the built-in tool-search extension on
-  the shared runtime, binds
+  hosts the built-in mcp + tool-search extensions (and, after
+  `bindCore`, the built-in codemode extension with `models: false`) on the
+  shared runtime, binds
   `ExtensionRunner` (actions/context actions/provider actions), registers
   `mcpConfig` servers (v2), responds `success`, emits `ready` (tools with
   TypeBox schemas + `exposure?`/`defaultActive?` via the `extension.tools` → `wrapper.ts` →
