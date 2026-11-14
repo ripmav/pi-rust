@@ -154,7 +154,14 @@ jobs:
         run: cargo build --release
       - name: Bench + compare against baseline
         run: |
-          out="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>/dev/null | grep '^{"cold_start_ms"')"
+          set +e
+          out="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>bench-stderr.log | grep '"cold_start_ms"')"
+          set -e
+          if [ -z "$out" ]; then
+            echo "bench produced no usable output; stderr:"
+            cat bench-stderr.log
+            exit 1
+          fi
           echo "$out"
           python3 - "$out" <<'EOF'
           import json, sys
