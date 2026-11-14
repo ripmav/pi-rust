@@ -63,3 +63,49 @@ L6 (2026-11-14, el Gentleman — delivery status after WP-906):
 - WP-905 perf baseline: PR #114, branch feat/wp-905-perf-baseline (base 904) — --bench mode (cold_start_ms, idle_rss_mb, bridge_events_per_sec over 200 before_agent_start cycles); CI bench job fails on >20% regression vs benches/baseline.json (direction-aware; baseline refreshed on toolchain bumps via re-run + commit); README docs; baseline: cold_start ~1055ms (node+sidecar startup dominates), RSS 5 MiB, ~7621 events/s.
 - WP-906 security audit: PR #115 (opened after this entry), branch feat/wp-906-security-audit (base 905) — audit memo in the WP file: zero unaddressed HIGH; fixed MED x2 (bash full-output log 0600 in shared tmpdir; agent dir 0700 when pi-rust creates it — ensure_agent_dir in config.rs, pre-existing dirs keep their mode) with pinning tests; documented LOW x3 (sidecar->core line cap, install.sh unsigned, BashCapture leak on abort). Native review: lineage review-ff617ec3ad6b84bc, tier high, lenses risk+reliability, APPROVED (authority burned); advisory R3-001 (TOCTOU/intermediate dirs in ensure_agent_dir) accepted as v0 limitation, recorded.
 - CI flake log (root causes fixed, see L6 items): clippy npm catalog, PTY lossy broadcast, rpc-diff mock desync, json-writer exit drain, softprops action 404, npm working-directory, noble musl-cross, matrix publish race (single publish job), cross strip diagnostic.
+
+L7 (2026-11-14, el Gentleman — WP-907 delivery):
+- README rewritten as the real docs: header status M1–M9; Install (release via install.sh with PI_RUST_VERSION, + from source with the verbatim upstream-pin recipe); Quickstart with current commands; CLI section points to the new diff-tested reference; Extension compatibility guide (the 00-vision contract table with delivered statuses per milestone); Troubleshooting (sidecar not found, unbuilt upstream, node version, TUI corruption, 0700 agent dir, WP-904 retry semantics, CI bench noise); Roadmap status replacing the stale "Next milestones".
+- New: `pi-rust --help`/`-h` prints the usage text (exit 0); the stale unknown-arg usage string is replaced by the same text; `docs/cli-reference.md` carries the exact --help output and `tests/cli_help.rs` fails on any drift (WP acceptance "CLI reference matches actual flags, diff-tested").
+- New CI job `fresh-clone` (WP acceptance "fresh-clone setup works by following the README alone, tested on a clean container"): container job (node:26-bookworm, no preinstalled Rust, no caches) following the README "From source" recipe verbatim + smoke subset (fake one-shot, sidecar smoke, cli reference test). Full suite stays in the existing test jobs.
+- Local evidence: full suite green (271 in-crate, 1 cli-help, 38 e2e, 4 rpc, 3 PTY, 3 skills, 68 smoke), clippy 0, fmt clean, YAML valid; fresh-clone recipe executed locally in a temp clone (job-9) — CI container job is the binding proof.
+
+L8 (2026-11-14, el Gentleman — CI/release defect fixes on the stack):
+- WP-903: staging.6 failed the aarch64 smoke because check() passed the
+  qemu runner as a positional argument to the binary (it ran natively with
+  the prompt "qemu-aarch64"; set -e + 2>/dev/null silenced the unknown-arg
+  failure). Runner is now a command prefix, the exit code is captured
+  before set -e, both failure branches print stderr. Tag v0.0.0-staging.7
+  re-runs the release. (commit f4296a6)
+- WP-905: the flat 20% bench band flaked on idle_rss_mb (6.5 vs baseline
+  5.0 on one runner, identical code passing on another — shared-runner RSS
+  jitter ±1.5 MB). Per-metric band: timing/throughput 20%, idle RSS 50%
+  (real regressions still fail: 9.0 vs 5.0 MB, throughput -30%).
+  (commit 243b514)
+
+L9 (2026-11-14, el Gentleman — native review of the M9 stack head):
+- Candidate: committed range 36a8e28 (905 head, the last natively
+  reviewed state) .. feat/wp-907-docs head — 12 paths / 612 lines
+  (906 memo, 907 docs+--help+cli test, 903 smoke fixes, 905 bench band,
+  cherry-picks).
+- Lineage: review-265b589651f56ede — tier high, lenses readability +
+  reliability, both via pi host relay.
+- Outcome: **approved** (authority burned,
+  native-approved-acknowledgement-completed, store revision
+  12153d30). Advisory findings (non-blocking, follow-up work, recorded
+  in the WP-907 file): R2-001/R2-004 (ci.yml), R2-002 (src/config.rs
+  330-332), R2-003 (src/tools.rs 141-150), R3-UPSTREAM-SHA (ci.yml:210).
+
+L10 (2026-11-14, el Gentleman — M9 close):
+- All seven WPs delivered (901 CI, 902 clippy/fmt, 903 releases, 904
+  error UX, 905 perf baseline, 906 security audit, 907 docs).
+- Stack #110–#116 (901→907, bottom-up) all CI-green at close time;
+  staging.8 published (4 targets + install.sh, aarch64 smoke under
+  qemu).
+- Native review of the stack head (36a8e28..907): approved
+  (review-265b589651f56ede, L9); the 906 fix itself was reviewed
+  earlier (review-ff617ec3ad6b84bc).
+- Suite at chain head: 271 in-crate, 1 cli-help, 38 e2e, 4 rpc, 3 PTY,
+  3 skills, 68 sidecar smoke — all green.
+- Follow-ups (non-blocking advisories from the stack-head review, see
+  WP-907 file): R2-001/R2-004, R2-002, R2-003, R3-UPSTREAM-SHA.

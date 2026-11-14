@@ -1,6 +1,6 @@
 # WP-902 — clippy + rustfmt baseline
 
-**Milestone:** M9 · **Size:** S · **Status:** open · **Depends on:** —
+**Milestone:** M9 · **Size:** S · **Status:** delivered (2026-11-14, PR #111) · **Depends on:** —
 
 ## Goal
 `cargo clippy -- -D warnings` and `cargo fmt --check` pass; fix or allow

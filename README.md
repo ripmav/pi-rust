@@ -4,10 +4,69 @@ Rust port of [pi](https://github.com/earendil-works/pi) with a compatibility
 layer: original pi extensions (TypeScript, unmodified) run unchanged against
 the new Rust core.
 
-**Status: PoC — "bridge first".** The extension compatibility layer is
-validated end-to-end; the Rust core is a minimal scripted agent behind it
-(fake model driver, scenario runner, no TUI, no real providers). See
-`odd/tasks/extension-bridge.md` for the full spec/task log.
+**Status (M9, 2026-11):** M1–M9 delivered — interactive TUI (ratatui), real
+model providers (native upstream wires), full built-in tool set, MCP
+(stdio + HTTP), extension `registerProvider` invocation, compaction,
+upstream session-file compat, skills, RPC mode, print/json output, perf
+baseline in CI, security audit, release pipeline (4 targets + install
+script). Upstream pin: `earendil-works/pi @ 085c84e`.
+
+## Install
+
+### From a release (recommended)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | bash
+# or pin a version:
+curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=vX.Y.Z bash
+```
+
+Installs to `~/.local/share/pi-rust`, links `~/.local/bin/pi-rust` (both
+overridable with `PI_RUST_INSTALL_ROOT` / `PI_RUST_BIN_DIR`). Targets:
+Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64. Requires
+bash, curl, tar and **node ≥ 22.19** (the extension sidecar runs on Node;
+the tarball ships the built `upstream/` tree, no npm install needed).
+
+### From source (fresh clone)
+
+Prerequisites: Rust stable, Node ≥ 26 (the upstream build target), npm.
+
+```sh
+git clone https://github.com/ripmav/pi-rust && cd pi-rust
+
+# 1. Build upstream once (the sidecar runs its dist/):
+mkdir upstream && git -C upstream init && git -C upstream remote add origin https://github.com/earendil-works/pi.git
+git -C upstream fetch --depth 1 origin 085c84e98e7f4c950f2be606466fff4f75d8fe7c
+git -C upstream checkout --detach FETCH_HEAD
+cd upstream && npm ci --no-audit --no-fund && npm run build && cd ..
+
+# 2. Build + run:
+cargo build --release
+./target/release/pi-rust --provider fake --prompt "hi"   # fake model, no API keys
+```
+
+The sidecar is found by walking up from the cwd, then from the executable's
+directory (`sidecar/index.mjs`).
+
+## Quickstart
+
+Prerequisites: as above (fresh clone).
+
+```sh
+# Run the test suite (spawns real sidecar + unmodified upstream extensions):
+cargo test                 # in-crate + e2e (unmodified extensions) + rpc diff + PTY + skills + cli reference
+node sidecar/smoke.mjs     # sidecar protocol assertions (fake core)
+
+# Headless one-shot with a real provider:
+OPENAI_API_KEY=... cargo run --release -- --provider openai --model gpt-4o --prompt "hello"
+
+# Interactive TUI on a TTY (no one-shot flags):
+cargo run --release --
+
+# Scenario mode with an unmodified upstream example extension:
+cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/hello.ts \
+  --scenario scenario.json
+```
 
 ## Architecture
 
@@ -36,21 +95,39 @@ validated end-to-end; the Rust core is a minimal scripted agent behind it
   `ExtensionRunner`, `wrapRegisteredTools`, `buildSystemPrompt`,
   `normalizeBuildSystemPromptOptions`).
 
-## Compatibility scope (v0)
+## Extension compatibility guide
 
-Unmodified upstream example extensions run "wie gewohnt" for the
-**headless-safe API slice**: `on` (all catalog events), `registerTool`
-(TypeBox schemas, nested `ctx.executeTool`), `registerCommand` (invoked via
-`--command`), `registerFlag`/`getFlag`, `sendMessage`/`sendUserMessage`,
-`appendEntry` (persisted by the core), session name, `exec`, `getSettings`,
-`setModel`/thinking level, `registerProvider` (reported, not invoked),
-`registerMcpServer` (reported only), `pi.events`, dialog subset
-(`select`/`confirm`/`input`/`editor`/`notify`/`setStatus`/`setTitle`/
-`set_editor_text` — answered with upstream defaults in v0, no human UI).
+Unmodified upstream extensions run "wie gewohnt". The contract table from
+the [vision doc](roadmap/00-vision.md), with the status per delivered
+milestone (all milestone stacks are merged into `main`):
 
-Out of scope for v0: TUI renderers/components, `registerShortcut`, themes,
-compaction events, MCP transport, provider invocation, `ctx.ui.custom`,
-interactive REPL/TUI. Details in
+| Extension API | Status |
+|---|---|
+| `on(event)` for all catalog events | ✅ M1 |
+| `registerTool` (TypeBox schemas, nested `ctx.executeTool`) | ✅ M1 |
+| `registerCommand`, `registerFlag`/`getFlag` | ✅ M1 |
+| `sendMessage`/`sendUserMessage`, `appendEntry` | ✅ M1 |
+| session name, `exec`, `getSettings` | ✅ M1 |
+| `setModel`, thinking level (gated on core ack) | ✅ M1/M2 |
+| model providers: all bundled wires (table below) | ✅ M2/M4 |
+| runtime `setModel` switching (bundled + extension providers) | ✅ M4/M7 |
+| upstream session-file format, `--resume`/`--fork` | ✅ M3 |
+| `~/.pi/agent` config, model catalog, auth storage | ✅ M3 |
+| built-in tools parity (read/write/edit/bash) | ✅ M5 |
+| real human dialog answers (select/confirm/input/editor) | ✅ M6 (TUI) |
+| TUI: themes, keybindings, pickers, slash commands, print/json modes | ✅ M6 |
+| `registerProvider` (custom providers invoked) | ✅ M7 |
+| `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 |
+| compaction events + auto-compaction | ✅ M7 |
+| `registerShortcut` (wired TUI actions) | ✅ M7 |
+| skills (`SKILL.md` discovery, `/skill:<name>`) | ✅ M8 |
+| RPC mode (upstream NDJSON command protocol) | ✅ M8 |
+| headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
+
+Evaluated, documented v0 limits: `ctx.ui.custom` (WP-707 decision memo in
+`odd/tasks/m7-extension-completeness.md`), bundled extensions beyond `mcp`
+(WP-708), non-`api_key` credential kinds (typed rejection), `AWS_PROFILE`
+(typed rejection). Full out-of-scope list:
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
 ### Agent dir, `~/.pi` and extension discovery
@@ -91,52 +168,30 @@ Validated end-to-end (unmodified upstream examples, `tests/extension_bridge.rs`)
 `hello`, `with-deps` (npm deps), `permission-gate`, `claude-rules`,
 `plan-mode`, `prompt-customizer` + the degraded sidecar-crash path.
 
-## Quickstart
-
-Prerequisites: Node ≥ 26 (or whatever the upstream build targets), Rust
-stable, npm.
-
-```sh
-# 1. Build upstream once (the sidecar runs its dist/):
-cd upstream && npm ci --no-audit --no-fund && npm run build && cd ..
-
-# 2. Run the test suite (spawns real sidecar + unmodified extensions):
-cargo test                 # 7 e2e integration tests + 7 provider/unit tests
-node sidecar/smoke.mjs     # 42 sidecar protocol assertions (fake core)
-
-# 3. Run a scenario:
-source $HOME/.cargo/env    # if rustup is not on PATH
-cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/hello.ts \
-  --scenario scenario.json
-```
-
 ### CLI
 
-```
-pi-rust --extension-dir <path> (repeatable)
-        [--agent-dir <path>]          # default: PI_CODING_AGENT_DIR or ~/.pi/agent
-        [--isolated]                  # fresh temp agent dir (hermetic runs)
-        --scenario <scenario.json>    # one of --scenario / --prompt / --template
-        | --prompt <text>             # one of --scenario / --prompt / --template
-        | --template <name> [args...] # expand a prompt template into the prompt
-        [--image <path>...]           # attach images to the prompt (png/jpeg/gif/webp)
-        [--session-file <path>]       # default: <agentDir>/sessions/<encoded-cwd>/<ISO>_<id>.jsonl
-        [--resume <file|id>]          # continue an existing session
-        [--fork <file|id>]            # branch a new session (parentSession header)
-        [--list-sessions]             # NDJSON listing, then exit
-        [--bench]                     # perf baseline (cold start, idle RSS, bridge throughput), then exit (WP-905)
-        [-p | --print]                # print mode: stdout = final assistant text only (WP-610)
-        [--mode text|json]            # text = --print; json = upstream-shaped event stream (WP-610)
-        [--command <name> [args...]]  # repeatable; run after ready, before the runs
-        [--provider <id>]                 # fake|anthropic|google|google-vertex|azure|cloudflare-workers-ai|cloudflare-ai-gateway|amazon-bedrock|openai|groq|cerebras|deepseek|
-                                                 #   together|huggingface|openrouter (default: settings/fake)
-        [--model <id>]                # default: settings defaultModel
+The full flag reference is [`docs/cli-reference.md`](docs/cli-reference.md)
+— **diff-tested**: `tests/cli_help.rs` fails if `pi-rust --help` drifts from
+the doc. Quick view:
+
+```sh
+pi-rust [options]                      # TTY + no one-shot flags = interactive TUI
+        --extension-dir <path>         # repeatable
+        [--agent-dir <path>]           # default: $PI_CODING_AGENT_DIR or ~/.pi/agent
+        [--isolated]                   # fresh temp agent dir (hermetic runs)
+        --scenario <s> | --prompt <t> | --template <name> [args...]
+        [--image <path>...]            # png/jpeg/gif/webp, needs --prompt/--template
+        [--provider <id>] [--model <id>]
+        [--command <name> [args...]]   # repeatable; after ready, before the runs
+        [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions]
+        [-p | --print] | --mode text|json|rpc
+        [--print-usage] [--bench]
+        [-h | --help]
 ```
 
-Env: `PI_RUST_SIDECAR` (sidecar entry override), `PI_RUST_NODE` (node
-binary), `PI_CODING_AGENT_DIR` (agent dir override, upstream name). The
-sidecar is found by walking up from the cwd, then from the executable's
-directory.
+Env: `PI_CODING_AGENT_DIR` (agent dir, upstream name), `PI_RUST_SIDECAR`
+(sidecar entry override), `PI_RUST_NODE` (node binary). Exit codes:
+`0` clean · `1` fatal · `2` model-script/shutdown failure · `3` degraded.
 
 ### Interactive TUI (M6, WP-601)
 
@@ -397,17 +452,55 @@ above) — pi-rust sessions open in pi and vice versa.
 ## Repository layout
 
 ```
-src/            Rust core (transport, client, model, provider, tools, session, agent, cli)
+src/            Rust core (transport, client, model, provider, tools, session, agent, cli, tui)
 sidecar/        Node sidecar (protocol server, API shim, dialogs, session view, smoke)
 tests/          e2e integration tests (spawn core + sidecar + unmodified extensions)
 tests/fixtures/ test-only fixture extensions (clearly marked; not upstream code)
-docs/           bridge-protocol.md — the protocol contract
-odd/tasks/      feature spec + task log (S1–S5, L1–L11)
+docs/           bridge-protocol.md (protocol contract), cli-reference.md (diff-tested CLI reference)
+benches/        baseline.json — perf baseline for the CI bench job (WP-905)
+odd/tasks/      feature spec + task log per milestone (S#/L# entries)
 upstream/       earendil-works/pi @ 085c84e (gitignored reference clone)
 ```
 
-## Next milestones (not in this PoC)
+## Troubleshooting
 
-Interactive TUI (ratatui) with theme/keybinding parity, compaction, MCP
-transport, upstream session-file compat, provider invocation of
-`registerProvider` extensions, sidecar respawn, token/cost accounting.
+- **`sidecar not found`** — the binary was run from a tree without
+  `sidecar/index.mjs` (release tarballs include it). From source: run from
+  the repo root or set `PI_RUST_SIDECAR`.
+- **Sidecar starts, then `Cannot find module '@earendil-works/...'`** —
+  upstream is not built. Run the "From source" steps 1 (`npm ci` +
+  `npm run build` in `upstream/`). Release tarballs ship the built tree.
+- **`node: command not found` / sidecar crash on start** — Node ≥ 22.19 is
+  required (the sidecar is a regular Node process). Set `PI_RUST_NODE` to
+  an explicit binary if your node is not on PATH.
+- **TUI garbled on start / screen corruption** — you are inside a nested
+  terminal that dropped the raw-mode restore; reopen the shell. In TUI mode
+  sidecar/core diagnostics go to `<agentDir>/tui-stderr.log` (by design, so
+  they cannot corrupt the screen).
+- **`agent dir ... permission denied`** — pi-rust creates the agent dir
+  `0700` when it does not exist (WP-906; it holds `auth.json` + sessions).
+  A pre-existing dir keeps its mode — fix it with `chmod 700 ~/.pi/agent`.
+- **Provider errors** (WP-904): `401/403` → check the key for that provider
+  (no retry is attempted); `429` → one automatic retry honoring
+  `Retry-After`; `5xx`/network → one automatic retry, then a clean typed
+  error. Error text is redacted: provider name + status + clipped body,
+  never the key or the URL.
+- **Bench/regression noise in CI** — the CI `bench` job compares against
+  `benches/baseline.json` with a per-metric band (timing/throughput 20%,
+  idle RSS 50% — shared runners jitter RSS ±1.5 MB); refresh the
+  baseline (re-run + commit) on toolchain bumps or new hardware, not on
+  every flake.
+
+## Roadmap status
+
+M1–M9 delivered and merged: bridge PoC, config/state, model ecosystem,
+built-in tools, interactive TUI, extension completeness (providers, MCP,
+compaction, shortcuts), ecosystem (skills, RPC, print modes), hardening
+& release. Full per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
+
+Known v0 non-goals (v1): `ctx.ui.custom` (evaluated, documented in the
+M7 WP memos), non-`api_key` credential kinds (oauth, command refs — typed
+rejection), Windows support (upstream targets macOS/Linux first),
+upstream internal/experimental packages (`chord`, `codemode`, `durable`,
+`evals`, `telemetry`), pixel-perfect TUI parity (functional parity is
+the bar), multi-agent orchestration beyond pi's own model.

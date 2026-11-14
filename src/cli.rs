@@ -166,6 +166,32 @@ fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
 }
 
 /// Non-interactive scenario runner (no REPL in v0).
+pub const USAGE: &str = "usage: pi-rust [options]
+
+  --extension-dir <path>    extension directory (repeatable; after the project .pi/extensions and the agent dir)
+  --agent-dir <path>        agent directory (default: $PI_CODING_AGENT_DIR or ~/.pi/agent)
+  --isolated                use a fresh temporary agent dir (hermetic)
+  --scenario <path>         scenario JSON (one of --scenario/--prompt/--template)
+  --prompt <text>           one prompt (one of --scenario/--prompt/--template)
+  --template <name> [args]  expand a prompt template into the prompt (one of the three; args map to $1..$9)
+  --image <path>            attach an image to the prompt (repeatable; png/jpeg/gif/webp; needs --prompt/--template)
+  --provider <id>           model provider (default: settings or fake)
+  --model <id>              model id (default: settings defaultModel)
+  --command <name> [args]   run an extension command after ready (repeatable)
+  --session-file <path>     explicit session file location
+  --resume <file|id>        resume an existing session
+  --fork <file|id>          fork a new session from an existing one
+  --list-sessions           print the session listing as NDJSON, then exit
+  --print-usage             emit a cumulative usage event before the transcript
+  -p, --print               print mode: stdout = final assistant text only (same as --mode text)
+  --mode <m>                text|json|rpc — text = --print; json = upstream-shaped event stream; rpc = the upstream NDJSON command protocol on stdin/stdout (no --prompt/--scenario)
+  --bench                   measure the perf baseline (cold start, idle RSS, bridge throughput), then exit
+  -h, --help                show this help and exit
+
+env: PI_CODING_AGENT_DIR (agent dir, upstream name), PI_RUST_SIDECAR (sidecar entry), PI_RUST_NODE (node binary).
+exit codes: 0 clean · 1 fatal (startup/config) · 2 model-script or shutdown failure · 3 degraded (sidecar crashed mid-run; built-ins kept working)
+";
+
 pub async fn run() -> Result<i32> {
     // WP-905: cold-start anchor (arg parsing is negligible; sidecar spawn,
     // node startup and init dominate).
@@ -196,6 +222,10 @@ pub async fn run() -> Result<i32> {
             args.get(*i).cloned().context("missing value for argument")
         };
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}"); // USAGE already ends with a newline
+                return Ok(0);
+            }
             "--extension-dir" => ext_dirs.push(val(&args, &mut i)?),
             "--agent-dir" => agent_dir = Some(PathBuf::from(val(&args, &mut i)?)),
             "--isolated" => isolated = true,
@@ -214,7 +244,10 @@ pub async fn run() -> Result<i32> {
             // WP-610: one-shot stdout variants (upstream print-mode parity).
             "-p" | "--print" => {
                 let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
-                anyhow::ensure!(m == crate::agent::OutputMode::Text, "--mode json conflicts with --print (text)");
+                anyhow::ensure!(
+                    m == crate::agent::OutputMode::Text,
+                    "--mode json conflicts with --print (text)"
+                );
                 out_mode = Some(crate::agent::OutputMode::Text);
             }
             "--mode" => {
@@ -225,7 +258,10 @@ pub async fn run() -> Result<i32> {
                     "rpc" => crate::agent::OutputMode::Rpc,
                     other => bail!("invalid --mode '{other}' (valid: text, json, rpc)"),
                 };
-                anyhow::ensure!(out_mode.map(|o| o == m).unwrap_or(true), "--mode conflicts with --print (text)");
+                anyhow::ensure!(
+                    out_mode.map(|o| o == m).unwrap_or(true),
+                    "--mode conflicts with --print (text)"
+                );
                 out_mode = Some(m);
             }
             "--image" => image_paths.push(PathBuf::from(val(&args, &mut i)?)),
@@ -247,7 +283,7 @@ pub async fn run() -> Result<i32> {
                 }
                 commands.push((name, cargs));
             }
-            other => bail!("unknown argument: {other}\nusage: pi-rust --extension-dir <p>... [--agent-dir <p>] [--command <name> [args...]]... --scenario <s> | --prompt <text> [-p|--print] [--mode text|json] [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions] [--provider <id>] [--model <id>]"),
+            other => bail!("unknown argument: {other}\n{USAGE}"),
         }
         i += 1;
     }

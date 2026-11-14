@@ -1,6 +1,6 @@
 # WP-906 — Bridge security audit
 
-**Milestone:** M9 · **Size:** S · **Status:** open · **Depends on:** M7
+**Milestone:** M9 · **Size:** S · **Status:** delivered (2026-11-14, PR #115; native review approved) · **Depends on:** M7
 
 ## Goal
 Independent security pass over the sidecar bridge: input validation (line

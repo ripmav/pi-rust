@@ -1,6 +1,6 @@
 # WP-905 — Performance baseline
 
-**Milestone:** M9 · **Size:** S · **Status:** open · **Depends on:** 901
+**Milestone:** M9 · **Size:** S · **Status:** delivered (2026-11-14, PR #114) · **Depends on:** 901
 
 ## Goal
 Measurable baselines: cold start to `ready` (target < 500ms without model
