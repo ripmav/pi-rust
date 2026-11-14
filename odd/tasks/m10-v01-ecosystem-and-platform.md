@@ -101,7 +101,33 @@ tests, docs, src comments, vision. Full suite on the new pin: 271 in-crate,
   turn 1, declared + executed after mid-run `setActiveTools` (fixture tool-activation.ts,
   test-only). Full suite + 71 smoke green, fmt/clippy clean.
 - **L6** (2026-11-14): slice strategy for the M10 stack: each WP is one stacked PR and one review unit (the ~400-line
-slice rule applies per WP commit, not per accumulated stack; 1001: 261, 1002: 139, 1003: 423 lines on top of
-main). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
+slice rule applies per WP commit, not per accumulated stack; sizes on top of main — 1001: 261, 1002: 139, 1003: 423,
+1004: 190, 1005: 1 commit, 1006: 515 + 402 + 57 lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
 via direct merge; PRs closed with explanation.
 
+- **L7** (2026-11-14): **WP-1004 delivered** (codemode hosting). Built-in codemode extension hosted with `models: false`
+(after `bindCore` — the factory needs `runtime.appendEntry`/`getSettings`); registers inactive like tool_search
+(v5 activation path); sandbox (QuickJS wasm) executes scripts, nested `tools.<name>()` round-trips through the
+existing `tool_call_request` wire event (zero new wire events, protocol stays v5). E2E: codemode script awaits
+`tools.echo_param` + computes in the sandbox. Full suite + 72 smoke green, fmt/clippy clean. v0 cut: `models.*`
+namespace (needs a model-API wire event) + prepareLoadout/reachesTools/constrainedSampling (not serialized).- **L8** (2026-11-14): **WP-1005 delivered** (llama native provider capture). Native Provider object form
+captured sidecar-side (functions never cross the wire; model list via ready/providers_changed); existing
+provider_stream path reused (zero new wire events); env auth resolved sidecar-side (llama: key "local");
+unmodified llama hosted + refreshModels populates the catalog before ready (publish gate must call
+args.update()). 3 new e2e (native turn, typed not-configured error, unmodified llama via mock router);
+legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
+- L9: WP-1006 (ctx.ui.custom descriptor pane) — delivered. Protocol v6
+  (lockstep, TUI capability "custom"). Sidecar pane host runs the factory's
+  real pi-tui component sidecar-side and relays the structured descriptor
+  (title/lines/list/input/blocked) via pane_open/pane_update/pane_close +
+  pane_key; out-of-subset components degrade to ANSI-stripped render lines,
+  throwing factories resolve undefined (no crash). TUI renders the pane in
+  the transcript slot (above editor, below dialogs), owns input while open.
+  E2E: PTY round-trip of both WP-707 shapes (mcp-menu cursor+confirm,
+  progress live-update+cancel) + headless noOp contract. Dialog regression
+  green. Commits: 6049fa8 (pane host + protocol v6), 5625053 (acceptance +
+  docs), fd4b07d (flake fix: pane timeout contract = dialog manager's, the
+  core's 30 s request timeout previously degraded the bridge for
+  unattended interactive panes; PTY needles now only persistent frames —
+  menu answer rides on the progress live line). PR #136 (stacked on
+  feat/wp-1005-llama-native).

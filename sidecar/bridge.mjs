@@ -8,7 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createSessionView } from "./session.mjs";
-import { createDialogManager, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
+import { createDialogManager, createPaneHost, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
 
 const DIST =
 	process.env.PI_EXTENSION_SIDECAR_DIST ??
@@ -20,6 +20,11 @@ const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(pa
 // WP-702: upstream MCP server config validation (source of truth:
 // src/core/mcp-servers.ts) — not re-exported by dist/index.js either.
 const { validateMcpServerConfig } = await import(path.join(path.dirname(DIST), "core", "mcp-servers.js"));
+// WP-1005: the llama extension factory is not re-exported by dist/index.js.
+const { default: llamaExtensionFactory } = await import(path.join(path.dirname(DIST), "extensions", "llama", "index.js"));
+// WP-1006: pi-tui dist for the pane host (component tree walk + keybindings).
+const tui = await import(path.join(path.dirname(DIST), "..", "..", "tui", "dist", "index.js"));
+const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 
 const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed".split(" "),
@@ -100,7 +105,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	let extensions = [];
 	let session = null;
 	let dialog = null;
-	let state = { tools: new Map(), allToolInfo: [], commands: [], activeTools: new Set(), providers: new Map() };
+	let paneHost = null; // WP-1006
+	let state = { tools: new Map(), allToolInfo: [], commands: [], activeTools: new Set(), providers: new Map(), nativeProviders: new Map() };
 	let capabilities = { ui: [], timeoutMs: 30000 };
 	let initialized = false;
 	let shuttingDown = false;
@@ -154,8 +160,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	// ---- WP-701: extension-registered providers (legacy config form) ----
 
 	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
-	const providersPayload = () =>
-		[...state.providers.entries()].map(([name, config]) => ({
+	const providersPayload = () => {
+		const legacy = [...state.providers.entries()].map(([name, config]) => ({
 			name,
 			models: (config?.models ?? [])
 				.filter((m) => m?.id)
@@ -166,6 +172,37 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name ? { name: m.name } : {}),
 				})),
 		}));
+		// WP-1005: native-form providers (the llama extension registers a
+		// Provider object) appear in the same payload — models come from
+		// getModels() (populated by the sidecar-side refreshModels when a
+		// router is configured).
+		const native = [...state.nativeProviders.values()].map((p) => ({
+			name: p.id,
+			models: (p.getModels?.() ?? [])
+				.filter((m) => m?.id)
+				.map((m) => ({
+					provider: p.id,
+					id: m.id,
+					api: m.api,
+					...(m.name && m.name !== m.id ? { name: m.name } : {}),
+				})),
+		}));
+		return [...legacy, ...native];
+	};
+
+	// WP-1005: capture the native Provider OBJECT form (upstream
+	// registerProvider overload / registerNativeProvider). The object stays
+	// sidecar-side (functions are not JSON); only the model list crosses the
+	// wire via ready/providers_changed, and the core's existing
+	// provider_stream request invokes the object here.
+	const captureNativeProvider = (provider) => {
+		if (!provider || typeof provider.id !== "string" || typeof provider.getModels !== "function" || (typeof provider.stream !== "function" && typeof provider.streamSimple !== "function")) {
+			log("registerNativeProvider: not a Provider object (id/getModels/stream required), ignored");
+			return;
+		}
+		state.nativeProviders.set(provider.id, provider);
+		emitProvidersChanged();
+	};
 
 	// Post-ready registration changes are pushed to the core (it re-keys its
 	// per-turn routing + set_model validation on the payload).
@@ -215,6 +252,55 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		if (!model?.provider || !model?.id) {
 			return output(response(id, "provider_stream", false, undefined, "provider_stream needs a model with provider and id"));
 		}
+		// WP-1005: native Provider object form (e.g. the unmodified llama
+		// extension). The object never crosses the wire — the full model is
+		// re-fetched sidecar-side, env-based auth is resolved here (upstream
+		// AuthContext with process.env), and the provider's own stream runs.
+		const nativeProvider = state.nativeProviders.get(model.provider);
+		if (nativeProvider) {
+			const full = (nativeProvider.getModels?.() ?? []).find((m) => m?.id === model.id);
+			if (!full) {
+				return output(response(id, "provider_stream", false, undefined, `native provider ${model.provider} has no model ${model.id}`));
+			}
+			const authCtx = { env: async (n) => process.env[n] ?? null, fileExists: async () => false };
+			const hasAuth = typeof nativeProvider.auth?.apiKey?.resolve === "function";
+			let auth;
+			try {
+				auth = hasAuth ? await nativeProvider.auth.apiKey.resolve({ ctx: authCtx, credential: undefined }) : {};
+			} catch {
+				auth = undefined;
+			}
+			if (hasAuth && !auth?.auth) {
+				const streamId = command.streamId ?? crypto.randomUUID();
+				output(response(id, "provider_stream", true, { ok: true, streamId }));
+				forwardStream(streamId, (async function* () {
+					yield providerErrorEvent(full, new Error(`provider ${model.provider} is not configured (env auth unresolved — is the required environment set?)`));
+				})(), full);
+				return;
+			}
+			const streamId = command.streamId ?? crypto.randomUUID();
+			output(response(id, "provider_stream", true, { ok: true, streamId }));
+			let stream;
+			try {
+				const fn = nativeProvider.stream ?? nativeProvider.streamSimple;
+				stream = await Promise.resolve(
+					fn.call(nativeProvider, full, { messages: command.messages ?? [] }, {
+						...(command.options ?? {}),
+						...(auth?.auth?.apiKey !== undefined ? { apiKey: auth.auth.apiKey } : {}),
+						...(auth?.auth?.baseUrl !== undefined ? { baseUrl: auth.auth.baseUrl } : {}),
+						...(auth?.auth?.headers ? { headers: auth.auth.headers } : {}),
+						...(auth?.env ? { env: auth.env } : {}),
+					}),
+				);
+			} catch (err) {
+				forwardStream(streamId, (async function* () {
+					yield providerErrorEvent(full, err);
+				})(), full);
+				return;
+			}
+			forwardStream(streamId, stream, full);
+			return;
+		}
 		const config = state.providers.get(model.provider);
 		if (!config) return output(response(id, "provider_stream", false, undefined, `unknown extension provider: ${model.provider}`));
 		if (typeof config.streamSimple !== "function") {
@@ -246,6 +332,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			emit(providerErrorEvent(streamModel, err));
 			return;
 		}
+		forwardStream(streamId, stream, streamModel);
+	}
+
+	// Shared tail for both provider forms: forward every event, require a
+	// terminal one.
+	async function forwardStream(streamId, stream, streamModel) {
+		const emit = (event) => output({ type: "provider_stream_event", streamId, event });
 		try {
 			let terminal = false;
 			for await (const event of stream) {
@@ -297,6 +390,23 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			getAllTools: () => runtime.getAllTools(),
 			getActiveTools: () => runtime.getActiveTools(),
 			setActiveTools: (names) => runtime.setActiveTools(names),
+			// WP-1004: the codemode factory needs the pi surface bound by
+			// bindCore (runner.ts:431/437) — it is loaded after bindCore.
+			appendEntry: (entry) => runtime.appendEntry(entry),
+			getSettings: () => runtime.getSettings(),
+			// WP-1005: the llama extension calls pi.registerProvider(providerObject) —
+			// same loader dispatch as user extensions (string = legacy config
+			// form, object = native form).
+			registerProvider: (name, config) => {
+				if (typeof name === "string" && config && typeof config === "object") {
+					state.providers.set(name, config);
+					emitProvidersChanged();
+				} else if (name && typeof name === "object") {
+					captureNativeProvider(name);
+				} else {
+					log(`registerProvider on ${extension.path}: unsupported form, ignored`);
+				}
+			},
 		};
 	}
 
@@ -344,10 +454,35 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return extension;
 	}
 
+	// WP-1004: host the BUILT-IN codemode extension (upstream main.ts auto-loads
+	// it with the models namespace). pi-rust hosts it with models: false —
+	// the models.* namespace needs model-API calls the v0 bridge cannot serve
+	// (a new wire event; follow-up). It registers INACTIVE (model-only,
+	// defaultActive false) like tool_search; activation goes through the
+	// v5 active-set path. The factory needs runtime.appendEntry/getSettings,
+	// which bindCore wires, so it loads AFTER bindCore.
+	async function loadBuiltinCodemodeExtension(runtime) {
+		const extension = createBuiltinExtension("codemode");
+		const factory = ca.createCodemodeExtension({ models: false });
+		await factory(createBuiltinMcpApi(extension, runtime));
+		return extension;
+	}
+
+	// WP-1005: host the BUILT-IN llama extension UNMODIFIED (upstream main.ts
+	// auto-loads it; the dist factory is imported directly). Its
+	// pi.registerProvider(providerObject) lands in captureNativeProvider via
+	// the builtin factory API. The /llama TUI command registers but is
+	// out of scope (ui.custom, WP-1006).
+	async function loadBuiltinLlamaExtension(runtime) {
+		const extension = createBuiltinExtension("llama");
+		await llamaExtensionFactory(createBuiltinMcpApi(extension, runtime));
+		return extension;
+	}
+
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 5) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 5)`));
+		if (command.protocolVersion !== 6) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 6)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -365,6 +500,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// connects the servers once the core fires session_start.
 		extensions.push(await loadBuiltinMcpExtension(loaded.runtime));
 		extensions.push(await loadBuiltinToolSearchExtension(loaded.runtime));
+		extensions.push(await loadBuiltinLlamaExtension(loaded.runtime));
 
 		const contextActions = {
 			getModel: () => session.view.model,
@@ -400,7 +536,9 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					log("registerProvider native Provider object form is not supported in the v0 bridge (legacy config form only)");
 				}
 			},
-			registerNativeProvider: () => log("registerNativeProvider not supported in the v0 bridge (native Provider object form)"),
+			// WP-1005: native Provider object form — captured sidecar-side
+			// (the llama extension registers it unmodified).
+			registerNativeProvider: (provider) => captureNativeProvider(provider),
 			unregisterProvider: (name) => {
 				if (state.providers.delete(name)) emitProvidersChanged();
 			},
@@ -409,6 +547,36 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		};
 		runner.bindCore(createBridgeActions({ output, sendRequest, session, state, onActiveToolsChanged: (names) => applyActiveTools(names) }), contextActions, providerActions);
 		runner.bindCommandContext();
+		// WP-1004: after bindCore (the factory needs runtime.appendEntry/getSettings).
+		extensions.push(await loadBuiltinCodemodeExtension(loaded.runtime));
+		// WP-1005: populate native-provider catalogs before `ready` — the llama
+		// extension's getModels() is empty until refreshModels asks the
+		// configured router (env-only auth: LLAMA_BASE_URL / LLAMA_API_KEY,
+		// upstream semantics). No URL → refreshModels returns early (no
+		// catalog, and stream() later fails with a typed not-configured error).
+		for (const provider of state.nativeProviders.values()) {
+			if (typeof provider.refreshModels !== "function") continue;
+			try {
+				await provider.refreshModels({
+					stored: { models: [] },
+					credential: {
+						type: "api_key",
+						key: process.env.LLAMA_API_KEY || undefined,
+						env: process.env.LLAMA_BASE_URL ? { LLAMA_BASE_URL: process.env.LLAMA_BASE_URL } : {},
+					},
+					allowNetwork: true,
+					signal: AbortSignal.timeout(5000),
+					// The publish gate: v0 has no model persistence, but the update
+					// callback is what mutates the provider's model list.
+					publish: async (args) => {
+						args?.update?.();
+						return true;
+					},
+				});
+			} catch (err) {
+				log(`native provider ${provider.id} refreshModels failed: ${message(err)}`);
+			}
+		}
 
 		// ---- WP-702: dynamic extension tool set (bridge protocol v2) ----
 		// MCP tools register AFTER ready (on connection, lazy reconnect,
@@ -536,6 +704,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// and the M1 headless-safe contract keeps them working.
 		if (capabilities.ui.length > 0) {
 			dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs, sendRequest });
+			// WP-1006: ctx.ui.custom — the pane host runs the factory's real
+			// pi-tui component sidecar-side; the core renders the descriptor.
+			if (capabilities.ui.includes("custom")) {
+				paneHost = createPaneHost({ output, tui, keybindings: paneKeybindings, theme: dialog.ui.theme, timeoutMs: capabilities.timeoutMs });
+				dialog.ui.custom = paneHost.custom;
+			}
 			runner.setUIContext(dialog.ui, "rpc");
 		} else {
 			ca.initTheme();
@@ -619,6 +793,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				const tool = state.tools.get(command.toolName);
 				if (!tool) return response(id, type, false, undefined, `Unknown extension tool: ${command.toolName}`);
 				const result = await tool.execute(command.toolCallId, command.input ?? {}, undefined, undefined);
+				// WP-1003 fix: the tool's execute may have changed the active
+				// set (setActiveTools); flush before the response so the core's
+				// drain barrier applies it (decisions flush the same way — the
+				// setImmediate alone races the next turn under load).
+				flushToolsEventsNow();
 				return response(id, type, true, result);
 			}
 			// Returns the final input so the core executes the post-mutation arguments (in-place mutation, no re-validation).
@@ -772,6 +951,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			// Never await here: a blocking command may be waiting for exactly this line
 			// (bidirectional liveness, no head-of-line blocking in either direction).
 			dialog?.respond(parsed.id, parsed);
+			continue;
+		}
+		if (parsed?.type === "pane_key") {
+			// WP-1006: TUI key for an open custom pane — fire-and-forget, same
+			// liveness rule as extension_ui_response.
+			paneHost?.key(parsed.id, parsed.key);
 			continue;
 		}
 		// Fire-and-forget dispatch (upstream rpc-mode pattern): a command may block on a

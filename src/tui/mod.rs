@@ -16,6 +16,7 @@ pub mod commands;
 pub mod dialog;
 pub mod keybindings;
 pub mod markdown;
+pub mod pane;
 pub mod picker;
 pub mod terminal;
 pub mod theme;
@@ -80,6 +81,8 @@ pub struct TuiApp {
     pub slash: Option<(Vec<commands::Command>, usize)>,
     /// WP-609: the open picker (session resume / model switch).
     pub picker: Option<picker::Picker>,
+    /// WP-1006: open ctx.ui.custom descriptor pane (None = closed).
+    pub pane: Option<pane::Pane>,
     /// WP-609: what the open picker selects (its outcome routing).
     pub picker_kind: PickerKind,
     /// Lines scrolled up from the bottom (0 = pinned to newest).
@@ -452,6 +455,7 @@ impl TuiApp {
             skills: Vec::new(),
             slash: None,
             picker: None,
+            pane: None,
             picker_kind: PickerKind::default(),
             scroll: 0,
             size: (80, 24),
@@ -484,6 +488,15 @@ impl TuiApp {
         let outcome = d.handle_key(ev)?;
         self.dialog = None;
         Some(outcome)
+    }
+    /// WP-1006: route one key to the open custom pane (the terminal calls
+    /// this before dialog/normal handling). Returns the `pane_key` wire
+    /// value for relayable keys; `None` closes nothing and consumes the key
+    /// (the pane stays open — its component decides the close).
+    pub fn handle_pane_key(&mut self, ev: &TermEvent) -> Option<Value> {
+        let id = self.pane.as_ref()?.id.clone();
+        let key = pane::Pane::key_event(ev)?;
+        Some(json!({"type":"pane_key","id":id,"key":key}))
     }
 
     /// Open an `editor` dialog in the editor pane (WP-605): the pane shows
@@ -932,7 +945,8 @@ impl TuiApp {
     /// Delete / ctrl+d char forward (ctrl+d still exits with an empty
     /// editor outside editor sessions), left/right/home/end caret.
     pub fn handle_key(&mut self, ev: TermEvent) -> Option<TuiAction> {
-        if self.dialog.is_some() {
+        // WP-1006: an open pane (like a dialog) is the active input target.
+        if self.dialog.is_some() || self.pane.is_some() {
             return None;
         }
         match ev {
@@ -1337,6 +1351,11 @@ impl TuiApp {
         } else if let Some(d) = &self.dialog {
             lines.push(Line::from(Span::raw("")));
             lines.extend(d.render_lines());
+        } else if let Some(p) = &self.pane {
+            // WP-1006: the custom pane occupies the transcript area (above
+            // the editor, below dialogs).
+            lines.push(Line::from(Span::raw("")));
+            lines.extend(p.render_lines(self.size.0));
         } else {
             for m in &self.transcript {
                 let (prefix, style): (&str, Style) = match m.role {

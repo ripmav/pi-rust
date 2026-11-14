@@ -253,7 +253,7 @@ async function main() {
 		// (a) handshake
 		const init = await core.request({
 			type: "init",
-			protocolVersion: 5,
+			protocolVersion: 6,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("init succeeds, apiVersion 0", init.success === true && init.data?.apiVersion === 0, init);
@@ -273,6 +273,13 @@ async function main() {
 			toolSearch,
 		);
 		check("hello is active in ready.activeTools", ready.activeTools.includes("hello"), ready.activeTools);
+		// WP-1004: codemode registers inactive like tool_search (model-only, defaultActive false).
+		const codemode = ready.tools.find((t) => t.name === "codemode");
+		check(
+			"codemode registered inactive (model-only, defaultActive false)",
+			codemode?.exposure === "model-only" && codemode?.defaultActive === false && !ready.activeTools.includes("codemode"),
+			codemode,
+		);
 		check("ready commands incl. emit", ready.commands.some((c) => c.name === "emit"), ready.commands);
 		check("ready flags incl. probe", ready.flags.some((f) => f.name === "probe" && f.default === true), ready.flags);
 		check(
@@ -280,15 +287,23 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 9 extensions (7 + builtin mcp + builtin tool-search), no errors", ready.extensions.length === 9 && ready.errors.length === 0, ready.errors);
+		check("ready lists 11 extensions (7 + builtins mcp/tool-search/codemode/llama), no errors", ready.extensions.length === 11 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 2 &&
+			Array.isArray(ready.providers) && ready.providers.length === 3 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
+		);
+		// WP-1005: the unmodified built-in llama extension registers its native
+		// provider; without a router (no LLAMA_BASE_URL) the catalog is empty.
+		const llamaProv = ready.providers?.find((p) => p?.name === "llama.cpp");
+		check(
+			"llama.cpp native provider registered (empty catalog without router)",
+			Boolean(llamaProv) && Array.isArray(llamaProv.models) && llamaProv.models.length === 0,
+			llamaProv,
 		);
 		check(
 			"ready provider model entry carries provider/id/api",
@@ -533,7 +548,7 @@ async function main() {
 		const core2 = new FakeCore(child2);
 		const init2 = await core2.request({
 			type: "init",
-			protocolVersion: 5,
+			protocolVersion: 6,
 			capabilities: { ui: ["select", "confirm", "input", "editor", "notify"], timeoutMs: 5000 },
 		});
 		check("isolated sidecar init", init2.success === true, init2);
@@ -576,15 +591,15 @@ async function main() {
 		const core3 = new FakeCore(child3);
 		const init3 = await core3.request({
 			type: "init",
-			protocolVersion: 5,
+			protocolVersion: 6,
 			capabilities: { ui: [], timeoutMs: 5000 },
 		});
 		check("gitlab-duo sidecar init", init3.success === true, init3);
 		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
 		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
 		check(
-			"gitlab-duo loads unmodified (1 user extension + builtins mcp + tool-search, no errors)",
-			ready3.extensions.length === 3 && ready3.errors.length === 0,
+			"gitlab-duo loads unmodified (1 user extension + builtins mcp/tool-search/codemode/llama), no errors",
+			ready3.extensions.length === 5 && ready3.errors.length === 0,
 			ready3.errors,
 		);
 		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
@@ -612,7 +627,7 @@ async function main() {
 		const core4 = new FakeCore(child4);
 		const init4 = await core4.request({
 			type: "init",
-			protocolVersion: 5,
+			protocolVersion: 6,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			mcpConfig: {
 				mcpServers: {
@@ -649,7 +664,7 @@ async function main() {
 		const core5 = new FakeCore(child5);
 		const init5 = await core5.request({
 			type: "init",
-			protocolVersion: 5,
+			protocolVersion: 6,
 			capabilities: { ui: [], timeoutMs: 5000 },
 			keybindings: { "app.clear": ["ctrl+c"] },
 		});

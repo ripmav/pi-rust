@@ -3231,3 +3231,379 @@ fn wp1003_deferred_tool_activated_mid_run() {
         "deferred_echo result missing\n{execs:?}"
     );
 }
+
+// ---- WP-1004 (codemode hosting): sandbox execution + nested tools -----------
+
+/// The built-in codemode extension is hosted by the sidecar: a codemode tool
+/// call runs the QuickJS sandbox, and a `tools.<name>(...)` call inside the
+/// script round-trips through the bridge (tool_call_request → core → the
+/// normal tool_call decision → back into the sandbox).
+#[test]
+fn wp1004_codemode_runs_script_and_nested_tool() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1004-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({
+        "user_messages": ["run the script"],
+        "model_scripts": [[
+            { "tool_call": { "name": "codemode", "input": { "code": "const r = await tools.echo_param({ text: \"x\" }); return JSON.stringify(r) + \" | 1+1=\" + (1 + 1);" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(repo().join("tests/fixtures/codemode-nested.ts"))
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The nested call went through the normal tool_call decision path.
+    let nested_decisions: Vec<&Value> = lines
+        .iter()
+        .filter(|l| {
+            l.get("kind").and_then(Value::as_str) == Some("decision")
+                && l.get("name").and_then(Value::as_str) == Some("tool_call")
+                && l.get("request")
+                    .and_then(|r| r.get("toolName"))
+                    .and_then(Value::as_str)
+                    == Some("echo_param")
+        })
+        .collect();
+    assert_eq!(
+        nested_decisions.len(),
+        1,
+        "exactly one nested tool_call decision for echo_param\n{stdout}"
+    );
+
+    // The sandbox ran: the codemode result carries the nested tool's output
+    // and the pure JS arithmetic.
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "codemode")
+        .collect();
+    assert_eq!(
+        execs.len(),
+        1,
+        "codemode must execute exactly once\n{stdout}"
+    );
+    let summary = execs[0]["result_summary"].to_string();
+    assert!(
+        summary.contains("echo-param:x"),
+        "nested tool result missing from the sandbox output\n{summary}"
+    );
+    assert!(
+        summary.contains("1+1=2"),
+        "sandbox JS evaluation missing\n{summary}"
+    );
+}
+
+// ---- WP-1005 (native provider object form): llama-compatible capture --------
+
+/// A native-form provider extension (object, as the unmodified llama
+/// extension registers) drives a scripted full turn through the EXISTING
+/// provider_stream path; the sidecar-resolved auth (env-style) is merged
+/// into the stream options.
+#[test]
+fn wp1005_native_provider_drives_turn() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1005a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/native-provider.ts");
+    let scenario = json!({
+        "user_messages": ["switch"],
+        "model_scripts": [[
+            { "tool_call": { "name": "switch_to_native", "input": {} } },
+            { "text": "should never be used" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(&fixture)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "switch_to_native")
+        .expect("switch_to_native tool_execution missing\n{stdout}");
+    assert_eq!(exec["result_summary"], "switched:true");
+
+    // Turn 2 was served by the native provider with the resolved auth key
+    // merged into the stream options.
+    let model_outputs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "model_output")
+        .collect();
+    assert_eq!(model_outputs.len(), 2, "expected 2 model outputs\n{stdout}");
+    assert_eq!(
+        model_outputs[1]["text"], "native stream, key=native-key-ok",
+        "resolved auth must reach the provider stream options"
+    );
+
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let changes: Vec<Value> = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("model_change"))
+        .collect();
+    assert_eq!(changes.len(), 1, "model_change entries: {file}");
+    assert_eq!(changes[0]["provider"], "fakenative");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A native provider whose env-based auth does not resolve must produce a
+/// clean typed error (exit 1, `agent run failed` with the reason), not a
+/// crash — the llama "router not configured" case.
+#[test]
+fn wp1005_native_provider_unconfigured_is_typed_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1005b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/native-unconfigured.ts");
+    let scenario = json!({
+        "user_messages": ["switch"],
+        "model_scripts": [[
+            { "tool_call": { "name": "switch_to_unconfigured", "input": {} } },
+            { "text": "should never be used" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+    cmd.arg("--extension-dir")
+        .arg(&fixture)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file);
+    // Ensure the fixture's env var is unset even if the outer env has it.
+    cmd.env_remove("FAKE_UNCONFIGURED_URL");
+    let out = cmd.output().expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // NDJSON mode: a run failure (fail set) exits 2 (degraded would be 3).
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "typed provider failure must exit 2 in ndjson mode\n{stderr}"
+    );
+    assert!(
+        stderr.contains("agent run failed: provider fakeunconfigured is not configured"),
+        "typed not-configured error missing\n{stderr}"
+    );
+
+    // WP-610: ndjson mode keeps stdout clean on run errors — the typed error
+    // is on stderr + exit 2 (asserted above); the scripted turn must not leak.
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let model_outputs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "model_output")
+        .collect();
+    assert!(
+        !model_outputs
+            .iter()
+            .any(|m| m["text"].as_str() == Some("should never be used")),
+        "scripted turn leaked: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The UNMODIFIED built-in llama extension: with LLAMA_BASE_URL pointing at
+/// the mock router, refreshModels populates the catalog before `ready`, and
+/// a turn routed to the llama model streams from the router through the
+/// native provider object (env auth: key defaults to "local").
+#[test]
+fn wp1005_unmodified_llama_via_mock_router() {
+    let mut child = Command::new("node")
+        .arg(repo().join("tests/fixtures/llama-router-mock.mjs"))
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning mock llama router");
+    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock router stdout"));
+    let mut port_line = String::new();
+    port_reader
+        .read_line(&mut port_line)
+        .expect("mock router port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock router port");
+
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1005c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fixture = repo().join("tests/fixtures/switch-to-llama.ts");
+    let scenario = json!({
+        "user_messages": ["switch"],
+        "model_scripts": [[
+            { "tool_call": { "name": "switch_to_llama", "input": {} } },
+            { "text": "should never be used" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(&fixture)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .env("LLAMA_BASE_URL", format!("http://127.0.0.1:{port}"))
+        .output()
+        .expect("running pi-rust");
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The model switch to the router-discovered llama model was accepted.
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "switch_to_llama")
+        .expect("switch_to_llama tool_execution missing\n{stdout}");
+    assert_eq!(
+        exec["result_summary"], "switched:true",
+        "catalog from the mock router must be registered before the switch"
+    );
+
+    // Turn 2 streamed from the mock router (the echo proves the transcript
+    // reached /v1/chat/completions).
+    let model_outputs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "model_output")
+        .collect();
+    assert_eq!(model_outputs.len(), 2, "expected 2 model outputs\n{stdout}");
+    assert_eq!(model_outputs[1]["text"], "llama-mock: switch");
+
+    let file = std::fs::read_to_string(&session_file).unwrap();
+    let changes: Vec<Value> = file
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("model_change"))
+        .collect();
+    assert_eq!(changes.len(), 1, "model_change entries: {file}");
+    assert_eq!(changes[0]["provider"], "llama.cpp");
+    assert_eq!(changes[0]["modelId"], "gemma-mock");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1006 headless contract: without the `custom` capability (headless
+/// init advertises ui: []), ctx.ui.custom resolves with the upstream noOp
+/// result (undefined) — the factory never runs, nothing hangs, no
+/// pane_* events cross the wire. The fixture command throws on any
+/// deviation (ok:false on the command event).
+#[test]
+fn wp1006_headless_custom_is_noop() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1006-headless-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let ext = repo().join("tests/fixtures");
+    let agent_dir = tmp.join("agent-dir");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("fake")
+        .arg("--extension-dir")
+        .arg(&ext)
+        .arg("--command")
+        .arg("custom-probe")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--prompt")
+        .arg("probe")
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let cmd = lines
+        .iter()
+        .find(|l| l.get("kind").and_then(Value::as_str) == Some("command"))
+        .expect("command event missing\n{stdout}");
+    assert_eq!(cmd["name"], "custom-probe");
+    assert_eq!(
+        cmd["ok"],
+        json!(true),
+        "custom-probe must pass (noOp undefined)\n{cmd}"
+    );
+
+    // No pane lifecycle events may appear in the core log.
+    let corelog = std::fs::read_to_string(agent_dir.join("core.log")).unwrap_or_default();
+    assert!(
+        !corelog.contains("pane_open")
+            && !corelog.contains("pane_update")
+            && !corelog.contains("pane_key"),
+        "headless runs must not see pane_* events\n{corelog}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -617,7 +617,7 @@ pub async fn run() -> Result<i32> {
     // their no-UI defaults (upstream print-mode behavior). The TUI client
     // (M6/WP-604) advertises its methods to get the dialog wiring.
     let ui_methods = if tui_mode {
-        json!(["select", "confirm", "input", "editor", "notify"])
+        json!(["select", "confirm", "input", "editor", "notify", "custom"])
     } else {
         json!([])
     };
@@ -636,7 +636,7 @@ pub async fn run() -> Result<i32> {
         }
     };
     let mut init =
-        json!({"protocolVersion":5,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+        json!({"protocolVersion":6,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
@@ -1060,6 +1060,14 @@ pub async fn run() -> Result<i32> {
             },
             move || {
                 let _ = end_tx.send(Item::End);
+            },
+            {
+                let pane_client = client.clone();
+                move |key: serde_json::Value| {
+                    // WP-1006: fire-and-forget — the pane's component
+                    // decides the close via pane_close.
+                    pane_client.send(key);
+                }
             },
         )
         .await;

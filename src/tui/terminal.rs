@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 // Nine wire/callback parameters: each maps to one TUI responsibility
 // (events, ui, submit, dialog, theme dir, request, resume, exit).
 #[allow(clippy::too_many_arguments)]
-pub async fn run<F, G, H, I, J>(
+pub async fn run<F, G, H, I, J, K>(
     app: &mut super::TuiApp,
     mut events: mpsc::UnboundedReceiver<Value>,
     mut ui: mpsc::UnboundedReceiver<Value>,
@@ -48,6 +48,7 @@ pub async fn run<F, G, H, I, J>(
     mut on_request: I,
     mut on_resume: J,
     mut on_exit: G,
+    mut on_pane_key: K,
 ) -> anyhow::Result<()>
 where
     F: FnMut(&str) + Send,
@@ -55,6 +56,9 @@ where
     H: FnMut(super::dialog::DialogOutcome) + Send,
     I: FnMut(String, Value, &str, Value) + Send,
     J: FnMut(&str) -> Result<(String, Vec<Value>), String> + Send,
+    // WP-1006: a key for the open custom pane — fire-and-forget over the
+    // bridge (the sidecar's component decides when the pane closes).
+    K: FnMut(Value) + Send,
 {
     // Stdin reader thread: crossterm's blocking poll+read into a channel.
     // The stop flag bounds the final join: without it the reader only
@@ -169,6 +173,8 @@ where
                                     (_, super::picker::PickerOutcome::Cancelled) => {}
                                 }
                             }
+                        } else if let Some(key) = app.handle_pane_key(&e) {
+                            on_pane_key(key);
                         } else if let Some(outcome) = app.handle_dialog_key(&e) {
                             on_dialog(outcome);
                         } else if let Some(action) = app.handle_key(e) {
@@ -246,14 +252,42 @@ where
                 // WP-604: dialog request from the core.
                 req = ui.recv() => match req {
                     Some(v) => {
-                        // WP-605: the `editor` dialog reuses the editor pane.
-                        let opened = if v.get("method").and_then(serde_json::Value::as_str) == Some("editor") {
-                            app.open_editor_session(&v)
-                        } else {
-                            app.open_dialog(&v)
-                        };
-                        if opened {
-                            dirty = true;
+                        // WP-1006: custom-pane lifecycle (one-way from the
+                        // sidecar; pane_close drops the pane).
+                        match v.get("type").and_then(serde_json::Value::as_str) {
+                            Some("pane_open") => {
+                                if let Some(pane) = super::pane::Pane::from_open(&v) {
+                                    app.pane = Some(pane);
+                                    dirty = true;
+                                }
+                            }
+                            Some("pane_update") => {
+                                if let Some(pane) = app.pane.as_mut() {
+                                    pane.apply_update(&v);
+                                    dirty = true;
+                                }
+                            }
+                            Some("pane_close") => {
+                                if app
+                                    .pane
+                                    .as_ref()
+                                    .is_some_and(|p| p.id == v.get("id").and_then(serde_json::Value::as_str).unwrap_or(""))
+                                {
+                                    app.pane = None;
+                                    dirty = true;
+                                }
+                            }
+                            _ => {
+                                // WP-605: the `editor` dialog reuses the editor pane.
+                                let opened = if v.get("method").and_then(serde_json::Value::as_str) == Some("editor") {
+                                    app.open_editor_session(&v)
+                                } else {
+                                    app.open_dialog(&v)
+                                };
+                                if opened {
+                                    dirty = true;
+                                }
+                            }
                         }
                     }
                     None => break,
