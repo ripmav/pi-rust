@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build.rs reads the upstream model catalog, which the upstream build
       # generates from TS source into packages/ai/src/providers/data.
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
         uses: actions/cache@v6
@@ -156,36 +156,42 @@ jobs:
         run: cargo build --release
       - name: Bench + compare against baseline
         run: |
-          set +e
-          out="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>bench-stderr.log | grep '"cold_start_ms"')"
-          set -e
-          if [ -z "$out" ]; then
-            echo "bench produced no usable output; stderr:"
-            cat bench-stderr.log
-            exit 1
-          fi
-          echo "$out"
-          python3 - "$out" <<'EOF'
-          import json, sys
-          got = json.loads(sys.argv[1])
+          # Three samples, compared by per-metric median: single shared-runner
+          # samples of the same code vary widely (observed throughput
+          # 5780/6579/7621 events/s), so a one-sample gate is not stable.
+          for i in 1 2 3; do
+            set +e
+            line="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>>bench-stderr.log | grep '"cold_start_ms"')"
+            set -e
+            if [ -z "$line" ]; then
+              echo "bench sample $i produced no usable output; stderr:"
+              cat bench-stderr.log
+              exit 1
+            fi
+            echo "$line" >> bench-samples.jsonl
+          done
+          python3 - <<'EOF'
+          import json, statistics, sys
+          samples = [json.loads(l) for l in open("bench-samples.jsonl") if l.strip()]
           base = json.load(open("benches/baseline.json"))
           # Per-metric band: idle RSS is noisy on shared runners (±1.5 MB
-          # jitter on a ~5 MB baseline) — a 50% band still catches real
-          # allocation regressions without flaking on runner variance.
+          # jitter) — a 50% band still catches real allocation regressions.
           BAND = {"idle_rss_mb": 0.5}
           def band(k): return BAND.get(k, 0.2)
+          med = {k: statistics.median(s[k] for s in samples) for k in base}
           bad = []
           for k, v in base.items():
-              g = got[k]
+              g = med[k]
               ok = g >= v * (1 - band(k)) if k.endswith("_per_sec") else g <= v * (1 + band(k))
               if not ok:
-                  bad.append(f"{k}={g} (baseline {v}, >{int(band(k) * 100)}% band)")
+                  bad.append(f"{k}={g:.1f} (baseline {v}, >{int(band(k) * 100)}% band)")
+          print("median:", {k: round(v, 1) for k, v in med.items()})
           if bad:
               print("BENCH REGRESSION:")
               for b in bad:
                   print(" -", b)
               sys.exit(1)
-          print("bench within band of baseline")
+          print("bench within band of baseline (median of 3 samples)")
           EOF
 
   fresh-clone:
@@ -201,7 +207,7 @@ jobs:
     steps:
       - name: Container deps
         run: apt-get update -qq && apt-get install -y -qq build-essential pkg-config python3 git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Build upstream (README "From source", step 1)
         run: |

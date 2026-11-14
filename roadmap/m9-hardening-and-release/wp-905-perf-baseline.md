@@ -24,3 +24,17 @@ in CI (comparison against baseline commit).
   9.0 MB vs 5.0 baseline still fails, throughput −30% still fails).
 - Baseline refresh policy: re-record on toolchain bumps / runner
   generation changes, not on every flake.
+
+## Bench gate memo 2 (2026-11-14): median of 3 samples
+
+- The one-sample gate flaked on throughput (PR #118 run: 5779.7 vs
+  baseline 7621.5, >20%; the baseline itself was a single lucky sample —
+  same-code samples observed: 7621.5 / 6579.0 / 5779.7 on shared
+  runners).
+- Fix: the CI bench job takes 3 samples and compares per-metric
+  **medians**; `benches/baseline.json` refreshed to the medians of the
+  three same-code samples (cold_start 726.7, idle_rss 6.4,
+  events/s 6579.0). Bands unchanged (20% timing/throughput, 50% RSS).
+- Verified locally: a flaky mix (5780/7000/6800) passes via the median;
+  real throughput (median 4100) and RSS (median 10.2 vs 6.4)
+  regressions still fail.
