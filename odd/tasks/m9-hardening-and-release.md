@@ -82,3 +82,16 @@ L8 (2026-11-14, el Gentleman — CI/release defect fixes on the stack):
   jitter ±1.5 MB). Per-metric band: timing/throughput 20%, idle RSS 50%
   (real regressions still fail: 9.0 vs 5.0 MB, throughput -30%).
   (commit 243b514)
+
+L9 (2026-11-14, el Gentleman — native review of the M9 stack head):
+- Candidate: committed range 36a8e28 (905 head, the last natively
+  reviewed state) .. feat/wp-907-docs head — 12 paths / 612 lines
+  (906 memo, 907 docs+--help+cli test, 903 smoke fixes, 905 bench band,
+  cherry-picks).
+- Lineage: review-265b589651f56ede — tier high, lenses readability +
+  reliability, both via pi host relay.
+- Outcome: **approved** (authority burned,
+  native-approved-acknowledgement-completed, store revision
+  12153d30). Advisory findings (non-blocking, follow-up work, recorded
+  in the WP-907 file): R2-001/R2-004 (ci.yml), R2-002 (src/config.rs
+  330-332), R2-003 (src/tools.rs 141-150), R3-UPSTREAM-SHA (ci.yml:210).
