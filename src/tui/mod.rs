@@ -1349,12 +1349,31 @@ impl TuiApp {
             if let Some(e) = &self.last_error {
                 segs.push(format!("✗ {e}"));
             }
-            let joined = segs.join("  ");
-            let mut s = joined;
+            let mut s = segs.join("  ");
             if s.chars().count() > w {
-                let keep = w.saturating_sub(1);
-                let t: String = s.chars().take(keep).collect();
-                s = t + "…";
+                // Shrink the static path segments (cwd, session) with a middle
+                // ellipsis so the dynamic tail (title/status/working/error)
+                // stays readable — end-truncation clipped them under long
+                // macOS temp paths (WP-706 CI regression).
+                for idx in [1usize, 2] {
+                    if s.chars().count() <= w {
+                        break;
+                    }
+                    let seg = &segs[idx];
+                    if seg.chars().count() <= s.chars().count() - w {
+                        continue;
+                    }
+                    let keep = seg.chars().count() - (s.chars().count() - w);
+                    segs[idx] = truncate_middle(seg, keep);
+                    s = segs.join("  ");
+                }
+                if s.chars().count() > w {
+                    // Pathological (a single non-shrinkable segment is too
+                    // long): last-resort end truncation.
+                    let keep = w.saturating_sub(1);
+                    let t: String = s.chars().take(keep).collect();
+                    s = t + "…";
+                }
             }
             Paragraph::new(Line::from(Span::styled(s, self.theme.fg("muted"))))
                 .render(chunks[2], buf);
@@ -1378,6 +1397,23 @@ impl TuiApp {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// Middle-truncate `s` to `keep` chars, keeping the head and tail (what
+/// identifies a path). `keep` 0..=2 yields the ellipsis plus a tail slice.
+fn truncate_middle(s: &str, keep: usize) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    if cs.len() <= keep {
+        return s.to_string();
+    }
+    let head = keep.saturating_sub(1) / 2;
+    let tail = keep.saturating_sub(1) - head;
+    let mut out: String = cs[..head].iter().collect();
+    out.push('…');
+    if tail > 0 {
+        out.extend(cs[cs.len() - tail..].iter());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2080,7 +2116,27 @@ mod tests {
         let screen = app.render_string();
         let last = screen.lines().last().unwrap();
         assert!(last.chars().count() <= 80, "status row within width: {last}");
-        assert!(last.ends_with('…'), "truncated with ellipsis: {last}");
+        assert!(last.contains('…'), "truncated with ellipsis: {last}");
+    }
+
+    #[test]
+    fn status_bar_keeps_status_and_title_with_long_cwd() {
+        // macOS CI regression: the long /private/var/folders temp path used to
+        // end-truncate the joined row and clip the WP-706 title/status
+        // segments off-screen (120-col PTY, tui_extension_dialog_roundtrip).
+        let mut app = TuiApp::new(
+            "fake/fake",
+            "/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/pi-rust-tui-dlg-9847",
+            "b70a9644-fb24-4fe6-a121-5773a",
+        );
+        assert_eq!(app.handle_key(resize(120, 24)), None);
+        app.title = Some("dialog-ok".into());
+        app.statuses.insert("e2e".into(), "status-ok".into());
+        let screen = app.render_string();
+        let last = screen.lines().last().unwrap();
+        assert!(last.chars().count() <= 120, "status row within width: {last}");
+        assert!(last.contains("dialog-ok"), "title survives truncation: {last}");
+        assert!(last.contains("status-ok"), "status survives truncation: {last}");
     }
 
     #[test]

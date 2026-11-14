@@ -1,0 +1,40 @@
+# M9 — Hardening & Release
+
+Feature doc for milestone M9 (WP-901..WP-907). Engram mirror: unavailable
+(engram binary missing); this file is the durable record.
+
+## Specs
+
+S1 (WP-901): "Red-on-failure proof (deliberate break test run), green on HEAD; cached upstream build keeps CI < ~10 min."
+S2 (WP-902): "Clean run on HEAD; CI enforces."
+S3 (WP-903): "Test release from a staging tag installs and runs (smoke scenario) on both architectures; artifacts < size budget (strip debug)."
+S4 (WP-904): "Per-class error tests (mock server): 401 → key guidance, 429 → retry-after honored, 5xx ×2 → retry then fail cleanly; no key/URL-with-creds in any error text (redaction test)."
+S5 (WP-905): "Benchmark job runs on PRs; regressions > 20% fail the check; baseline committed."
+S6 (WP-906): "Audit memo + native-review lineage (high-risk scope) in-file; zero unaddressed HIGH findings."
+S7 (WP-907): "Fresh-clone setup works by following the README alone (tested on a clean container); CLI reference matches actual flags (generated or diff-tested)."
+
+WP goals verbatim in `roadmap/m9-hardening-and-release/wp-9*.md`.
+
+## Facts (setup)
+
+- `main` = `4693300` (M8 merged; M1–M8 complete).
+- `upstream/` is gitignored; CI must shallow-clone `earendil-works/pi` at the
+  pinned SHA `085c84e98e7f4c950f2be606466fff4f75d8fe7c`, `npm ci`, `npm run build`.
+- Toolchain: Rust 1.99.1 (stable), Node >= 22.19 (local 26.13), python3 for
+  the PTY test harness (`tests/tui.rs`).
+- No `.github/` before M9; no CI has ever run — every suite result so far is local.
+
+## Tasks
+
+- T1 / WP-901 / S1 — CI pipeline (GH Actions, Linux+macOS, cached upstream) — branch `feat/wp-901-ci`, PR base `main` — commit: —
+- T2 / WP-902 / S2 — clippy + rustfmt baseline, joins CI — branch `feat/wp-902-clippy-fmt`, PR base T1 head — commit: —
+- T3 / WP-903 / S3 — release workflow + install script, staging-tag test — branch `feat/wp-903-releases`, PR base T2 head — commit: —
+- T4 / WP-904 / S4 — error UX & retry (401/429/5xx mapping, one retry, redaction) — branch `feat/wp-904-error-ux`, PR base T3 head — commit: —
+- T5 / WP-905 / S5 — performance baseline (ready-latency, idle memory, bridge throughput) — branch `feat/wp-905-perf-baseline`, PR base T4 head — commit: —
+- T6 / WP-906 / S6 — bridge security audit memo + native review lineage — branch `feat/wp-906-security-audit`, PR base T5 head — commit: —
+- T7 / WP-907 / S7 — README as real docs + generated CLI reference + fresh-clone check — branch `feat/wp-907-docs`, PR base T6 head — commit: —
+
+## Log
+
+L1: user request (verbatim): "stack#100 ist gemerged. Arbeite M9 autonom ab" (2026-11-13).
+L2: setup (2026-11-13): local `main` ff-synced to `4693300`; WP files read in full; CI facts established (upstream untracked/pinned `085c84e9`, Rust 1.99.1, Node >=22.19, python3 PTY harness, no `.github/`); issues + stack + branches per house rules (one stack, first PR on `main`, chained PRs, branch naming `feat/wp-9NN-<slug>`, one `type:*` label, issue link).

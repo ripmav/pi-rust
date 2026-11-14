@@ -104,6 +104,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	let capabilities = { ui: [], timeoutMs: 30000 };
 	let initialized = false;
 	let shuttingDown = false;
+	let exitScheduled = false;
 
 	const pendingRequests = new Map(); // sidecar->core: id -> (response) => void
 	let nestedSeq = 0;
@@ -122,8 +123,9 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		});
 
 	function shutdown() {
-		if (shuttingDown) return;
 		shuttingDown = true;
+		if (exitScheduled) return;
+		exitScheduled = true;
 		void (async () => {
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(0);
@@ -517,6 +519,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 		switch (type) {
 			case "session_shutdown": {
+				// Flag synchronously BEFORE the (async) extension emit: any
+				// command queued after this one — including behind the emit —
+				// must not be dispatched, regardless of runner timing.
+				shuttingDown = true;
 				// emitSessionShutdownEvent() (runner.ts:265) semantics: emit only when subscribed.
 				const event = command.event ?? { type: "session_shutdown", reason: "quit" };
 				if (runner.hasHandlers("session_shutdown")) await safe(runner.emit(event), undefined, "session_shutdown");
