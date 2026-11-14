@@ -101,3 +101,15 @@ pinned upstream does.
     reads the active set); agent-loop context only, no self-deadlock.
   - Post-fix: full suite green (276/2/1/45/4/3/4), smoke 74,
     fmt + clippy clean; wp1003 3/3 + full-suite-under-load 3/3 locally.
+- **Native review (in progress, blocked on provider)** — assess
+  `reviewDue=true` (native high risk; rddLine on), lineage
+  `review-bb11d6f28e12c977` started (tier high, lenses risk/resilience/
+  reliability, 1045 lines, correction budget 200, base 786bcf7). CI for
+  PR #138 green (6/6) on head 021c083. The reviewer group failed twice
+  identically in the `review-risk` lens: the host-relay reviewer
+  (solheim/qwen3.8-27b) hits the provider's 15-minute completion limit
+  (`UND_ERR_SOCKET` at ~900 s, 88k–100k thinking chars, 0 output text) —
+  a provider-transport limit, not a review finding; nothing was admitted
+  or burned. The lineage stays in `reviewing` (authority intact) and the
+  native STATUS re-offers the collect set; a bounded retry is offered to
+  the human (next M10 step) rather than replayed blindly.

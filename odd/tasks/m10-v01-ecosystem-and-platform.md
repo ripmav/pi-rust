@@ -151,4 +151,10 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   fixed in 2493616: (a) macOS secret echo (prompt before raw mode),
   (b) ubuntu stale active-set declaration (tools_activated drain barrier
   at run/turn start — existing WP-1003 mechanism gap, surfaced by the
-  heavier WP-1007 sidecar init under CI load).
+  heavier WP-1007 sidecar init under CI load). CI green 6/6 on head
+  021c083. Native review: lineage review-bb11d6f28e12c977 (high,
+  risk/resilience/reliability) — blocked on provider: the review-risk
+  host-relay reviewer dies at the provider's 15-min completion limit
+  (UND_ERR_SOCKET at ~900s, ~100k thinking chars, no output) twice
+  identically; lineage stays 'reviewing' (unconsumed), retry offered as
+  a human decision, not auto-replayed.
