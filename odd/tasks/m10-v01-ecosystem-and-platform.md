@@ -134,7 +134,7 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
 - L10: M10 stack (1004+1005+1006) merged into main as 786bcf7 (2026-11-14);
   stacked PRs #134/#135/#136 all CI green on the stack head — closed with
   explanation (same stacked-merge pattern as L6).
-- L11: WP-1007 (OAuth credentials) — delivered (2026-11-14). Issue #137.
+- L11: WP-1007 (OAuth credentials) — delivered (2026-11-14). Issue #137, PR #138 (commits 16ef9fd, 0ccec70, 66b4222, sizes 662+266+50).
   `pi-rust auth login <provider> [--api-key] [--no-browser]` runs the
   pinned upstream's terminal login flow unmodified in
   `sidecar/auth-login.mjs` (core relays prompts over NDJSON, owns the TTY);
