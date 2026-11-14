@@ -110,4 +110,9 @@ via direct merge; PRs closed with explanation.
 (v5 activation path); sandbox (QuickJS wasm) executes scripts, nested `tools.<name>()` round-trips through the
 existing `tool_call_request` wire event (zero new wire events, protocol stays v5). E2E: codemode script awaits
 `tools.echo_param` + computes in the sandbox. Full suite + 72 smoke green, fmt/clippy clean. v0 cut: `models.*`
-namespace (needs a model-API wire event) + prepareLoadout/reachesTools/constrainedSampling (not serialized).
+namespace (needs a model-API wire event) + prepareLoadout/reachesTools/constrainedSampling (not serialized).- **L8** (2026-11-14): **WP-1005 delivered** (llama native provider capture). Native Provider object form
+captured sidecar-side (functions never cross the wire; model list via ready/providers_changed); existing
+provider_stream path reused (zero new wire events); env auth resolved sidecar-side (llama: key "local");
+unmodified llama hosted + refreshModels populates the catalog before ready (publish gate must call
+args.update()). 3 new e2e (native turn, typed not-configured error, unmodified llama via mock router);
+legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.

@@ -47,7 +47,7 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 ## What the sidecar does
 
 - `init` (protocolVersion 5) → loads extensions with the original loader,
-  hosts the built-in mcp + tool-search extensions (and, after
+  hosts the built-in mcp + tool-search + llama extensions (and, after
   `bindCore`, the built-in codemode extension with `models: false`) on the
   shared runtime, binds
   `ExtensionRunner` (actions/context actions/provider actions), registers

@@ -287,15 +287,23 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		check("ready lists 10 extensions (7 + builtins mcp/tool-search/codemode), no errors", ready.extensions.length === 10 && ready.errors.length === 0, ready.errors);
+		check("ready lists 11 extensions (7 + builtins mcp/tool-search/codemode/llama), no errors", ready.extensions.length === 11 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 2 &&
+			Array.isArray(ready.providers) && ready.providers.length === 3 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
+		);
+		// WP-1005: the unmodified built-in llama extension registers its native
+		// provider; without a router (no LLAMA_BASE_URL) the catalog is empty.
+		const llamaProv = ready.providers?.find((p) => p?.name === "llama.cpp");
+		check(
+			"llama.cpp native provider registered (empty catalog without router)",
+			Boolean(llamaProv) && Array.isArray(llamaProv.models) && llamaProv.models.length === 0,
+			llamaProv,
 		);
 		check(
 			"ready provider model entry carries provider/id/api",
@@ -590,8 +598,8 @@ async function main() {
 		const ready3 = await core3.nextEvent((e) => e.type === "ready", "ready (gitlab-duo)");
 		const gld = ready3.providers?.find((p) => p?.name === "gitlab-duo");
 		check(
-			"gitlab-duo loads unmodified (1 user extension + builtins mcp/tool-search/codemode, no errors)",
-			ready3.extensions.length === 4 && ready3.errors.length === 0,
+			"gitlab-duo loads unmodified (1 user extension + builtins mcp/tool-search/codemode/llama), no errors",
+			ready3.extensions.length === 5 && ready3.errors.length === 0,
 			ready3.errors,
 		);
 		check("gitlab-duo provider registered with 9 models", gld && gld.models.length === 9, gld && gld.models?.length);
