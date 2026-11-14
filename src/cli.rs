@@ -630,7 +630,7 @@ pub async fn run() -> Result<i32> {
         }
     };
     let mut init =
-        json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+        json!({"protocolVersion":5,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
@@ -656,6 +656,7 @@ pub async fn run() -> Result<i32> {
         session: session.clone(),
         events: Arc::default(),
         ext_tools: Arc::default(),
+        ext_active_tools: Arc::default(),
         ext_models: Arc::default(),
         skills: Arc::new(skills.clone()),
         ready: Mutex::new(Some(ready_tx)),

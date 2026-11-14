@@ -140,9 +140,15 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		});
 
 	// Decision command: fast path null when unsubscribed, else run the emitter and map the result.
+	// WP-1003: assigned in the tools block; decisions flush pending tool-set
+	// events BEFORE writing their response, so the core's drain barrier applies
+	// them (order on the pipe = order of effect).
+	let flushToolsEventsNow = () => {};
 	const decision = async (id, type, eventName, emitFn, fallback = null, map = (r) => r ?? null) => {
 		if (!runner.hasHandlers(eventName)) return response(id, type, true, null);
-		return response(id, type, true, map(await safe(emitFn(), fallback, eventName)));
+		const data = map(await safe(emitFn(), fallback, eventName));
+		flushToolsEventsNow();
+		return response(id, type, true, data);
 	};
 
 	// ---- WP-701: extension-registered providers (legacy config form) ----
@@ -300,12 +306,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	// the minimal API above. The original loader stays untouched for user
 	// extensions. `loadConfig` reads no files: the core owns mcp.json (702c)
 	// and every server arrives through the registerMcpServer path.
-	async function loadBuiltinMcpExtension(runtime) {
-		const extension = {
-			path: "builtin:mcp",
-			resolvedPath: "builtin:mcp",
+	function createBuiltinExtension(name) {
+		return {
+			path: `builtin:${name}`,
+			resolvedPath: `builtin:${name}`,
 			// Upstream builtin:<name> path convention (core/source-info.ts).
-			sourceInfo: ca.createSyntheticSourceInfo("builtin:mcp", { source: "builtin" }),
+			sourceInfo: ca.createSyntheticSourceInfo(`builtin:${name}`, { source: "builtin" }),
 			handlers: new Map(),
 			tools: new Map(),
 			messageRenderers: new Map(),
@@ -314,6 +320,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
+	}
+
+	async function loadBuiltinMcpExtension(runtime) {
+		const extension = createBuiltinExtension("mcp");
 		const factory = ca.createMcpExtension({
 			loadConfig: () => ({ servers: [], errors: [], autoEnableCodemode: false }),
 		});
@@ -321,10 +331,23 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return extension;
 	}
 
+	// WP-1003: host the BUILT-IN tool-search extension the same way (upstream
+	// main.ts auto-loads it; the dist bundle exports createToolSearchExtension).
+	// Its tool registers INACTIVE (exposure model-only, defaultActive false) —
+	// activation happens through setActiveTools, which is now observable on the
+	// wire (tools_activated, protocol v5). The ranker sources tools/active set
+	// from the runtime (createBuiltinMcpApi proxies to runtime.*).
+	async function loadBuiltinToolSearchExtension(runtime) {
+		const extension = createBuiltinExtension("tool-search");
+		const factory = ca.createToolSearchExtension();
+		await factory(createBuiltinMcpApi(extension, runtime));
+		return extension;
+	}
+
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 4) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 4)`));
+		if (command.protocolVersion !== 5) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 5)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -341,6 +364,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// its handlers subscribe to session_start / mcp_servers_change and it
 		// connects the servers once the core fires session_start.
 		extensions.push(await loadBuiltinMcpExtension(loaded.runtime));
+		extensions.push(await loadBuiltinToolSearchExtension(loaded.runtime));
 
 		const contextActions = {
 			getModel: () => session.view.model,
@@ -383,7 +407,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			registerVirtualModel: () => log("registerVirtualModel accepted but ignored in v0 bridge"),
 			unregisterVirtualModel: () => {},
 		};
-		runner.bindCore(createBridgeActions({ output, sendRequest, session, state }), contextActions, providerActions);
+		runner.bindCore(createBridgeActions({ output, sendRequest, session, state, onActiveToolsChanged: (names) => applyActiveTools(names) }), contextActions, providerActions);
 		runner.bindCommandContext();
 
 		// ---- WP-702: dynamic extension tool set (bridge protocol v2) ----
@@ -398,25 +422,82 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			description: t.description,
 			...(t.promptSnippet ? { promptSnippet: t.promptSnippet } : {}),
 			parameters: t.parameters,
+			// WP-1003: the core filters declarations by the active set (v5);
+			// exposure/defaultActive document the registration-time rule.
+			...(t.exposure ? { exposure: t.exposure } : {}),
+			...(t.defaultActive === false ? { defaultActive: false } : {}),
 		});
+		// Upstream exposure semantics (types.ts): direct/model-only activate on
+		// registration unless defaultActive is false; codemode/deferred do not;
+		// hidden never activates.
+		const isInitiallyActive = (t) => {
+			if (t.defaultActive === false) return false;
+			const exposure = t.exposure ?? "direct";
+			return exposure === "direct" || exposure === "model-only";
+		};
 		// Coalesce: MCP connections register several tools back to back; the
 		// state rebuild is immediate (dispatch must see them) but the wire
-		// event is one per tick, carrying the final set (the core replaces its
-		// ext_tools on receipt, so intermediate states are unnecessary).
-		let toolsChangedScheduled = false;
+		// events are one pair per tick, carrying the final set (the core
+		// replaces ext_tools then applies the active set, so intermediate
+		// states are unnecessary).
+		// The last state actually on the wire (ready snapshot at init, then the
+		// emitted pairs): emitToolsEvents is change-only, so the timer flush and
+		// the synchronous decision flush never double-send the same pair.
+		let flushedActive = "";
+		let flushedToolsSig = "";
+		const emitToolsEvents = () => {
+			const active = [...state.activeTools].sort().join("\u0000");
+			const sig = state.allToolInfo.map((t) => t.name).sort().join("\u0000");
+			if (active === flushedActive && sig === flushedToolsSig) return;
+			flushedActive = active;
+			flushedToolsSig = sig;
+			output({ type: "tools_changed", tools: state.allToolInfo.map(toToolInfo) });
+			output({ type: "tools_activated", active: [...state.activeTools] });
+		};
+		let toolsEventsScheduled = false;
+		const scheduleToolsEvents = () => {
+			if (!initialized || toolsEventsScheduled) return;
+			toolsEventsScheduled = true;
+			setImmediate(() => {
+				toolsEventsScheduled = false;
+				emitToolsEvents();
+			});
+		};
+		flushToolsEventsNow = () => {
+			if (initialized) emitToolsEvents();
+		};
+		// WP-1003: the single source of truth for active-set changes (user
+		// extensions via createBridgeActions.onActiveToolsChanged, built-in
+		// extensions via runtime.setActiveTools): unknown and hidden tools are
+		// ignored (upstream), then the core is told on the wire.
+		const applyActiveTools = (names) => {
+			const byName = new Map(state.allToolInfo.map((t) => [t.name, t]));
+			const next = new Set();
+			for (const name of names ?? []) {
+				const def = byName.get(name);
+				if (def && def.exposure !== "hidden") next.add(name);
+			}
+			state.activeTools = next;
+			scheduleToolsEvents();
+		};
 		const rebuildTools = () => {
 			const all = runner.getAllRegisteredTools();
 			state.tools = new Map(ca.wrapRegisteredTools(all, runner).map((tool) => [tool.name, tool]));
 			state.allToolInfo = all.map((t) => t.definition);
-			for (const t of state.allToolInfo) state.activeTools.add(t.name);
-			if (!initialized || toolsChangedScheduled) return;
-			toolsChangedScheduled = true;
-			setImmediate(() => {
-				toolsChangedScheduled = false;
-				output({ type: "tools_changed", tools: state.allToolInfo.map(toToolInfo) });
-			});
+			// Already-active tools stay active (reconnect, unregister/re-register);
+			// newly registered tools follow the initial activation rule.
+			const nextActive = new Set();
+			for (const t of state.allToolInfo) {
+				if (t.exposure !== "hidden" && state.activeTools.has(t.name)) nextActive.add(t.name);
+				else if (isInitiallyActive(t)) nextActive.add(t.name);
+			}
+			state.activeTools = nextActive;
+			scheduleToolsEvents();
 		};
 		loaded.runtime.refreshTools = rebuildTools;
+		loaded.runtime.getAllTools = () => state.allToolInfo;
+		loaded.runtime.getActiveTools = () => [...state.activeTools];
+		loaded.runtime.setActiveTools = (names) => applyActiveTools(names);
 
 		// ---- WP-702 (702c): config-declared MCP servers ---- The core reads
 		// <agent-dir>/mcp.json (upstream shape) and passes it as `mcpConfig`;
@@ -483,6 +564,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 		initialized = true;
 		output(response(command.id, "init", true, { apiVersion: 0 }));
+		flushedActive = [...state.activeTools].sort().join("\u0000");
+		flushedToolsSig = state.allToolInfo.map((t) => t.name).sort().join("\u0000");
 		output({
 			type: "ready",
 			apiVersion: 0,
@@ -494,7 +577,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 				description: t.description,
 				...(t.promptSnippet ? { promptSnippet: t.promptSnippet } : {}),
 				parameters: t.parameters,
+				...(t.exposure ? { exposure: t.exposure } : {}),
+				...(t.defaultActive === false ? { defaultActive: false } : {}),
 			})),
+			activeTools: [...state.activeTools],
 			commands: state.commands.map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}) })),
 			shortcuts: [...state.shortcuts.values()].map((sc) => ({
 				key: sc.shortcut,

@@ -1,4 +1,4 @@
-# Extension Bridge Protocol v2
+# Extension Bridge Protocol v5
 
 Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` framing). S3 is the acceptance context: unmodified upstream example extensions must work "wie gewohnt" for the headless-safe API slice through this protocol.
 
@@ -29,18 +29,18 @@ NDJSON over stdio, reusing upstream rpc-mode framing verbatim:
 ## Handshake
 
 1. Core spawns the sidecar with clean stdin/stdout.
-2. Core sends `init`: `protocolVersion: 4` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
+2. Core sends `init`: `protocolVersion: 5` plus the core capability set — which `extension_ui_request` methods the core implements and the blocking-command timeout — and, when `<agent-dir>/mcp.json` exists, its content as `mcpConfig` (MCP §):
 
-   `{"id":"…","type":"init","protocolVersion":4,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
+   `{"id":"…","type":"init","protocolVersion":5,"capabilities":{"ui":["select","confirm","input","editor","notify"],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}`
 
    The `ui` list decides the extension UI mode (WP-505): non-empty → the sidecar wires the dialog UI context (`ctx.hasUI === true`, dialogs round-trip as `extension_ui_request`); empty → headless mode, the runner keeps the upstream noOp UI context (`ctx.hasUI === false`) and extensions take their upstream no-UI defaults (e.g. `permission-gate` blocks dangerous bash with `Dangerous command blocked (no UI for confirmation)`; `select`/`confirm` resolve to `undefined`/`false` without a dialog). The pi-rust v0 core is headless and sends `"ui": []`; a UI client (e.g. the M6 TUI) advertises its methods.
 
-3. Sidecar rejects a non-four `protocolVersion` with an `init` error response and exits non-zero.
+3. Sidecar rejects a non-five `protocolVersion` with an `init` error response and exits non-zero.
 4. Sidecar loads extensions with the original loader, initializes `ExtensionRunner`, responds `success` with `data: { apiVersion: 0 }`, then emits the `ready` event.
 5. **Capability negotiation**: `ready.events` lists the event names that have at least one registered handler. The core only sends events that appear in `ready.events` *and* in the core catalog below. An unknown or unsubscribed event is **logged and ignored, never fatal** (same rule in both directions).
 6. The core enters state `running` only after `ready`. An `init` error or spawn failure leaves it `stopped` (no extensions, built-ins only).
 
-`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON) — the **initial snapshot**; post-ready changes arrive as `tools_changed` (v2), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `shortcuts: [{ key, description?, extensionPath }]` (upstream-resolved `ExtensionShortcut`s, v4) + `shortcutDiagnostics: string[]` (the conflict messages, v4), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
+`ready` payload (all fields JSON): `apiVersion: number`, `extensions: [{ path, hidden? }]`, `errors: [{ path, error }]` (from `LoadExtensionsResult`, `core/extensions/types.ts:2336`), `tools: [{ name, label, description, promptSnippet?, parameters, exposure?, defaultActive? }]` (subset of `ToolDefinition`, `core/extensions/types.ts:600`; `parameters` is the TypeBox schema as JSON; `exposure`/`defaultActive` new in v5) — the **initial snapshot**; post-ready changes arrive as `tools_changed` (v2), `activeTools: string[]` (the names active at ready, v5 — see Active tool set §), `commands: [{ name, description? }]` (from `RegisteredCommand`, `types.ts:1615`), `shortcuts: [{ key, description?, extensionPath }]` (upstream-resolved `ExtensionShortcut`s, v4) + `shortcutDiagnostics: string[]` (the conflict messages, v4), `flags: ExtensionFlag[]` (`types.ts:2135`), `providers: string[]` (names from `pi.registerProvider`, `types.ts:1907`), `events: string[]` (keys of `Extension.handlers`, `types.ts:2317-2335`).
 
 ## Message catalog
 
@@ -48,7 +48,7 @@ Core→sidecar. "F&F" = fire-and-forget (no response line); "decision" = blockin
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| core→ | `init` | `{ protocolVersion: 4, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> }, keybindings?: { action: string[] } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2; `keybindings` new in v4 |
+| core→ | `init` | `{ protocolVersion: 5, capabilities: { ui: string[], timeoutMs: number }, mcpConfig?: { mcpServers: Record<string, McpServerConfig> }, keybindings?: { action: string[] } }` → `data: { apiVersion: 0 }` | req/resp | new in v0; `mcpConfig` new in v2; `keybindings` new in v4 |
 | core→ | `session_start` | `SessionStartEvent` (`core/extensions/types.ts:776`) | F&F | `emit()` (`runner.ts:1103`) |
 | core→ | `before_agent_start` | trigger of `BeforeAgentStartUserEvent`/`BeforeAgentStartCustomEvent` (`types.ts:953-1000`) + rendered `systemPrompt` + optional `systemPromptOptions` (`BuildSystemPromptOptions` JSON subset: `cwd`, `forceSystemPrompt`, `sections`, `selectedTools`, `skills` — `core/system-prompt.ts`) → `data: { messages: BeforeAgentStartEventResult["message"][], systemPrompt?: string }` (`types.ts:1517`) | decision | `emitBeforeAgentStart()` (`runner.ts:1434`) |
 | core→ | `agent_start` | `AgentStartEvent` (`types.ts:981`) | F&F | `emit()` |
@@ -89,7 +89,8 @@ Sidecar→core events:
 | ←sidecar | `set_model_request` | `{ modelId, provider }` → `data: { ok: boolean }` | req/resp | `pi.setModel` — core switches the active model (provider included: model ids are not unique across providers) |
 | ←sidecar | `set_thinking_level_request` | `{ level }` → `data: { ok: boolean }` | req/resp | `pi.setThinkingLevel` — core switches the level, then echoes `set_thinking_level` to subscribed extensions |
 | ←sidecar | `tool_call_request` | `{ toolCallId, toolName, input }` → `data: AgentToolResult` | req/resp | nested `ctx.executeTool` — core executes the named tool (built-in or extension) with its normal hooks, including `tool_call`/`tool_result` decision events |
-| ←sidecar | `tools_changed` | `{ tools: [{ name, label, description, promptSnippet?, parameters }] }` (same shape as `ready.tools`) | event, F&F (v2) | the extension tool set changed post-ready (MCP tools register on connection / lazy reconnect / unregister); the core **replaces** its extension tool set from the payload. Coalesced: at most one per sidecar tick, carrying the final set. |
+| ←sidecar | `tools_changed` | `{ tools: [{ name, label, description, promptSnippet?, parameters, exposure?, defaultActive? }] }` (same shape as `ready.tools`) | event, F&F (v2) | the extension tool set changed post-ready (MCP tools register on connection / lazy reconnect / unregister); the core **replaces** its extension tool set from the payload. Coalesced: at most one per sidecar tick, carrying the final set. Since v5 it is immediately followed by `tools_activated` for the same tick. |
+| ←sidecar | `tools_activated` | `{ active: string[] }` | event, F&F (v5) | the active tool set changed (`pi.setActiveTools` or registration); the core **replaces** its active set — the model-visible extension tools are `ready.tools`/`tools_changed` filtered to the active names (upstream: "the active tool set is the set declared to the model", `types.ts:535`). Coalesced with `tools_changed`: one pair per sidecar tick. |
 | ←sidecar | `providers_changed` | `{ providers: [{ name, models: [{ provider, id, api?, name? }] }] }` (same shape as `ready.providers`) | event, F&F (v1) | a `registerProvider`/`unregisterProvider` call landed after `ready`; the core re-keys its per-turn provider routing and `set_model` validation from the payload |
 | ←sidecar | `provider_stream_event` | `{ streamId, event: AssistantMessageEvent }` (`core/extensions/types.ts:818-848`, verbatim upstream JSON) | event stream (v1) | one line per event of the `provider_stream` invocation; `done` or `error` is terminal for that `streamId` |
 
@@ -124,7 +125,7 @@ Event delivery for F&F rows: the core writes the command line and writes nothing
 Handshake:
 
 ```json
-{"id":"h1","type":"init","protocolVersion":4,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
+{"id":"h1","type":"init","protocolVersion":5,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
 {"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
 {"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
 ```
@@ -204,6 +205,16 @@ Context compaction per upstream `core/compaction` (auto-trigger only, v0):
 - **Events & entry**: `session_before_compact` (decision: cancel or extension-supplied summary → `fromHook`) → summary call → `session_compact` with the new entry: `{ type: "compaction", id, parentId, timestamp, summary, firstKeptEntryId, tokensBefore, usage?, fromHook?, systemMessage? }` (upstream `CompactionEntry` shape). Failure paths emit `session_compact_failed` (typed reason) and the turn proceeds uncompacted. Headless NDJSON gains the `compaction` / `compaction_failed` line kinds.
 - **Projection**: the session transcript is compaction-aware for fresh runs and resume-from-file: a path containing a compaction entry projects to `[compactionSummary message] + entries from firstKeptEntryId to the compaction (minus system messages) + everything after` — the same projection upstream `buildContextEntries` applies, so pi-rust files with compaction entries load the way upstream loads them.
 - **v0 non-goals**: split-turn (`TURN_PREFIX`) summaries, read/modified file-lists appended to the summary, overflow-retry (compact + retry once), the manual `/compact` command, per-model settings overrides, micro-compaction variants.
+
+## Active tool set (v5)
+
+The **active tool set** is the set of extension tools declared to the model (upstream: `getActiveTools`/`setActiveTools`, `types.ts:1827`; "the active tool set is the set declared to the model", `types.ts:535`). The sidecar owns the upstream semantics, the core applies them:
+
+- **Initial activation** (at registration): `direct` and `model-only` tools activate, **unless `defaultActive: false`**; `codemode`/`deferred` do not; `hidden` never activates (upstream exposure rules, `types.ts:521-536`). `ready.activeTools` carries the initial set; `ready.tools` entries gain `exposure?` / `defaultActive?`.
+- **`pi.setActiveTools(names)`**: replaces the active set; unknown and `hidden` names are ignored (upstream). The sidecar emits `tools_activated` (F&F) so the core's model-visible extension set = registered tools filtered to the active names. `pi.getActiveTools()` reflects the sidecar state.
+- **Coalescing**: registration changes (`refreshTools`) and `setActiveTools` share one tick: at most one `tools_changed` + `tools_activated` pair per sidecar tick, carrying the final state; the core replaces its tool set then its active set, in that order. On `tools_changed`, the core prunes active entries for tools that no longer exist.
+- **Built-in `tool-search`**: the sidecar hosts the upstream `tool-search` extension (upstream main.ts auto-loads it). Its `tool_search` tool registers inactive (`model-only`, `defaultActive: false`) — activation goes through `setActiveTools` (core-side `--tools`/`defaultTools` config is a v0 non-goal). Its BM25 ranker searches `codemode`/`deferred` tools and loads the matches via `setActiveTools`, so they become declared from the next turn — the wire path this section describes.
+- **Execution routing is unchanged**: an extension tool call executes when its name is registered (the core's `run_tool` shadowing), independent of the active set; the active set only controls model declaration.
 
 ## Out of scope for the v0 bridge
 
