@@ -27,7 +27,7 @@ jobs:
 
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             upstream/node_modules
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Upstream (pinned clone + npm install + build, cached)
         id: upstream
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             upstream/node_modules
