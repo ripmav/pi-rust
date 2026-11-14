@@ -86,7 +86,11 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           for t in ${{ join(matrix.targets, ' ') }}; do
-            strip target/"$t"/release/pi-rust
+            f="target/$t/release/pi-rust"
+            file "$f" # diagnostic: what did the toolchain actually produce
+            # best effort: a cross-produced binary the host strip cannot read
+            # still ships (unstripped) — the smoke check below is the gate.
+            strip "$f" || echo "WARN: strip failed for $t, packaging unstripped"
             name="pi-rust-${tag}-${t}"
             mkdir -p "dist/${name}"
             install -m 0755 "target/${t}/release/pi-rust" "dist/${name}/pi-rust"
