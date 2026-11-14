@@ -733,7 +733,7 @@ pub(crate) mod mock {
 }
 
 /// OpenAI-compatible (chat/completions) family table, verified against
-/// upstream `packages/ai/src/providers/*.ts` (085c84e): provider id →
+/// upstream `packages/ai/src/providers/*.ts` (17d6ca7): provider id →
 /// default base URL. These all use `openAICompletionsApi()` upstream.
 pub fn compat_family_base(provider: &str) -> Option<&'static str> {
     Some(match provider {

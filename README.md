@@ -9,7 +9,7 @@ model providers (native upstream wires), full built-in tool set, MCP
 (stdio + HTTP), extension `registerProvider` invocation, compaction,
 upstream session-file compat, skills, RPC mode, print/json output, perf
 baseline in CI, security audit, release pipeline (4 targets + install
-script). Upstream pin: `earendil-works/pi @ 085c84e`.
+script). Upstream pin: `earendil-works/pi @ 17d6ca7`.
 
 ## Install
 
@@ -36,7 +36,7 @@ git clone https://github.com/ripmav/pi-rust && cd pi-rust
 
 # 1. Build upstream once (the sidecar runs its dist/):
 mkdir upstream && git -C upstream init && git -C upstream remote add origin https://github.com/earendil-works/pi.git
-git -C upstream fetch --depth 1 origin 085c84e98e7f4c950f2be606466fff4f75d8fe7c
+git -C upstream fetch --depth 1 origin 17d6ca759a070c377147f6d76b72dab9a3ba42a3
 git -C upstream checkout --detach FETCH_HEAD
 cd upstream && npm ci --no-audit --no-fund && npm run build && cd ..
 
@@ -88,7 +88,7 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
 - Protocol: **bridge protocol v0** — NDJSON over stdio, framing and event
   shapes borrowed from upstream's own headless RPC mode. Full spec:
   [`docs/bridge-protocol.md`](docs/bridge-protocol.md).
-- Upstream pin: `earendil-works/pi @ 085c84e` (shallow clone in `upstream/`,
+- Upstream pin: `earendil-works/pi @ 17d6ca7` (shallow clone in `upstream/`,
   gitignored). The sidecar imports the built `dist/`, so **upstream must be
   built** before running (below). Bumping the pin may require re-checking the
   import surface (`discoverAndLoadExtensions`, `createEventBus`,
@@ -381,7 +381,7 @@ Unknown tool names abort the run (exit 2) — that is a test assertion signal.
 ### Real model providers
 
 Every provider below speaks its **native upstream wire** (mirrored from the
-pinned upstream `packages/ai` at `085c84e`), streams over HTTP, and is tested
+pinned upstream `packages/ai` at `17d6ca7`), streams over HTTP, and is tested
 against local mock servers (no live APIs). The conversation sent is the full
 transcript (system prompt incl. extension additions, user/assistant/tool
 results), so extensions with tools work unchanged against real models.
@@ -459,7 +459,7 @@ tests/fixtures/ test-only fixture extensions (clearly marked; not upstream code)
 docs/           bridge-protocol.md (protocol contract), cli-reference.md (diff-tested CLI reference)
 benches/        baseline.json — perf baseline for the CI bench job (WP-905)
 odd/tasks/      feature spec + task log per milestone (S#/L# entries)
-upstream/       earendil-works/pi @ 085c84e (gitignored reference clone)
+upstream/       earendil-works/pi @ 17d6ca7 (gitignored reference clone)
 ```
 
 ## Troubleshooting

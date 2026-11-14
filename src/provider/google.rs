@@ -1,6 +1,6 @@
 //! Google Generative AI (Gemini) driver: `generateContent` streaming (SSE),
 //! text + `functionCall` assembly, wire shapes per upstream
-//! `packages/ai/src/api/google-generative-ai.ts` (pinned 085c84e).
+//! `packages/ai/src/api/google-generative-ai.ts` (pinned 17d6ca7).
 //! `google-vertex` reuses the same wire with the project/location URL and an
 //! API key (ADC/bearer is a typed v0 rejection at build time).
 use crate::model::{AssistantTurn, ModelDriver, StreamDelta, ToolCallSpec, Usage};

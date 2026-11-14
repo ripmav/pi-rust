@@ -1,7 +1,7 @@
 //! AWS Bedrock driver: `converse-stream` with manual SigV4 signing
 //! (no AWS SDK, per WP-405). The AWS event-stream framing (prelude,
 //! headers, CRCs) is parsed manually; wire shapes follow upstream
-//! `packages/ai/src/api/bedrock-converse-stream.ts` (pinned 085c84e).
+//! `packages/ai/src/api/bedrock-converse-stream.ts` (pinned 17d6ca7).
 use crate::model::{AssistantTurn, ModelDriver, StreamDelta, ToolCallSpec, Usage};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;

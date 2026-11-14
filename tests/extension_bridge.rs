@@ -2676,7 +2676,7 @@ fn wp703_mcp_http_round_trip() {
 
 // ============================================================================
 // WP-704: compaction (auto trigger + summarization + events + session
-// integration). Protocol v3; upstream core/compaction port (pin 085c84e).
+// integration). Protocol v3; upstream core/compaction port (pin 17d6ca7).
 // ============================================================================
 
 /// WP-704 e2e scenario: run 1 completes a short turn; run 2 sends a long

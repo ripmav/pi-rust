@@ -1,4 +1,4 @@
-//! Skills (WP-801), ported semantics from upstream `core/skills.ts` @ 085c84e,
+//! Skills (WP-801), ported semantics from upstream `core/skills.ts` @ 17d6ca7,
 //! with recorded v0 deviations (feature doc `m8-ecosystem.md` L2):
 //! - discovery: `<agentDir>/skills` + `<cwd>/.pi/skills` only (no `.agents`
 //!   ancestor walk, no settings/CLI/extension skill paths)

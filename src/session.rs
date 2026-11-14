@@ -203,7 +203,7 @@ pub fn encode_cwd(cwd: &str) -> String {
 }
 
 // ============================================================================
-// WP-704: context compaction — port of upstream core/compaction (pin 085c84e):
+// WP-704: context compaction — port of upstream core/compaction (pin 17d6ca7):
 // threshold, token estimate, cut point, summarization prompts/serialization,
 // and the compaction-aware transcript projection (buildContextEntries).
 // ============================================================================
@@ -215,12 +215,12 @@ pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20000;
 const ESTIMATED_IMAGE_CHARS: u64 = 4800;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
-/// Verbatim port of upstream core/compaction/utils.ts:162 (pin 085c84e).
+/// Verbatim port of upstream core/compaction/utils.ts:162 (pin 17d6ca7).
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = r##"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary."##;
 
-/// Verbatim port of upstream core/compaction/compaction.ts:507 (pin 085c84e).
+/// Verbatim port of upstream core/compaction/compaction.ts:507 (pin 17d6ca7).
 pub const SUMMARIZATION_PROMPT: &str = r##"The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
 Use this EXACT format:
@@ -254,7 +254,7 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages."##;
 
-/// Verbatim port of upstream core/compaction/compaction.ts:577 (pin 085c84e).
+/// Verbatim port of upstream core/compaction/compaction.ts:577 (pin 17d6ca7).
 pub const UPDATE_SUMMARIZATION_PROMPT: &str = r##"The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
 Update the existing structured summary with new information. RULES:
