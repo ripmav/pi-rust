@@ -176,3 +176,176 @@ export function createBridgeActions({ output, sendRequest, session, state, onAct
 		},
 	};
 }
+
+/**
+ * WP-1006: the ctx.ui.custom pane host. The factory's real pi-tui component
+ * runs sidecar-side; the pane host translates the component tree into the
+ * structured descriptor (WP-707 subset: title, lines, list, input, blocked),
+ * relays keys into component.handleInput, and pushes pane_update on
+ * requestRender / after keys (change-only, signature-deduped). done(result)
+ * resolves the factory's promise and emits pane_close.
+ *
+ * Out-of-subset components degrade: no recognizable SelectList/Input/Text
+ * tree → the raw render(width) lines (ANSI-stripped) are relayed as `lines`;
+ * a component that throws at construction → typed error, no crash.
+ */
+const PANE_KEY_ENCODINGS = {
+	up: "\u001b[A",
+	down: "\u001b[B",
+	right: "\u001b[C",
+	left: "\u001b[D",
+	enter: "\r",
+	escape: "\u001b",
+	backspace: "\u007f",
+	tab: "\t",
+};
+
+export function createPaneHost({ output, tui, keybindings, theme }) {
+	const panes = new Map(); // id -> { component, signature, resolve }
+	let seq = 0;
+
+	// Walk the pi-tui component tree into the descriptor subset.
+	function descriptorOf(component, width) {
+		const out = { title: undefined, lines: [] };
+		let foundSelectable = false;
+		const walk = (comp) => {
+			if (!comp || typeof comp !== "object") return;
+			if (comp instanceof tui.SelectList) {
+				out.list = {
+					items: (comp.filteredItems ?? comp.items ?? []).map((it) =>
+						typeof it === "string" ? it : (it?.value ?? String(it)),
+					),
+					cursor: comp.selectedIndex ?? 0,
+				};
+				foundSelectable = true;
+				return;
+			}
+			if (comp instanceof tui.Input) {
+				out.input = { label: comp.prompt ?? "", value: comp.getValue?.() ?? comp.value ?? "" };
+				if (comp.placeholder) out.input.placeholder = comp.placeholder;
+				foundSelectable = true;
+				return;
+			}
+			if (comp instanceof tui.Text) {
+				const text = typeof comp.text === "string" ? comp.text : "";
+				if (text) {
+					if (out.lines.length === 0 && !out.title) out.title = text;
+					out.lines.push({ text });
+				}
+				return;
+			}
+			if (Array.isArray(comp.children)) for (const child of comp.children) walk(child);
+		};
+		walk(component);
+		if (!foundSelectable && out.lines.length === 0 && typeof component.render === "function") {
+			// Out-of-subset: relay the rendered lines (ANSI stripped).
+			for (const line of component.render(width) ?? []) {
+				const text = tui.stripTerminalSequences?.(line) ?? line;
+				if (text) out.lines.push({ text });
+			}
+		}
+		if (out.lines.length === 0 && !out.list) out.lines = [];
+		return out;
+	}
+
+	function pushUpdate(id, width) {
+		const pane = panes.get(id);
+		if (!pane) return;
+		let desc;
+		try {
+			desc = descriptorOf(pane.component, width);
+		} catch (err) {
+			log(`pane ${id} render failed: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		const signature = JSON.stringify({ ...desc, blocked: undefined });
+		if (signature === pane.signature) return;
+		pane.signature = signature;
+		output({ type: "pane_update", id, ...desc });
+	}
+
+	function close(id) {
+		const pane = panes.get(id);
+		if (!pane) return;
+		pane.component.dispose?.();
+		panes.delete(id);
+		output({ type: "pane_close", id });
+		pane.resolve(undefined);
+	}
+
+	// The real TUI passes keys to the *focused* component (usually the
+	// SelectList inside a framed container, or the custom component itself).
+	// Mirror that: root handleInput first, then the first capturesViewportInput
+	// descendant, then any handleInput descendant (v0: single input target —
+	// the production shapes focus one control at a time).
+	function inputTarget(component) {
+		if (typeof component?.handleInput === "function") return component;
+		const queue = [component];
+		while (queue.length > 0) {
+			const comp = queue.shift();
+			if (!comp || typeof comp !== "object") continue;
+			if (comp.capturesViewportInput && typeof comp.handleInput === "function") return comp;
+			if (Array.isArray(comp.children)) queue.push(...comp.children);
+		}
+		queue.length = 0;
+		queue.push(component);
+		while (queue.length > 0) {
+			const comp = queue.shift();
+			if (!comp || typeof comp !== "object" || comp === component) continue;
+			if (typeof comp.handleInput === "function") return comp;
+			if (Array.isArray(comp.children)) queue.push(...comp.children);
+		}
+		return null;
+	}
+
+	const host = {
+		hasPane: (id) => panes.has(id),
+		key(id, key) {
+			const pane = panes.get(id);
+			if (!pane) return;
+			const data = PANE_KEY_ENCODINGS[key?.code] ?? (key?.text ?? "");
+			if (!data) return;
+			const target = inputTarget(pane.component);
+			try {
+				target?.handleInput(data);
+			} catch (err) {
+				log(`pane ${id} handleInput failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			pushUpdate(id, host.width);
+		},
+		requestRender: () => {
+			for (const id of panes.keys()) pushUpdate(id, host.width);
+		},
+		// The factory-facing API. Resolves when done(result) fires (or the
+		// pane is closed without a result).
+		custom(factory, options) {
+			const id = `pane_${++seq}`;
+			return new Promise(async (resolve) => {
+				const fakeTui = { requestRender: () => host.requestRender() };
+				let component;
+				try {
+					component = await factory(fakeTui, theme, keybindings, (result) => {
+						const pane = panes.get(id);
+						if (pane) pane.signature = ""; // allow a final update
+						resolve(result);
+						close(id);
+					});
+				} catch (err) {
+					// Typed graceful degradation (WP-1006 acceptance).
+					log(`ui.custom factory failed: ${err instanceof Error ? err.message : String(err)}`);
+					resolve(undefined);
+					return;
+				}
+				panes.set(id, { component, signature: "" });
+				output({
+					type: "pane_open",
+					id,
+					...(options?.blocked ? { blocked: options.blocked } : {}),
+				});
+				pushUpdate(id, host.width);
+			});
+		},
+		width: 100,
+	};
+	return host;
+}

@@ -321,6 +321,14 @@ pub async fn event_task(
                         ui_default(&ctx, &ev);
                     }
                 }
+                // WP-1006: custom-pane lifecycle — the TUI renders it; the
+                // sidecar only sends these when the `custom` capability is
+                // on (headless runs never see them).
+                "pane_open" | "pane_update" | "pane_close" => {
+                    if ctx.tui && ctx.ui_tx.send(ev.clone()).is_err() {
+                        crate::corelog::line("[core] pane event dropped: TUI gone");
+                    }
+                }
                 "extension_error" => {
                     crate::corelog::line(&format!("[core] extension_error: {ev}"));
                     ctx.log.emit(json!({"kind":"extension_error","extensionPath":ev.get("extensionPath").cloned().unwrap_or(Value::Null),

@@ -8,7 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createSessionView } from "./session.mjs";
-import { createDialogManager, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
+import { createDialogManager, createPaneHost, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
 
 const DIST =
 	process.env.PI_EXTENSION_SIDECAR_DIST ??
@@ -22,6 +22,9 @@ const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(pa
 const { validateMcpServerConfig } = await import(path.join(path.dirname(DIST), "core", "mcp-servers.js"));
 // WP-1005: the llama extension factory is not re-exported by dist/index.js.
 const { default: llamaExtensionFactory } = await import(path.join(path.dirname(DIST), "extensions", "llama", "index.js"));
+// WP-1006: pi-tui dist for the pane host (component tree walk + keybindings).
+const tui = await import(path.join(path.dirname(DIST), "..", "..", "tui", "dist", "index.js"));
+const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 
 const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed".split(" "),
@@ -102,6 +105,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	let extensions = [];
 	let session = null;
 	let dialog = null;
+	let paneHost = null; // WP-1006
 	let state = { tools: new Map(), allToolInfo: [], commands: [], activeTools: new Set(), providers: new Map(), nativeProviders: new Map() };
 	let capabilities = { ui: [], timeoutMs: 30000 };
 	let initialized = false;
@@ -477,8 +481,8 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
-		if (command.protocolVersion !== 5) {
-			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 5)`));
+		if (command.protocolVersion !== 6) {
+			output(response(command.id, "init", false, undefined, `Unsupported protocolVersion: ${command.protocolVersion} (sidecar speaks 6)`));
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(1);
 		}
@@ -700,6 +704,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// and the M1 headless-safe contract keeps them working.
 		if (capabilities.ui.length > 0) {
 			dialog = createDialogManager({ output, uiMethods: capabilities.ui, defaultTimeoutMs: capabilities.timeoutMs, sendRequest });
+			// WP-1006: ctx.ui.custom — the pane host runs the factory's real
+			// pi-tui component sidecar-side; the core renders the descriptor.
+			if (capabilities.ui.includes("custom")) {
+				paneHost = createPaneHost({ output, tui, keybindings: paneKeybindings, theme: dialog.ui.theme });
+				dialog.ui.custom = paneHost.custom;
+			}
 			runner.setUIContext(dialog.ui, "rpc");
 		} else {
 			ca.initTheme();
@@ -941,6 +951,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			// Never await here: a blocking command may be waiting for exactly this line
 			// (bidirectional liveness, no head-of-line blocking in either direction).
 			dialog?.respond(parsed.id, parsed);
+			continue;
+		}
+		if (parsed?.type === "pane_key") {
+			// WP-1006: TUI key for an open custom pane — fire-and-forget, same
+			// liveness rule as extension_ui_response.
+			paneHost?.key(parsed.id, parsed.key);
 			continue;
 		}
 		// Fire-and-forget dispatch (upstream rpc-mode pattern): a command may block on a
