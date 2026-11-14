@@ -109,3 +109,10 @@ L10 (2026-11-14, el Gentleman — M9 close):
   3 skills, 68 sidecar smoke — all green.
 - Follow-ups (non-blocking advisories from the stack-head review, see
   WP-907 file): R2-001/R2-004, R2-002, R2-003, R3-UPSTREAM-SHA.
+
+L11 (2026-11-14, el Gentleman — merge record):
+- Merged into main: PR #110 (901), #111 (902), #112 (903), #113 (904)
+  bottom-up; 905-907 in as direct merge 03799d3 (PRs #115/#116 had
+  merged into their stacked bases instead of main — GitHub stacked-
+  merge race; #114 closed with explanation, its content is in main).
+- M9 milestone complete on main.
