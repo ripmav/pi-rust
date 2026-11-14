@@ -124,6 +124,7 @@ pi-rust --extension-dir <path> (repeatable)
         [--resume <file|id>]          # continue an existing session
         [--fork <file|id>]            # branch a new session (parentSession header)
         [--list-sessions]             # NDJSON listing, then exit
+        [--bench]                     # perf baseline (cold start, idle RSS, bridge throughput), then exit (WP-905)
         [-p | --print]                # print mode: stdout = final assistant text only (WP-610)
         [--mode text|json]            # text = --print; json = upstream-shaped event stream (WP-610)
         [--command <name> [args...]]  # repeatable; run after ready, before the runs

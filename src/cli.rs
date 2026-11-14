@@ -82,7 +82,10 @@ fn read_image_attachment(path: &Path) -> Result<(String, String)> {
 /// numbers; the fake model has no catalog contextWindow, so the override
 /// drives the auto trigger) and `compact_summary` (the fake's summary text).
 /// Returns (runs, the compact override).
-fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, Option<(u64, u64, u64)>)> {
+/// Scenario compaction-trigger override (WP-405).
+type CompactOverride = Option<(u64, u64, u64)>;
+
+fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, CompactOverride)> {
     let user_messages = v
         .get("user_messages")
         .and_then(Value::as_array)
@@ -164,6 +167,9 @@ fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
 
 /// Non-interactive scenario runner (no REPL in v0).
 pub async fn run() -> Result<i32> {
+    // WP-905: cold-start anchor (arg parsing is negligible; sidecar spawn,
+    // node startup and init dominate).
+    let t0 = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
@@ -178,6 +184,7 @@ pub async fn run() -> Result<i32> {
     let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut bench = false;
     let mut image_paths: Vec<PathBuf> = Vec::new();
     let mut out_mode: Option<crate::agent::OutputMode> = None;
     let mut template_name: Option<String> = None;
@@ -201,6 +208,9 @@ pub async fn run() -> Result<i32> {
             "--provider" => provider_flag = Some(val(&args, &mut i)?),
             "--model" => model_id = Some(val(&args, &mut i)?),
             "--prompt" => prompt = Some(val(&args, &mut i)?),
+            // WP-905: perf baseline run (no prompt/scenario; exits after
+            // measuring cold start, idle RSS and bridge throughput).
+            "--bench" => bench = true,
             // WP-610: one-shot stdout variants (upstream print-mode parity).
             "-p" | "--print" => {
                 let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
@@ -326,12 +336,14 @@ pub async fn run() -> Result<i32> {
             None,
         ),
         (None, None) => {
-            if out_mode == Some(crate::agent::OutputMode::Rpc) {
-                (Vec::new(), None) // rpc: prompts arrive over stdin
-            } else if list_sessions {
-                (Vec::new(), None) // --list-sessions needs no scenario
-            } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                (Vec::new(), None) // interactive TUI (WP-601)
+            if out_mode == Some(crate::agent::OutputMode::Rpc)
+                || bench
+                || list_sessions
+                || std::io::IsTerminal::is_terminal(&std::io::stdin())
+            {
+                // rpc: prompts arrive over stdin; --bench / --list-sessions /
+                // interactive TUI: no seeded runs.
+                (Vec::new(), None)
             } else {
                 bail!("--scenario <file>, --prompt <text> or --template <name> is required (or --list-sessions)")
             }
@@ -505,6 +517,7 @@ pub async fn run() -> Result<i32> {
     // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
     let tui_mode = scenario_path.is_none()
         && prompt.is_none()
+        && !bench
         && !list_sessions
         && out_mode != Some(crate::agent::OutputMode::Rpc);
 
@@ -714,6 +727,28 @@ pub async fn run() -> Result<i32> {
                 json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
             );
         }
+    }
+
+    // WP-905: --bench — measure at idle (no model I/O), print one JSON line,
+    // then fall through: no runs are seeded, so the normal shutdown path
+    // ends the process.
+    if bench {
+        let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let rss_mb = bench_rss_mb();
+        let cycles = 200u32;
+        let bt = std::time::Instant::now();
+        for _ in 0..cycles {
+            let req = json!({"event":{"type":"before_agent_start","messageType":"user","prompt":"bench"},
+                "systemPrompt":"","systemPromptOptions":{"cwd":"","selectedTools":[],"sections":{}}});
+            let _ = client.request("before_agent_start", req).await;
+        }
+        let eps = cycles as f64 / bt.elapsed().as_secs_f64().max(1e-9);
+        println!(
+            "{}",
+            json!({"cold_start_ms": (cold_ms * 10.0).round() / 10.0,
+                   "idle_rss_mb": rss_mb,
+                   "bridge_events_per_sec": (eps * 10.0).round() / 10.0})
+        );
     }
 
     // WP-705: extension shortcuts (the sidecar applied the upstream
@@ -1061,9 +1096,9 @@ pub async fn run() -> Result<i32> {
 
     // Final event: the full session (acked: written+flushed before exit).
     // WP-610: print/json keep stdout clean — no usage/transcript events.
-    if ctx.out_mode == crate::agent::OutputMode::Ndjson {
+    if !bench && ctx.out_mode == crate::agent::OutputMode::Ndjson {
         if print_usage {
-            let u = ctx.usage_total.lock().unwrap().clone();
+            let u = *ctx.usage_total.lock().unwrap();
             let cost = *ctx.cost_total.lock().unwrap();
             log.emit(json!({"kind":"usage","input":u.input,"output":u.output,
                 "cacheRead":u.cache_read,"cacheWrite":u.cache_write,"costUsd":cost}));
@@ -1145,6 +1180,20 @@ async fn rpc_command_loop(ctx: Arc<crate::agent::Core>) -> i32 {
     }
     let _ = Ordering::SeqCst; // (flag reads happen in handle_rpc_line)
     exit_code
+}
+
+/// WP-905: resident set size in MiB (Linux: /proc/self/status VmRSS;
+/// other platforms: 0 — the CI bench job runs on Linux).
+fn bench_rss_mb() -> f64 {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0.0;
+    };
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .and_then(|l| l.trim().trim_end_matches(" kB").parse::<f64>().ok())
+        .map(|kb| (kb / 1024.0 * 10.0).round() / 10.0)
+        .unwrap_or(0.0)
 }
 
 fn handle_rpc_line(ctx: &Arc<crate::agent::Core>, line: &str) {

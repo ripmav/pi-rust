@@ -115,3 +115,61 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  bench:
+    name: bench (baseline compare)
+    # WP-905: perf baseline — cold start to ready, idle RSS, bridge
+    # throughput; fails on >20% regression vs benches/baseline.json.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upstream (pinned clone + npm install + build, cached)
+        id: upstream
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/node_modules
+            upstream/packages
+          key: upstream-085c84e9-ubuntu-latest-v1
+      - name: Fetch pinned upstream (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Upstream npm install + build (cache miss)
+        if: steps.upstream.outputs.cache-hit != 'true'
+        working-directory: upstream
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release
+      - name: Bench + compare against baseline
+        run: |
+          out="$(./target/release/pi-rust --bench --agent-dir "$(mktemp -d)" 2>/dev/null | grep '^{"cold_start_ms"')"
+          echo "$out"
+          python3 - "$out" <<'EOF'
+          import json, sys
+          got = json.loads(sys.argv[1])
+          base = json.load(open("benches/baseline.json"))
+          bad = []
+          for k, v in base.items():
+              g = got[k]
+              ok = g >= v * 0.8 if k.endswith("_per_sec") else g <= v * 1.2
+              if not ok:
+                  bad.append(f"{k}={g} (baseline {v}, >20% regression)")
+          if bad:
+              print("BENCH REGRESSION:")
+              for b in bad:
+                  print(" -", b)
+              sys.exit(1)
+          print("bench within 20% of baseline")
+          EOF
