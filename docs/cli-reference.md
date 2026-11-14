@@ -28,6 +28,9 @@ usage: pi-rust [options]
   --version                 print the version and exit
   -h, --help                show this help and exit
 
+subcommands:
+  auth login <provider>     log in to a provider (account or --api-key); --no-browser prints URLs
+
 env: PI_CODING_AGENT_DIR (agent dir, upstream name), PI_RUST_SIDECAR (sidecar entry), PI_RUST_NODE (node binary).
 exit codes: 0 clean · 1 fatal (startup/config) · 2 model-script or shutdown failure · 3 degraded (sidecar crashed mid-run; built-ins kept working)
 ```

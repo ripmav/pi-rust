@@ -1,5 +1,6 @@
 mod agent;
 mod auth;
+mod auth_login;
 mod cli;
 mod client;
 mod config;

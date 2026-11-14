@@ -135,7 +135,7 @@ fn parse_scenario(v: &Value) -> Result<(Vec<RunSpec>, CompactOverride)> {
     Ok((runs, compact))
 }
 
-fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
+pub(crate) fn find_sidecar(cwd: &Path) -> Result<PathBuf> {
     if let Ok(p) = std::env::var("PI_RUST_SIDECAR") {
         return Ok(PathBuf::from(p));
     }
@@ -189,6 +189,9 @@ pub const USAGE: &str = "usage: pi-rust [options]
   --version                 print the version and exit
   -h, --help                show this help and exit
 
+subcommands:
+  auth login <provider>     log in to a provider (account or --api-key); --no-browser prints URLs
+
 env: PI_CODING_AGENT_DIR (agent dir, upstream name), PI_RUST_SIDECAR (sidecar entry), PI_RUST_NODE (node binary).
 exit codes: 0 clean · 1 fatal (startup/config) · 2 model-script or shutdown failure · 3 degraded (sidecar crashed mid-run; built-ins kept working)
 ";
@@ -198,6 +201,13 @@ pub async fn run() -> Result<i32> {
     // node startup and init dominate).
     let t0 = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // WP-1007: subcommand before option parsing — `pi-rust auth login <provider>`.
+    if args.first().map(String::as_str) == Some("auth") {
+        let cwd = std::env::current_dir().context("cwd")?;
+        return Ok(crate::auth_login::run(&args[1..], &cwd, &|c| {
+            find_sidecar(c).map_err(|e| e.to_string())
+        }));
+    }
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
     let mut isolated = false;
