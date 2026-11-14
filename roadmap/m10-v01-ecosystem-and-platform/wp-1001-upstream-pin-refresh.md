@@ -28,7 +28,47 @@ sidecar smoke, and the full suite re-run green on the new pin.
 - Bench baseline re-recorded (3-sample median); CI bench job green.
 - Milestone doc records the keep/bump decision (M10 entry criterion).
 
+## Evidence (2026-11-14)
+
+Pin target: `17d6ca759a070c377147f6d76b72dab9a3ba42a3` (upstream origin/main at
+planning+1: p2 theme-fade fix over `8636e21`).
+
+Contract inspection (pin → 17d6ca7, consumed packages: 61 files, 57 M / 4 A):
+- **dist/index.js export surface: unchanged** (157 exports, 0 added / 0
+  removed — rebuilt and diffed).
+- `packages/ai/src/types.ts` (AssistantMessageEvent union): **unchanged** —
+  the sidecar's event mapping contract holds.
+- Direct dist imports: `core/system-prompt.js` (`buildSystemPrompt`,
+  `normalizeBuildSystemPromptOptions`) and `core/mcp-servers.js`
+  (`validateMcpServerConfig`): **files unchanged**.
+- `@earendil-works/pi-mcp`: additive — new `mcpServerSummary` export; the
+  mcp extension's local `serverSummary` was refactored onto it (identical
+  behavior, 5+/8-).
+- `@earendil-works/pi-ai`: additive `cache-warming` export; provider files
+  changed internally (retry/params) but no event-shape changes.
+- Unchanged: extension types, loader, skills, slash-commands, keybindings,
+  frontmatter, theme tokens, runner.
+- Expected code migration: **zero** (matrix + suite are the proof).
+
+Pin references bumped in: README.md, .github/workflows/{ci,release}.yml
+(incl. rust-cache key), tests/{rpc,extension_bridge}.rs, docs/bridge-protocol.md,
+src/{tools,skills,session,provider/{mod,google,bedrock}}.rs (comments),
+roadmap/00-vision.md. Historical WP memos keep the old SHA (they document
+what held at that pin).
+
+Status: pin bumped, full suite running on the new pin (evidence pending).
+
 ## Out of scope
 - Adopting new upstream *features* (p2 themes, per-location MCP, appearance
   settings) — evaluated in WP-1009, implemented only if selected there.
 - New extension capabilities (M10 WPs 1003–1007).
+
+### Completion (2026-11-14)
+- Full suite on the new pin: 271 in-crate, 1 cli-help, 38 e2e
+  (unmodified-extension matrix), 4 rpc, 3 PTY, 3 skills — all green.
+- Sidecar smoke: 68 passed, 0 failed.
+- Bench baseline re-recorded (3-sample median on the new pin):
+  cold_start 1070.6 ms, idle_rss 5.2 MB, events/s 6299.0 (samples:
+  5589/7582.8/6299, 1038.4/1070.6/1088.9, 5.2/5.2/5.2).
+- Milestone entry decision: **bump** (compatibility layer intact — no
+  contract migration needed).

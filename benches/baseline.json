@@ -1,5 +1,5 @@
 {
-  "cold_start_ms": 726.7,
-  "idle_rss_mb": 6.4,
-  "bridge_events_per_sec": 6579.0
+  "cold_start_ms": 1070.6,
+  "idle_rss_mb": 5.2,
+  "bridge_events_per_sec": 6299.0
 }

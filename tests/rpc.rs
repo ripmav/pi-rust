@@ -1,6 +1,6 @@
 //! WP-802 end-to-end: `--mode rpc` speaks the upstream RPC surface so the
 //! UPSTREAM RPC client (from the pinned commit) can drive pi-rust.
-//! Acceptance mapping (upstream rpc-types.ts @ 085c84e): init = client
+//! Acceptance mapping (upstream rpc-types.ts @ 17d6ca7): init = client
 //! start(), `prompt` = the command, tool-result = observed events
 //! (toolCallId correlation), quit = SIGTERM -> exit 143.
 

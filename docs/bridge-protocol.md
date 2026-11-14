@@ -2,7 +2,7 @@
 
 Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` framing). S3 is the acceptance context: unmodified upstream example extensions must work "wie gewohnt" for the headless-safe API slice through this protocol.
 
-Upstream pin: earendil-works/pi @ `085c84e` (shallow clone at `upstream/`). All upstream paths below are relative to `upstream/`. Types referenced by name are reused verbatim from the cited file; they are not re-specified here.
+Upstream pin: earendil-works/pi @ `17d6ca7` (shallow clone at `upstream/`). All upstream paths below are relative to `upstream/`. Types referenced by name are reused verbatim from the cited file; they are not re-specified here.
 
 ## Overview & topology
 
