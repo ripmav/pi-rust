@@ -455,10 +455,14 @@ steps.append(wait_for(b"alpha"))                          # list items rendered
 os.write(fd, b"\x1b[B")                                  # down: alpha -> beta
 time.sleep(0.3)
 os.write(fd, b"\r")                                      # confirm
-steps.append(wait_for(b"menu done"))                      # notify: answer was "beta"
 # --- shape 2: the progress pane (live update + cancel key) ---
-steps.append(wait_for(b"progress: step 1/3"))             # pane open
-steps.append(wait_for(b"progress: step 2/3"))             # live pane_update
+# One needle proves both shapes' wiring: the progress pane is open (shape 2
+# rendered), it reached step 2/3 without any key input (the live
+# pane_update relay), and the line carries menu=beta — the answer of the
+# first command, read back through shared sidecar state. The 2/3 frame
+# persists until esc, so there is no short-window race; the menu's own
+# notify is hidden while the progress pane covers the transcript.
+steps.append(wait_for(b"progress: step 2/3 (menu=beta)"))
 os.write(fd, b"\x1b")                                    # esc: cancel
 steps.append(wait_for(b"progress done"))                  # notify: answer was "cancelled"
 steps.append(not wait_for(b"menu answer wrong", timeout=2.0))

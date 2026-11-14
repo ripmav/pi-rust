@@ -12,7 +12,12 @@ export default function (pi) {
 				let step = 1;
 				let finished = false;
 				const component = {
-					render: (_width) => [theme.fg("muted", `progress: step ${step}/3 ...`)],
+					render: (_width) => [
+						// The menu result rides on the live line: the pane
+						// replaces the transcript area, so this is how the
+						// harness observes the first command's answer.
+						theme.fg("muted", `progress: step ${step}/3 (menu=${globalThis.__wp1006Menu ?? "?"}) ...`),
+					],
 					handleInput: (data) => {
 						// Esc cancels (the pane's cancel key).
 						if (!finished && data === "\u001b") {

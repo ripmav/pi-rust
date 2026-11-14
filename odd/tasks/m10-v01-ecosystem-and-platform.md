@@ -101,8 +101,8 @@ tests, docs, src comments, vision. Full suite on the new pin: 271 in-crate,
   turn 1, declared + executed after mid-run `setActiveTools` (fixture tool-activation.ts,
   test-only). Full suite + 71 smoke green, fmt/clippy clean.
 - **L6** (2026-11-14): slice strategy for the M10 stack: each WP is one stacked PR and one review unit (the ~400-line
-slice rule applies per WP commit, not per accumulated stack; 1001: 261, 1002: 139, 1003: 423 lines on top of
-main). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
+slice rule applies per WP commit, not per accumulated stack; sizes on top of main — 1001: 261, 1002: 139, 1003: 423,
+1004: 190, 1005: 1 commit, 1006: 515 + 402 + 57 lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
 via direct merge; PRs closed with explanation.
 
 - **L7** (2026-11-14): **WP-1004 delivered** (codemode hosting). Built-in codemode extension hosted with `models: false`

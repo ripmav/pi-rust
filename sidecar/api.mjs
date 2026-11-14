@@ -200,8 +200,8 @@ const PANE_KEY_ENCODINGS = {
 	tab: "\t",
 };
 
-export function createPaneHost({ output, tui, keybindings, theme }) {
-	const panes = new Map(); // id -> { component, signature, resolve }
+export function createPaneHost({ output, tui, keybindings, theme, timeoutMs }) {
+	const panes = new Map(); // id -> { component, signature }
 	let seq = 0;
 
 	// Walk the pi-tui component tree into the descriptor subset.
@@ -270,7 +270,6 @@ export function createPaneHost({ output, tui, keybindings, theme }) {
 		pane.component.dispose?.();
 		panes.delete(id);
 		output({ type: "pane_close", id });
-		pane.resolve(undefined);
 	}
 
 	// The real TUI passes keys to the *focused* component (usually the
@@ -323,12 +322,22 @@ export function createPaneHost({ output, tui, keybindings, theme }) {
 			return new Promise(async (resolve) => {
 				const fakeTui = { requestRender: () => host.requestRender() };
 				let component;
+				let timer;
+				let finished = false;
+				// done(result), the timeout and a failed dispatch all funnel
+				// through finish: idempotent, clears the timer, resolves once.
+				const finish = (result) => {
+					if (finished) return;
+					finished = true;
+					clearTimeout(timer);
+					const pane = panes.get(id);
+					if (pane) pane.signature = ""; // allow a final update
+					resolve(result);
+					close(id);
+				};
 				try {
 					component = await factory(fakeTui, theme, keybindings, (result) => {
-						const pane = panes.get(id);
-						if (pane) pane.signature = ""; // allow a final update
-						resolve(result);
-						close(id);
+						finish(result);
 					});
 				} catch (err) {
 					// Typed graceful degradation (WP-1006 acceptance).
@@ -337,6 +346,14 @@ export function createPaneHost({ output, tui, keybindings, theme }) {
 					return;
 				}
 				panes.set(id, { component, signature: "" });
+				// Same contract as the dialog manager: the core's request() times
+				// out a blocking command after timeoutMs and degrades the bridge
+				// — an interactive pane must resolve within that window (the
+				// upstream default is undefined).
+				timer = setTimeout(() => {
+					log(`pane ${id} timed out after ${timeoutMs}ms — resolving with the upstream default`);
+					finish(undefined);
+				}, timeoutMs);
 				output({
 					type: "pane_open",
 					id,

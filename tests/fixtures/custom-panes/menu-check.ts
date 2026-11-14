@@ -36,6 +36,11 @@ export default function (pi) {
 				container.addChild(list);
 				return container;
 			});
+			// The sidecar process is shared with progress-check: it reads the
+			// answer back through the progress pane's live line — the only
+			// surface visible while the next pane is open (a pane replaces the
+			// transcript area, so notifies are hidden then).
+			globalThis.__wp1006Menu = result;
 			if (result !== "beta") {
 				throw new Error(`menu answer wrong: ${JSON.stringify(result)}`);
 			}

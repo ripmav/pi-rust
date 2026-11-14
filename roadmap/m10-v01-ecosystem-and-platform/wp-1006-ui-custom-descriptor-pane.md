@@ -76,3 +76,14 @@ UIs) while the full component model stays a documented non-goal.
 - Regression: dialog PTY (`tui_extension_dialog_roundtrip`) green; full
   suite green; `cargo fmt --check` clean; `cargo clippy --all-targets` 0
   warnings.
+- Flake fix (caught by repeated parallel TUI runs): an interactive pane
+  without its own timeout outlived the core's 30 s request timeout, which
+  degrades the bridge permanently — later `pane_key` lines were dropped and
+  the pane could never close. Two independent fixes: (1) the pane host now
+  resolves with the upstream default after `capabilities.timeoutMs` (same
+  contract as the dialog manager; documented in the Custom pane § of
+  `docs/bridge-protocol.md`); (2) the PTY harness needles only persistent
+  frames — the menu answer rides on the progress pane's live line
+  (`progress: step 2/3 (menu=beta)` via shared sidecar state), because a
+  pane replaces the transcript area and hides notifies; the old 400 ms
+  `step 1/3` frame and the hidden `menu done` notify were the flake sources.

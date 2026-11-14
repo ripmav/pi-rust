@@ -707,7 +707,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			// WP-1006: ctx.ui.custom — the pane host runs the factory's real
 			// pi-tui component sidecar-side; the core renders the descriptor.
 			if (capabilities.ui.includes("custom")) {
-				paneHost = createPaneHost({ output, tui, keybindings: paneKeybindings, theme: dialog.ui.theme });
+				paneHost = createPaneHost({ output, tui, keybindings: paneKeybindings, theme: dialog.ui.theme, timeoutMs: capabilities.timeoutMs });
 				dialog.ui.custom = paneHost.custom;
 			}
 			runner.setUIContext(dialog.ui, "rpc");
