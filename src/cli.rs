@@ -287,8 +287,7 @@ pub async fn run() -> Result<i32> {
             &home,
         )
     };
-    std::fs::create_dir_all(&agent_dir)
-        .with_context(|| format!("creating agent dir {}", agent_dir.display()))?;
+    crate::config::ensure_agent_dir(&agent_dir)?;
 
     // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
     // skills are skipped with a core-log warning (upstream diagnostics).
