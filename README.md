@@ -124,10 +124,12 @@ milestone (all milestone stacks are merged into `main`):
 | RPC mode (upstream NDJSON command protocol) | ✅ M8 |
 | headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
 | `ctx.ui.custom` (descriptor pane: title/lines/list/input, live updates, keys; dialog-like timeout) | ✅ M10 (TUI; headless keeps the upstream noOp — WP-707 subset, full component model stays a non-goal) |
+| `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10 (the upstream oauth providers — radius, kimi-coding, github-copilot, xai, meta — are sidecar-routed; the token refresh + rotated write-back run sidecar-side, no token crosses the wire) |
 
 Evaluated, documented v0 limits: `ctx.ui.custom` full component model (mouse, focus trees, overlays — WP-707 decision memo in
 `odd/tasks/m7-extension-completeness.md`; the descriptor subset ships in M10), bundled extensions beyond `mcp`
-(WP-708), non-`api_key` credential kinds (typed rejection), `AWS_PROFILE`
+(WP-708), oauth credentials consumed by the core's built-in drivers (typed rejection — the
+sidecar-routed models of those providers work), `AWS_PROFILE`
 (typed rejection). Full out-of-scope list:
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
