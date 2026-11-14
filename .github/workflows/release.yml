@@ -172,7 +172,11 @@ jobs:
           prerelease=""
           case "$tag" in *staging*) prerelease="--prerelease";; esac
           prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          if [ -n "$prev" ]; then
+          # A checked-in RELEASE_NOTES.md (written by the release WP) wins;
+          # the commit list is the fallback.
+          if git show "HEAD:RELEASE_NOTES.md" >/dev/null 2>&1; then
+            notes="$(git show HEAD:RELEASE_NOTES.md)"
+          elif [ -n "$prev" ]; then
             notes="$(git log --oneline "${prev}..HEAD" | sed 's/^/- /')"
           else
             notes="$(git log --oneline -25 | sed 's/^/- /')"

@@ -110,7 +110,7 @@ export function createDialogManager({ output, uiMethods, defaultTimeoutMs, sendR
 }
 
 /** Runtime actions backing the shared ExtensionRuntime (all pi.* action methods). */
-export function createBridgeActions({ output, sendRequest, session, state }) {
+export function createBridgeActions({ output, sendRequest, session, state, onActiveToolsChanged }) {
 	const extractText = (content) =>
 		typeof content === "string" ? content : (content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
 	const extractImages = (content) => (typeof content === "string" ? [] : (content ?? []).filter((c) => c.type === "image"));
@@ -141,8 +141,11 @@ export function createBridgeActions({ output, sendRequest, session, state }) {
 		getActiveTools: () => [...state.activeTools],
 		getAllTools: () => state.allToolInfo,
 		getSettings: () => ({}),
+		// WP-1003 (protocol v5): semantics + wire notification live in the
+		// bridge (applyActiveTools) — unknown and hidden tools ignored, then
+		// the core receives tools_activated.
 		setActiveTools: (names) => {
-			state.activeTools = new Set(names);
+			onActiveToolsChanged?.(names);
 		},
 		// v0: the tool set is frozen after ready; dynamic registration refresh is a no-op.
 		refreshTools: () => {},

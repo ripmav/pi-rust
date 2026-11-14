@@ -186,6 +186,7 @@ pub const USAGE: &str = "usage: pi-rust [options]
   -p, --print               print mode: stdout = final assistant text only (same as --mode text)
   --mode <m>                text|json|rpc — text = --print; json = upstream-shaped event stream; rpc = the upstream NDJSON command protocol on stdin/stdout (no --prompt/--scenario)
   --bench                   measure the perf baseline (cold start, idle RSS, bridge throughput), then exit
+  --version                 print the version and exit
   -h, --help                show this help and exit
 
 env: PI_CODING_AGENT_DIR (agent dir, upstream name), PI_RUST_SIDECAR (sidecar entry), PI_RUST_NODE (node binary).
@@ -224,6 +225,11 @@ pub async fn run() -> Result<i32> {
         match args[i].as_str() {
             "--help" | "-h" => {
                 print!("{USAGE}"); // USAGE already ends with a newline
+                return Ok(0);
+            }
+            // v0.1.0 (WP-1002): the installed release identifies itself.
+            "--version" => {
+                println!("pi-rust {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
             }
             "--extension-dir" => ext_dirs.push(val(&args, &mut i)?),
@@ -630,7 +636,7 @@ pub async fn run() -> Result<i32> {
         }
     };
     let mut init =
-        json!({"protocolVersion":4,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
+        json!({"protocolVersion":5,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
     // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
@@ -656,6 +662,7 @@ pub async fn run() -> Result<i32> {
         session: session.clone(),
         events: Arc::default(),
         ext_tools: Arc::default(),
+        ext_active_tools: Arc::default(),
         ext_models: Arc::default(),
         skills: Arc::new(skills.clone()),
         ready: Mutex::new(Some(ready_tx)),

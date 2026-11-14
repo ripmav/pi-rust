@@ -46,11 +46,12 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 
 ## What the sidecar does
 
-- `init` (protocolVersion 4) → loads extensions with the original loader,
-  hosts the built-in mcp extension on the shared runtime, binds
+- `init` (protocolVersion 5) → loads extensions with the original loader,
+  hosts the built-in mcp extension and the built-in tool-search extension on
+  the shared runtime, binds
   `ExtensionRunner` (actions/context actions/provider actions), registers
   `mcpConfig` servers (v2), responds `success`, emits `ready` (tools with
-  TypeBox schemas via the `extension.tools` → `wrapper.ts` →
+  TypeBox schemas + `exposure?`/`defaultActive?` via the `extension.tools` → `wrapper.ts` →
   `tool-definition-wrapper.ts` path, commands, flags, providers, subscribed
   event names). Post-ready tool-set changes (MCP connect/reconnect) are pushed
   as `tools_changed` (v2).

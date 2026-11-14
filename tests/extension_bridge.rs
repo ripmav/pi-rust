@@ -3122,3 +3122,112 @@ fn wp705_shortcut_registration_and_conflict_diagnostic() {
         "the conflicting key is named:\n{stderr}"
     );
 }
+
+// ---- WP-1003 (protocol v5): active tool set ---------------------------------
+
+/// A deferred-exposure tool (registered inactive) becomes model-visible mid-run
+/// when an active tool calls pi.setActiveTools: the first turn must NOT
+/// declare it, a later turn MUST, and it then executes.
+#[test]
+fn wp1003_deferred_tool_activated_mid_run() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1003-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({
+        "user_messages": ["find it", "echo now"],
+        "model_scripts": [[
+            { "tool_call": { "name": "find_deferred", "input": {} } },
+            { "text": "found" }
+        ], [
+            { "tool_call": { "name": "deferred_echo", "input": { "text": "x" } } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(repo().join("tests/fixtures/tool-activation.ts"))
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The tools_activated wire event reached the core (corelog on stderr).
+    assert!(
+        stderr.contains("[core] tools_activated:"),
+        "tools_activated event missing on stderr\n{stderr}"
+    );
+
+    // Every before_agent_start decision carries selectedTools.
+    let bas: Vec<&Value> = lines
+        .iter()
+        .filter(|l| {
+            l.get("kind").and_then(Value::as_str) == Some("decision")
+                && l.get("name").and_then(Value::as_str) == Some("before_agent_start")
+        })
+        .collect();
+    assert!(
+        bas.len() >= 2,
+        "expected >=2 before_agent_start decisions\n{stdout}"
+    );
+    let selected_of = |l: &Value| {
+        l["request"]["systemPromptOptions"]["selectedTools"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // Turn 1: find_deferred is declared, deferred_echo is NOT (inactive at
+    // registration: exposure deferred, defaultActive false).
+    let first = selected_of(bas[0]);
+
+    assert!(
+        first.iter().any(|t| t == "find_deferred"),
+        "turn 1 must declare find_deferred\n{first:?}"
+    );
+    assert!(
+        !first.iter().any(|t| t == "deferred_echo"),
+        "turn 1 must NOT declare deferred_echo (inactive)\n{first:?}"
+    );
+
+    // The last turn (after find_deferred ran) declares deferred_echo.
+    let last = selected_of(bas.last().unwrap());
+    assert!(
+        last.iter().any(|t| t == "deferred_echo"),
+        "final turn must declare deferred_echo after activation\n{last:?}"
+    );
+
+    // The deferred tool executed and produced its result.
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "deferred_echo")
+        .collect();
+    assert_eq!(
+        execs.len(),
+        1,
+        "deferred_echo must execute exactly once\n{stdout}"
+    );
+    let summary = execs[0]["result_summary"].to_string();
+    assert!(
+        summary.contains("deferred-echo:x"),
+        "deferred_echo result missing\n{execs:?}"
+    );
+}
