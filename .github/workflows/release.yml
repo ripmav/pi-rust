@@ -106,13 +106,23 @@ jobs:
       - name: Smoke-check artifacts
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          # check <dir> [runner...]: run the artifact's pi-rust (under an
+          # optional qemu/Rosetta runner) and expect the fake echo.
+          # The runner is a command prefix — never an argument to the binary.
           check() {
             dir="$1"; shift
             agent_dir="$(mktemp -d)"
-            out="$("$dir/pi-rust" "$@" --provider fake --prompt hi --agent-dir "$agent_dir" 2>/dev/null)"
+            err="$(mktemp)"
+            rc=0
+            out="$("$dir/pi-rust" "$@" --provider fake --prompt hi --agent-dir "$agent_dir" 2>"$err")" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "smoke FAIL (exit $rc): $dir"
+              head -10 "$err"
+              return 1
+            fi
             case "$out" in
               *"echo: hi"*) echo "smoke OK: $dir" ;;
-              *) echo "smoke FAIL: $dir"; printf '%s\n' "$out" | head -5; return 1 ;;
+              *) echo "smoke FAIL: $dir"; printf '%s\n' "$out" | head -5; head -10 "$err"; return 1 ;;
             esac
           }
           for t in ${{ join(matrix.targets, ' ') }}; do
@@ -121,7 +131,7 @@ jobs:
               x86_64-unknown-linux-gnu) check "dist/$name" ;;
               aarch64-unknown-linux-musl)
                 sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
-                check "dist/$name" qemu-aarch64 # static musl binary
+                check "dist/$name" qemu-aarch64 # static musl binary under qemu
                 ;;
               aarch64-apple-darwin) check "dist/$name" ;;
               x86_64-apple-darwin) check "dist/$name" ;; # Rosetta on the arm64 runner
