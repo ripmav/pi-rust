@@ -249,13 +249,16 @@ pub fn run(
 /// semantics as Node's `setRawMode` in the upstream secret reader). Ctrl+C
 /// aborts the line (empty answer).
 fn read_secret_line(message: &str) -> String {
-    print!("{message}");
-    let _ = std::io::stdout().flush();
+    // Raw mode must be on BEFORE the prompt is shown: the terminal echoes
+    // input that arrives while ECHO is still on (the caller can type as
+    // soon as the prompt appears — a prompt-first order leaks the secret
+    // on the first bytes, observed on macOS).
     let mut raw = false;
-    let ok = crossterm::terminal::enable_raw_mode();
-    if ok.is_ok() {
+    if crossterm::terminal::enable_raw_mode().is_ok() {
         raw = true;
     }
+    print!("{message}");
+    let _ = std::io::stdout().flush();
     let mut value = String::new();
     let mut stdin = std::io::stdin();
     let mut byte = [0u8; 1];

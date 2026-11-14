@@ -1067,6 +1067,12 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     // it before before_agent_start); a handler-returned systemPrompt replaces
     // the whole prompt including the section.
     let mut system_prompt = crate::skills::append_section(BASE_SYSTEM_PROMPT, &ctx.skills);
+    // WP-1003 follow-up: drain sidecar lines queued before the previous
+    // run's last response (e.g. the tools_activated an extension tool's
+    // execute flushed with its response) — the declaration below is built
+    // from the active set and must see them. This runs in the agent-loop
+    // context, so the barrier cannot self-deadlock event_task.
+    sync_tool_set(ctx).await;
     if subscribed(ctx, "before_agent_start") {
         let event = json!({"type":"before_agent_start","messageType":"user","prompt":text});
         // BuildSystemPromptOptions subset for the sidecar: core cwd, currently
@@ -1113,6 +1119,10 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
 
     let mut turn_index = 0u32;
     loop {
+        // Same drain as at run start, per turn: an extension tool executed in
+        // an earlier turn may have activated deferred tools, and this turn's
+        // build_conversation reads the active set.
+        sync_tool_set(ctx).await;
         // WP-704: auto compaction at the context threshold — checked before
         // build_conversation so the summarized conversation is what this
         // turn's model call sees; after a successful compaction the loop
