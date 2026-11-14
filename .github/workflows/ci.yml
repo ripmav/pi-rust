@@ -180,3 +180,32 @@ jobs:
               sys.exit(1)
           print("bench within 20% of baseline")
           EOF
+
+  fresh-clone:
+    name: fresh-clone (README in a clean container)
+    # WP-907 acceptance: a fresh-clone setup works by following the README
+    # alone. Container job = clean OS (no preinstalled Rust, no caches);
+    # the steps after the toolchain follow the README "From source" recipe
+    # verbatim. The full suite is covered by the test jobs; here a smoke
+    # subset (fake one-shot, sidecar smoke, CLI reference diff test).
+    runs-on: ubuntu-latest
+    container: node:26-bookworm
+    timeout-minutes: 40
+    steps:
+      - name: Container deps
+        run: apt-get update -qq && apt-get install -y -qq build-essential pkg-config python3 git
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Build upstream (README "From source", step 1)
+        run: |
+          mkdir upstream && git -C upstream init
+          git -C upstream remote add origin https://github.com/earendil-works/pi.git
+          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+          cd upstream && npm ci --no-audit --no-fund && npm run build
+      - name: Build + smoke (README "From source", step 2 + quickstart)
+        run: |
+          cargo build --release
+          ./target/release/pi-rust --provider fake --prompt "hi"
+          node sidecar/smoke.mjs
+          cargo test --test cli_help
