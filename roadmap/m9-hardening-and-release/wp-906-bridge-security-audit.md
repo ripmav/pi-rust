@@ -66,5 +66,7 @@ traversal in tool handlers, secret redaction in all logs.
 **Zero unaddressed HIGH findings** (none found).
 
 ### Native review (high-risk scope, per WP acceptance)
-- Candidate: the 906 fix commit on `feat/wp-906-security-audit`.
-- Lineage: (recorded after the native review run)
+- Candidate: the 906 fix commit on `feat/wp-906-security-audit` (committed range, base `36a8e28`, 4 paths, 145 lines).
+- Lineage: `review-ff617ec3ad6b84bc` — tier high, lenses risk + reliability.
+- Outcome: **approved** (authority burned, `native-approved-acknowledgement-completed`, store revision `7969b85b`). Both reviewer lenses ran through the pi host relay.
+- Advisory (non-blocking, informational): `R3-001` reliability, `src/config.rs` `ensure_agent_dir` — the `exists()` check races a concurrent creator (TOCTOU) and `create_dir_all` modes only the leaf dir, not intermediate dirs it creates. Accepted as a known v0 limitation: on the default path (`~/.pi/agent`) the parent `~/.pi` is already owner-private, and a hostile concurrent creator is out of scope for this WP. Recorded here, no code change.
