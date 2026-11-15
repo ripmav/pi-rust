@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -412,8 +413,19 @@ async fn bash(input: &Value) -> ExecResult {
         };
     }
     let code = match status {
-        Some(s) if s.success() => 0,
-        Some(s) => s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)),
+        Some(s) => {
+            // Unix: a signal-killed child has no exit code — the upstream
+            // bash-tool convention is 128+signal. Windows children always
+            // carry a code, so the fallback there is just a generic 1.
+            #[cfg(unix)]
+            {
+                s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
+            }
+            #[cfg(not(unix))]
+            {
+                s.code().unwrap_or(1)
+            }
+        }
         None => 1,
     };
     // WP-802: the upstream bash `structuredContent` (also the stored

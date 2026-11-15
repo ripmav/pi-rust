@@ -1216,18 +1216,25 @@ pub async fn run() -> Result<i32> {
 /// WP-802: the `--mode rpc` stdin command loop (upstream rpc-mode.ts
 /// surface). `prompt` is the v0 command; responses and session events
 /// share stdout (events through the json writer, responses here).
-/// stdin EOF -> 0, SIGTERM -> 143 (upstream parity).
+/// stdin EOF -> 0, SIGTERM (unix) / ctrl+c (windows) -> 143.
 async fn rpc_command_loop(ctx: Arc<crate::agent::Core>) -> i32 {
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncBufReadExt, BufReader};
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
+    // WP-1008: tokio::signal::unix is not available on windows — the
+    // console ctrl+c is the platform equivalent of the SIGTERM kill.
+    #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
     let mut exit_code = 0i32;
     loop {
+        #[cfg(unix)]
+        let term_fut = sigterm.recv();
+        #[cfg(not(unix))]
+        let term_fut = tokio::signal::ctrl_c();
         tokio::select! {
-            _ = sigterm.recv() => {
+            _ = term_fut => {
                 exit_code = 143;
                 break;
             }
