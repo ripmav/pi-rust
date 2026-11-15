@@ -204,3 +204,11 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   1004+1005+1006 merged as 786bcf7, 1007+1008 merged as d0e1325, 1009
   merged as 277e17c, 1010 merged as 918796a). The v0.2.0 tag + release
   (5 targets) is the final close step of this milestone.
+- **L14** (2026-11-15): v0.2.0 retracted, M10 release is **v0.2.1**. The
+  first v0.2.0 tag built and published fine, but the isolated-install
+  acceptance check caught `--version` → `pi-rust 0.1.0` (Cargo.toml was
+  never bumped — PR #143 fixed it, merged as `76eff7e`). The release was
+  deleted before any user could pull it, but GitHub tag immutability
+  (GH013 "creations being restricted") forbids re-pushing the tag name,
+  and semver does not reuse a published version either — so the M10
+  release ships as v0.2.1 (Cargo.toml 0.2.1, same content as 76eff7e).

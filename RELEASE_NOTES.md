@@ -1,4 +1,4 @@
-# pi-rust v0.2.0
+# pi-rust v0.2.1
 
 The ecosystem + platform release: unmodified upstream extensions keep
 gaining surface (`ctx.ui.custom` panes, oauth credentials, codemode
@@ -34,7 +34,7 @@ verify/repair (import oracle + self-heal), sidecar stdio chunk-safety.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | bash
 # pinned version:
-curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=v0.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=v0.2.1 bash
 ```
 
 Targets: Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64,
@@ -42,7 +42,7 @@ Windows x86_64 (msvc, `pi-rust.exe`).
 Requires bash, curl, tar and **node ≥ 22.19** (Windows: Git for Windows
 for the bash tool; the TUI PTY test matrix is POSIX-only by design).
 
-Verify: `pi-rust --version` → `pi-rust 0.2.0`.
+Verify: `pi-rust --version` → `pi-rust 0.2.1`.
 
 From source: see the README ("From source (fresh clone)") — the CI
 `fresh-clone` job follows that recipe in a clean container on every push.

@@ -42,7 +42,11 @@ milestone, and release `v0.2.0` if the suite warrants it.
 
 ## Verification + release
 - Full suite + matrix + fresh-clone at the M10 head (CI).
-- `v0.2.0` tag via the proven 5-target release workflow, with release notes.
+- M10 release via the proven 5-target release workflow, with release
+  notes. (The v0.2.0 tag published once, was caught by the acceptance
+  check — `--version` printed 0.1.0, Cargo.toml never bumped — and was
+  retracted; GitHub tag immutability + semver make **v0.2.1** the M10
+  release. See feature doc L14.)
 
 ## Acceptance
 - Every advisory line has a resolution (fix + test, or re-documented
