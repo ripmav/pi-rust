@@ -642,7 +642,20 @@ async fn execute_tool_call(
             }
         }
     };
-    ctx.log.emit(json!({"kind":"tool_execution","name":name,"input":final_input,"blocked":blocked,"result_summary":summarize(&content)}));
+    // WP-1009 (upstream 4be4cb4): name the model that can't see a read
+    // image; the warning is TUI-only, the details field names the model.
+    let mut details = details;
+    let active = active_model(ctx);
+    let image_warning = read_image_warning(
+        name,
+        &mut details,
+        model_supports_image_value(&active),
+        active
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("the active model"),
+    );
+    ctx.log.emit(json!({"kind":"tool_execution","name":name,"input":final_input,"blocked":blocked,"result_summary":summarize(&content),"warning":image_warning}));
     Ok(finalize_tool_result(
         ctx,
         call_id,
@@ -1790,7 +1803,87 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     ];
     v.extend(custom.iter().cloned());
     v.extend(ctx.session.transcript().iter().cloned());
+    // WP-1009 (upstream 4be4cb4): per-request image swap — a model without
+    // image input never sees an image block; the session keeps it for a
+    // later vision model.
+    swap_images_for_model(&mut v, model_supports_image_value(&active_model(ctx)));
     v
+}
+
+/// WP-1009 (upstream 4be4cb4): replace image blocks with a placeholder in
+/// user messages when the model has no image input (the exact upstream
+/// user-message text). Non-image blocks and other roles are untouched.
+fn swap_images_for_model(messages: &mut [Value], supports_image: bool) {
+    if supports_image {
+        return;
+    }
+    for msg in messages.iter_mut() {
+        if msg.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(blocks) = msg.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let has_image = blocks
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
+        if !has_image {
+            continue;
+        }
+        let swapped: Vec<Value> = blocks
+            .iter()
+            .map(|b| {
+                if b.get("type").and_then(Value::as_str) == Some("image") {
+                    json!({"type":"text","text":"(image omitted: model does not support images)"})
+                } else {
+                    b.clone()
+                }
+            })
+            .collect();
+        msg["content"] = json!(swapped);
+    }
+}
+
+/// The active model object (cloned; never holds the lock across callers).
+fn active_model(ctx: &Core) -> Value {
+    ctx.model.lock().unwrap().0.clone()
+}
+
+/// WP-1009: does the active model accept image input? The model object's own
+/// `input` array wins (extension catalogs), the bundled registry is the
+/// fallback; an unknown model keeps the v0 behavior (send the image).
+fn model_supports_image_value(active: &Value) -> bool {
+    if let Some(input) = active.get("input").and_then(Value::as_array) {
+        return input.iter().any(|m| m.as_str() == Some("image"));
+    }
+    let provider = active.get("provider").and_then(Value::as_str).unwrap_or("");
+    let id = active.get("id").and_then(Value::as_str).unwrap_or("");
+    match crate::registry::ModelRegistry::bundled().resolve(provider, id) {
+        Some(m) => m.input.iter().any(|i| i == "image"),
+        None => true,
+    }
+}
+
+/// WP-1009 (upstream 4be4cb4): a `read` image result under a non-vision
+/// model gets `details.imageUnsupportedByModel` plus the TUI-only warning
+/// line (the model context stays clean — upstream keeps the diagnostic out
+/// of what the model gets). Returns the warning for TUI display.
+fn read_image_warning(
+    name: &str,
+    details: &mut Value,
+    supports_image: bool,
+    model_id: &str,
+) -> Option<String> {
+    if name != "read"
+        || details.get("type").and_then(Value::as_str) != Some("image")
+        || supports_image
+    {
+        return None;
+    }
+    details["imageUnsupportedByModel"] = json!(model_id);
+    Some(format!(
+        "[{model_id} does not support images; it saw a placeholder instead]"
+    ))
 }
 
 fn assistant_message(turn: &AssistantTurn, model: &Value) -> Value {
@@ -2087,5 +2180,88 @@ mod provider_stream_tests {
             }
         );
         assert_eq!(usage_from_message(None), Usage::default());
+    }
+}
+
+#[cfg(test)]
+mod wp1009_image_tests {
+    use super::{model_supports_image_value, read_image_warning, swap_images_for_model};
+    use serde_json::{json, Value};
+
+    fn user_msg_with_image() -> Value {
+        json!({"role":"user","content":[
+            {"type":"text","text":"look"},
+            {"type":"image","mimeType":"image/png","data":"aW1n"}
+        ]})
+    }
+
+    #[test]
+    fn swap_replaces_images_only_for_non_vision_models() {
+        let mut vision = vec![user_msg_with_image()];
+        swap_images_for_model(&mut vision, true);
+        assert!(
+            vision[0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "image"),
+            "vision model keeps the image block"
+        );
+
+        let mut text_only = vec![user_msg_with_image()];
+        swap_images_for_model(&mut text_only, false);
+        let blocks = text_only[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], json!({"type":"text","text":"look"}));
+        assert_eq!(
+            blocks[1],
+            json!({"type":"text","text":"(image omitted: model does not support images)"})
+        );
+
+        // Non-user roles are untouched.
+        let mut assistant = vec![json!({"role":"assistant","content":[
+            {"type":"image","mimeType":"image/png","data":"x"}
+        ]})];
+        swap_images_for_model(&mut assistant, false);
+        assert_eq!(assistant[0]["content"][0]["type"], "image");
+    }
+
+    #[test]
+    fn read_image_warning_names_the_model_and_sets_details() {
+        let mut details = json!({"type":"image","data":"aW1n","mimeType":"image/png"});
+        let w = read_image_warning("read", &mut details, false, "text-model-1");
+        assert_eq!(
+            w.as_deref(),
+            Some("[text-model-1 does not support images; it saw a placeholder instead]")
+        );
+        assert_eq!(details["imageUnsupportedByModel"], "text-model-1");
+
+        let mut vision = json!({"type":"image","data":"aW1n","mimeType":"image/png"});
+        assert_eq!(read_image_warning("read", &mut vision, true, "m"), None);
+        assert!(vision.get("imageUnsupportedByModel").is_none());
+
+        let mut bash = json!({"exit_code":0});
+        assert_eq!(read_image_warning("bash", &mut bash, false, "m"), None);
+    }
+
+    #[test]
+    fn model_capability_from_input_array_then_bundled_registry() {
+        assert!(model_supports_image_value(
+            &json!({"id":"x","input":["text","image"]})
+        ));
+        assert!(!model_supports_image_value(
+            &json!({"id":"x","input":["text"]})
+        ));
+        // Fallback: bundled catalog (bedrock vision vs text-only).
+        assert!(model_supports_image_value(
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-2-lite-v1:0"})
+        ));
+        assert!(!model_supports_image_value(
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-micro-v1:0"})
+        ));
+        // Unknown model: v0 behavior (send the image).
+        assert!(model_supports_image_value(
+            &json!({"provider":"nope","id":"nothing"})
+        ));
     }
 }

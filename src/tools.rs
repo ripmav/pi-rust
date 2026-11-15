@@ -131,6 +131,21 @@ struct BashCapture {
     ends_with_nl: bool,
     path: PathBuf,
     file: Option<std::fs::File>,
+    /// finish() ran: the log is either removed (untruncated) or
+    /// intentionally kept for `fullOutputPath` (truncated). Only a
+    /// capture dropped without finish() (cancelled run) is a leak.
+    finished: bool,
+}
+
+impl Drop for BashCapture {
+    fn drop(&mut self) {
+        // WP-1009 (WP-906 #5): a cancelled bash run drops the capture
+        // without finish() — remove the temp log instead of leaking it.
+        if !self.finished {
+            drop(self.file.take());
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl BashCapture {
@@ -160,6 +175,7 @@ impl BashCapture {
             ends_with_nl: false,
             path,
             file,
+            finished: false,
         }
     }
 
@@ -192,6 +208,7 @@ impl BashCapture {
     /// Finalize: drop the temp file when nothing was truncated, otherwise build the
     /// tail truncation result (upstream `truncateTail` over the rolling window).
     fn finish(mut self) -> (String, Option<TailTruncation>) {
+        self.finished = true;
         let total_lines = if self.total_bytes == 0 {
             0
         } else {
@@ -200,7 +217,7 @@ impl BashCapture {
         let raw = std::mem::take(&mut self.tail);
         let content = String::from_utf8_lossy(&raw).into_owned();
         if total_lines <= BASH_MAX_LINES && self.total_bytes <= BASH_MAX_BYTES as u64 {
-            drop(self.file);
+            drop(self.file.take());
             let _ = std::fs::remove_file(&self.path);
             return (content, None);
         }
@@ -1841,6 +1858,34 @@ mod tests {
         let (_, truncation) = c.finish();
         assert!(truncation.is_none(), "no data -> no truncation");
         assert!(!path.exists(), "finish must still remove the log");
+    }
+
+    // WP-1009 (WP-906 #5): a capture dropped without finish() (cancelled run)
+    // must remove its temp log instead of leaking it to the tmp reaper.
+    #[test]
+    fn bash_capture_drop_without_finish_removes_log() {
+        let c = BashCapture::new();
+        let path = c.path.clone();
+        assert!(path.exists());
+        drop(c);
+        assert!(!path.exists(), "dropped capture must remove its log");
+    }
+
+    /// A finished TRUNCATED capture keeps its log (the result's
+    /// `fullOutputPath` points at it); only the drop path leaks today.
+    #[test]
+    fn bash_capture_finish_truncated_keeps_log_for_full_output() {
+        let mut c = BashCapture::new();
+        let path = c.path.clone();
+        let line = format!("{}\n", "x".repeat(20));
+        for _ in 0..(BASH_MAX_LINES + 10) {
+            c.feed(line.as_bytes());
+        }
+        let (_, truncation) = c.finish();
+        let t = truncation.expect("> BASH_MAX_LINES must truncate");
+        assert_eq!(t.full_output_path, path);
+        assert!(path.exists(), "truncated finish keeps the full-output log");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The `fullOutputPath` details entry (truncated output only).

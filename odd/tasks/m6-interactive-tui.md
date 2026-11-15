@@ -120,8 +120,9 @@ instruction 2026-11-11).
   for the wired actions. Root causes: shift is part of the exact
   modifier state (a missing shift compare made every Enter match
   shift+enter); newLine is a general key check (ctrl+m / ctrl+j are
-  not Enter). v0: picker/theme actions resolve but are unwired (their
-  WPs). Suite: 115 in-crate + 19 e2e + 2 PTY; smoke 42/42.
+  not Enter). (superseded: picker/theme actions are wired by WP-609
+  pickers + WP-607 `/theme` — this line was written pre-WP-607/609.)
+  Suite: 115 in-crate + 19 e2e + 2 PTY; smoke 42/42.
 
 - L10: WP-607 delivered: T7 done, branch feat/wp-607-themes (base
   feat/wp-606-keybindings). Upstream theme system ported: token table,

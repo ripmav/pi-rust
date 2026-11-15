@@ -1249,6 +1249,12 @@ impl TuiApp {
                 } else {
                     format!("{name}: {summary}")
                 };
+                // WP-1009: TUI-only warning line (core-computed, e.g. the
+                // non-vision model read-image notice).
+                let text = match ev.get("warning").and_then(Value::as_str) {
+                    Some(w) => format!("{text}\n{w}"),
+                    None => text,
+                };
                 self.transcript.push(Msg { role: "tool", text });
                 self.scroll = 0;
             }
@@ -2385,6 +2391,21 @@ mod tests {
         let mut app = TuiApp::new("m", "/w", "s");
         app.apply_event(&json!({"kind":"tool_execution","name":"bash","blocked":true,"result_summary":"Dangerous command blocked"}));
         assert!(app.render_string().contains("blocked"));
+    }
+
+    #[test]
+    fn tool_execution_warning_renders_as_second_line() {
+        let mut app = TuiApp::new("m", "/w", "s");
+        app.apply_event(&json!({"kind":"tool_execution","name":"read","blocked":false,"result_summary":"Read image file [image/png]","warning":"[text-model-1 does not support images; it saw a placeholder instead]"}));
+        let screen = app.render_string();
+        assert!(
+            screen.contains("read: Read image file [image/png]"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("text-model-1 does not support images"),
+            "warning line missing: {screen}"
+        );
     }
 
     #[test]

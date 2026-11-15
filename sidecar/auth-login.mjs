@@ -83,8 +83,17 @@ const prompt = (kind, message, signal) =>
 	});
 
 // stdin answers: {"id","answer"}
+// Buffer across chunks: a pipe can deliver one logical line in two reads
+// (observed on CI macOS, WP-1009) — the main bridge (bridge.mjs) already
+// uses this pattern; without it both fragments are dropped as malformed
+// and the pending prompt hangs until the caller's timeout.
+let answerBuf = "";
 process.stdin.on("data", (chunk) => {
-	for (const line of chunk.toString("utf8").split("\n")) {
+	answerBuf += chunk.toString("utf8");
+	let i;
+	while ((i = answerBuf.indexOf("\n")) !== -1) {
+		const line = answerBuf.slice(0, i);
+		answerBuf = answerBuf.slice(i + 1);
 		if (!line.trim()) continue;
 		let parsed;
 		try {
