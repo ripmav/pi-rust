@@ -4,8 +4,11 @@
 //!
 //! v0 scope: `api_key` credentials with literal keys or `${ENV_VAR}`
 //! references (credential `env` overlay shadows ambient env). Command
-//! references are NOT executed (typed error); oauth credentials are a typed
-//! "not supported in v0" error. Key material never appears in errors.
+//! references are NOT executed (typed error). OAuth credentials: the
+//! built-in drivers do not consume them in v0 — the sidecar-routed models
+//! of the upstream oauth providers (radius, kimi-coding, github-copilot,
+//! xai, meta) resolve and refresh the token sidecar-side (WP-1007). Key
+//! material never appears in errors.
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -104,7 +107,19 @@ pub fn resolve_api_key(provider: &str, agent_dir: &Path) -> Result<String> {
                     Ok(expand_refs(key, &cred_env))
                 }
                 Some("oauth") => {
-                    bail!("auth.json credential for {provider} is oauth — not supported in v0")
+                    // WP-1007: precise typed error. The upstream oauth
+                    // providers are usable through the sidecar-routed models
+                    // (the sidecar's upstream runtime refreshes the token);
+                    // this core driver path cannot consume oauth in v0.
+                    if matches!(
+                        provider,
+                        "radius" | "kimi-coding" | "github-copilot" | "xai" | "meta"
+                    ) {
+                        bail!(
+                            "auth.json credential for {provider} is oauth; this built-in driver does not consume oauth in v0 — select the {provider} model provided by the extension sidecar (it refreshes the token itself) or run `pi-rust auth login {provider}`"
+                        )
+                    }
+                    bail!("auth.json credential for {provider} is oauth — the pinned upstream has no oauth support for this provider")
                 }
                 other => bail!("auth.json credential for {provider} has unknown type {other:?}"),
             };
@@ -204,6 +219,23 @@ mod tests {
         let err = resolve_api_key("openai", &d).unwrap_err().to_string();
         assert!(err.contains("command reference"), "{err}");
         assert!(!err.contains("evil"), "no material in error: {err}");
+    }
+
+    #[test]
+    fn oauth_on_upstream_oauth_provider_points_to_the_sidecar_route() {
+        let d = tmpdir();
+        std::fs::write(
+            d.join("auth.json"),
+            r#"{"xai":{"type":"oauth","access":"a","refresh":"r","expires":1}}"#,
+        )
+        .unwrap();
+        let err = resolve_api_key("xai", &d).unwrap_err().to_string();
+        assert!(err.contains("oauth"), "{err}");
+        assert!(err.contains("pi-rust auth login xai"), "{err}");
+        assert!(
+            !err.contains("\"a\"") && !err.contains("\"r\""),
+            "no material in error: {err}"
+        );
     }
 
     #[test]

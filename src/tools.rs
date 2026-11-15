@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -340,14 +341,42 @@ async fn bash(input: &Value) -> ExecResult {
             Some((t, std::time::Duration::from_secs_f64(t)))
         }
     };
-    let Ok(mut child) = Command::new("bash")
-        .arg("-c")
-        .arg(command)
+    // WP-1008: on Windows the default `bash` on PATH is the WSL launcher
+    // (System32\bash.exe), which exits 1 without an installed distro —
+    // prefer Git Bash, the POSIX shell that is actually there.
+    let bash_prog: std::path::PathBuf = if cfg!(windows) {
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            git_bash.to_path_buf()
+        } else {
+            std::path::PathBuf::from("bash")
+        }
+    } else {
+        std::path::PathBuf::from("bash")
+    };
+    // Upstream parity (core/tools/bash.ts): the shell child gets ignored
+    // stdin ("ignore") and windowsHide — on Windows the inherited stdin is
+    // the RPC client pipe in rpc mode, which made Git Bash hang; and a
+    // stdin-reading command would swallow protocol bytes on any platform.
+    let mut cmd = Command::new(bash_prog);
+    cmd.arg("-c").arg(command);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(mut child) = cmd
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
     else {
-        return ExecResult::err("bash: failed to start".into());
+        return ExecResult::err(if cfg!(windows) {
+            "bash: failed to start — no POSIX shell found (the bash tool needs Git for Windows or a WSL distribution on Windows)".into()
+        } else {
+            "bash: failed to start".into()
+        });
     };
     let wall_start = std::time::Instant::now();
     let mut capture = BashCapture::new();
@@ -412,8 +441,19 @@ async fn bash(input: &Value) -> ExecResult {
         };
     }
     let code = match status {
-        Some(s) if s.success() => 0,
-        Some(s) => s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)),
+        Some(s) => {
+            // Unix: a signal-killed child has no exit code — the upstream
+            // bash-tool convention is 128+signal. Windows children always
+            // carry a code, so the fallback there is just a generic 1.
+            #[cfg(unix)]
+            {
+                s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
+            }
+            #[cfg(not(unix))]
+            {
+                s.code().unwrap_or(1)
+            }
+        }
         None => 1,
     };
     // WP-802: the upstream bash `structuredContent` (also the stored
@@ -1317,13 +1357,17 @@ mod tests {
         let dir = tmpdir();
         let r = write_tool(json!({"path": dir.display().to_string(), "content": "x"})).await;
         assert!(r.is_error);
-        assert_eq!(
-            text(&r),
+        // WP-1008: libuv maps a write-open on a directory to EISDIR on unix
+        // and EACCES on windows — both are the correct rejection.
+        let expected = if cfg!(windows) {
+            format!("EACCES: permission denied, open '{}'", dir.display())
+        } else {
             format!(
                 "EISDIR: illegal operation on a directory, open '{}'",
                 dir.display()
             )
-        );
+        };
+        assert_eq!(text(&r), expected);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1867,6 +1911,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_signal_killed_exit_137_golden() {
         let r = bash_tool(json!({"command": "kill -9 $$"})).await;

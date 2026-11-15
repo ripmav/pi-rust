@@ -314,6 +314,9 @@ fn wp802_rpc_tool_events_via_mock() {
 
 /// (3) The UPSTREAM RpcClient (pinned dist) drives pi-rust: promptAndWait
 /// returns the event stream (incl. agent_settled), stop() SIGTERMs -> 143.
+/// WP-1008: unix only — on windows the stop kill is a TerminateProcess
+/// (no ctrl-c console event), so the 143 exit path cannot be exercised.
+#[cfg(unix)]
 #[test]
 fn wp802_upstream_rpc_client_drives() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-rpc3-{}", std::process::id()));

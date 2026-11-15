@@ -483,6 +483,12 @@ sys.exit(0 if (code == 0 and all(steps)) else 11)
 
 #[test]
 fn tui_custom_pane_roundtrip() {
+    // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("pi-rust-tui-pane-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -514,6 +520,12 @@ fn tui_custom_pane_roundtrip() {
 
 #[test]
 fn tui_extension_dialog_roundtrip() {
+    // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("pi-rust-tui-dlg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -545,6 +557,12 @@ fn tui_extension_dialog_roundtrip() {
 
 #[test]
 fn tui_interactive_smoke() {
+    // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("pi-rust-tui-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -575,6 +593,12 @@ fn tui_interactive_smoke() {
 
 #[test]
 fn tui_slash_command_roundtrip() {
+    // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("pi-rust-tui-cmd-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();

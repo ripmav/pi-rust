@@ -293,9 +293,19 @@ async function main() {
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 3 &&
+			Array.isArray(ready.providers) && ready.providers.length === 8 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
+		);
+		// WP-1007: the five upstream built-in oauth providers are exposed from
+		// the upstream runtime (static catalogs; radius may be empty until the
+		// first authenticated refresh — only presence + shape are asserted).
+		check(
+			"builtin oauth providers exposed (radius, kimi-coding, github-copilot, xai, meta)",
+			["radius", "kimi-coding", "github-copilot", "xai", "meta"].every(
+				(name) => ready.providers?.some((p) => p?.name === name && Array.isArray(p.models) && p.models.length > 0),
+			),
+			ready.providers?.map((p) => p?.name),
 		);
 		// WP-1005: the unmodified built-in llama extension registers its native
 		// provider; without a router (no LLAMA_BASE_URL) the catalog is empty.

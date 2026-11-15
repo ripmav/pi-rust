@@ -84,7 +84,7 @@ fn wp801_skill_block_in_system_prompt() {
     );
     assert!(prompt.contains(&format!(
         "<skill>\n    <name>greet</name>\n    <description>say hi back</description>\n    <location>{}</location>\n  </skill>",
-        tmp.join("agent/skills/greet/SKILL.md").display()
+        tmp.join("agent").join("skills").join("greet").join("SKILL.md").display()
     )), "{prompt}");
     assert!(
         prompt.contains("<name>proj</name>\n    <description>project skill</description>"),
@@ -128,7 +128,9 @@ fn wp801_invalid_skill_skipped_with_warning() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(
-        stderr.contains("description is required") && stderr.contains("nodesc/SKILL.md"),
+        stderr.contains("description is required")
+            && stderr.contains("nodesc")
+            && stderr.contains("SKILL.md"),
         "invalid skill must warn with its path: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
@@ -159,8 +161,8 @@ fn wp801_headless_skill_expansion() {
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let expected = format!(
         "echo: <skill name=\"greet\" location=\"{}\">\nReferences are relative to {}.\n\nGreet the user.\n</skill>\n\nextra-arg\n",
-        tmp.join("agent/skills/greet/SKILL.md").display(),
-        tmp.join("agent/skills/greet").display()
+        tmp.join("agent").join("skills").join("greet").join("SKILL.md").display(),
+        tmp.join("agent").join("skills").join("greet").display()
     );
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert_eq!(stdout, expected, "exact expanded prompt echo: {stdout:?}");

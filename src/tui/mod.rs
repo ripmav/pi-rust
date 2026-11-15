@@ -2715,11 +2715,14 @@ mod tests {
         .unwrap();
         let skills = crate::skills::load_from_dir(&d, &mut Vec::new());
         assert_eq!(skills.len(), 1);
+        // WP-1008: expectation from the loaded skill's own paths (windows
+        // separator serialization differs between string-join and dir walk).
+        let (skill_path, skill_base) = (skills[0].file_path.clone(), skills[0].base_dir.clone());
         let mut app = TuiApp::new("m", "/a/b", "s").with_skills(skills);
         let expected = format!(
             "<skill name=\"greet\" location=\"{}\">\nReferences are relative to {}.\n\nDo the thing.\n</skill>",
-            d.join("greet/SKILL.md").display(),
-            d.join("greet").display()
+            skill_path.display(),
+            skill_base.display()
         );
         // Expanded: the skill body is submitted as a normal message.
         assert_eq!(

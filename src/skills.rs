@@ -692,16 +692,19 @@ mod tests {
     #[test]
     fn expand_skill_golden_with_and_without_args() {
         let d = dir();
-        let p = skill(
+        skill(
             &d,
             "greet/SKILL.md",
             "---\nname: greet\ndescription: g\n---\n# Title\n\nDo the thing.",
         );
         let s = load_from_dir(&d, &mut Vec::new()).pop().unwrap();
+        // WP-1008: build the expectation from the loaded skill's own paths
+        // (a string-join on windows keeps its '/' while the dir walk
+        // produces native separators — the format is what is pinned).
         let base = format!(
             "<skill name=\"greet\" location=\"{}\">\nReferences are relative to {}.\n\n# Title\n\nDo the thing.\n</skill>",
-            p.display(),
-            d.join("greet").display()
+            s.file_path.display(),
+            s.base_dir.display()
         );
         assert_eq!(expand_skill(&s, "").unwrap(), base);
         assert_eq!(
