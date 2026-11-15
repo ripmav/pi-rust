@@ -52,3 +52,20 @@ candidate from a Windows terminal (PowerShell or Git Bash):
    conhost pre-Win10 is not a supported target).
 
 ## Evidence (2026-11-14)
+
+- PR #140 (stacked on the WP-1007 head), issue #139. First
+  windows-latest run failed at compile (16 errors, three unix-only
+  spots): `ExitStatusExt` import + `128+signal` fallback in
+  `src/tools.rs` (unix-gated; windows children always carry a code),
+  and the `tokio::signal::unix` SIGTERM branch of the rpc loop in
+  `src/cli.rs` (windows equivalent: console ctrl-c, same 143 path).
+  Fix commit `c7e938b`; local linux suite re-green after the fix
+  (276/2/1/45/4/3/4, smoke 74, fmt + clippy clean). Second run compiled
+  but 13 unit tests failed: the runner's PATH `bash` is the WSL launcher
+  (exit 1, no distro) — the bash tool now resolves Git Bash
+  (`C:\Program Files\Git\bin\bash.exe`) first on windows (typed
+  "no POSIX shell" error otherwise); the 137-signal golden and the rpc
+  SIGTERM->143 test are unix-gated; the two skill goldens now build
+  expectations from the loaded skill's own paths (windows string-join vs
+  dir-walk separator serialization). Fix commit `4989344`; linux suite
+  re-green.

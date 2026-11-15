@@ -82,6 +82,8 @@ if pid == 0:
     os.execvp(BIN, [BIN, "auth", "login", "anthropic", "--api-key"])
 
 buf = b""
+t0 = time.time()
+times = {"t0": 0.0}
 def read_until(needle: bytes, timeout=45.0) -> bool:
     global buf
     end = time.time() + timeout
@@ -100,10 +102,16 @@ def read_until(needle: bytes, timeout=45.0) -> bool:
     return needle in buf
 
 ok = read_until(b"Enter Anthropic API key")
+times["prompt"] = time.time() - t0
 sys.stderr.write("prompt-seen=%s\n" % ok)
 os.write(fd, KEY.encode() + b"\r")
-ok2 = read_until(b"Saved API key for Anthropic")
-ok3 = read_until(b"Credentials saved to")
+times["wrote_key"] = time.time() - t0
+# 120s: a starved CI runner can delay the sidecar's event loop well past the
+# local 45s; correctness is still gated by the saved/shape/key checks below.
+ok2 = read_until(b"Saved API key for Anthropic", timeout=120.0)
+times["saved"] = time.time() - t0
+ok3 = read_until(b"Credentials saved to", timeout=120.0)
+times["saved_to"] = time.time() - t0
 sys.stderr.write("saved=%s saved-to=%s\n" % (ok2, ok3))
 
 time.sleep(1.0)  # let the catalog-refresh note and the exit land
@@ -126,6 +134,12 @@ sys.stderr.write("credential-shape=%s\n" % (
 # Redaction: the key is typed without echo and must never appear in output.
 sys.stderr.write("key-in-output=%s\n" % (KEY.encode() in buf))
 sys.stderr.write("===EXIT %d\n" % code)
+sys.stderr.write("TIMINGS %s\n" % {k: round(v, 1) for k, v in times.items()})
+if not (ok and ok2 and ok3):
+    # Diagnostic transcript (key redacted): which prompt phase was the PTY
+    # actually in when the key was written?
+    transcript = buf.decode("utf-8", "replace").replace(KEY, "[REDACTED-KEY]")
+    sys.stderr.write("TRANSCRIPT:\n" + transcript[-4000:] + "\nEND-TRANSCRIPT\n")
 sys.exit(0 if (ok and ok2 and ok3 and code == 0
                and anthropic.get("type") == "api_key"
                and anthropic.get("key") == KEY
@@ -161,6 +175,11 @@ fn auth_login_api_key_stores_upstream_credential() {
     let res = child.wait_with_output().expect("harness exited");
     let mut out = String::from_utf8_lossy(&res.stdout).to_string();
     out.push_str(&String::from_utf8_lossy(&res.stderr));
-    let _ = std::fs::remove_dir_all(&tmp);
+    if !res.status.success() {
+        // Keep the temp dir for post-mortem (agent dir + auth.json state).
+        eprintln!("preserving {tmp:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
     assert!(res.status.success(), "auth login PTY harness failed: {out}");
 }

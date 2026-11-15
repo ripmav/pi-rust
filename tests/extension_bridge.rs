@@ -1220,10 +1220,17 @@ fn upstream_sessionmanager_reads_pirust_session() {
 
     // The original upstream SessionManager opens and reads the file.
     let node = std::env::var("PI_RUST_NODE").unwrap_or_else(|_| "node".into());
-    let script = format!(
-        r#"
-import {{ SessionManager }} from "file://{}/upstream/packages/coding-agent/dist/index.js";
-const sm = await SessionManager.open("{file}");
+    // Paths travel via env: a native Windows path is neither a valid ESM
+    // specifier (file://D:\... is an invalid URL) nor a valid JS string
+    // literal (unescaped backslashes) embedded in the script below.
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("upstream/packages/coding-agent/dist/index.js")
+        .to_string_lossy()
+        .to_string();
+    let script = r#"
+import { pathToFileURL } from "node:url";
+const { SessionManager } = await import(pathToFileURL(process.env.PI_RUST_UPSTREAM_DIST).href);
+const sm = await SessionManager.open(process.env.PI_RUST_SESSION_FILE);
 const header = sm.getHeader();
 const entries = sm.getEntries();
 const branch = sm.getBranch();
@@ -1235,14 +1242,13 @@ const want = ["user","assistant","toolResult","assistant"];
 if (JSON.stringify(roles) !== JSON.stringify(want)) throw new Error("bad roles " + JSON.stringify(roles));
 if (sm.getSessionFile() === null) throw new Error("no session file");
 console.log("UPSTREAM-READ-OK");
-"#,
-        env!("CARGO_MANIFEST_DIR"),
-        file = session_file.to_string_lossy(),
-    );
+"#;
     let node_out = Command::new(&node)
         .arg("--input-type=module")
         .arg("--eval")
         .arg(script)
+        .env("PI_RUST_UPSTREAM_DIST", dist)
+        .env("PI_RUST_SESSION_FILE", &session_file)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("running node");
@@ -2193,11 +2199,17 @@ fn wp702_mcp_config_stdio_round_trip() {
     let agent_dir = tmp.join("agent-dir");
     std::fs::create_dir_all(&agent_dir).unwrap();
     let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
-    std::fs::write(
-        agent_dir.join("mcp.json"),
-        format!(r#"{{"mcpServers":{{"fixture":{{"command":"node","args":["{f}"],"exposure":"direct"}}}}}}"#, f = fixture.display().to_string().replace('"', "\\\"")),
-    )
-    .unwrap();
+    // json! escapes the path properly (raw Windows paths are invalid JSON).
+    let mcp = json!({
+        "mcpServers": {
+            "fixture": {
+                "command": "node",
+                "args": [fixture.to_string_lossy()],
+                "exposure": "direct"
+            }
+        }
+    });
+    std::fs::write(agent_dir.join("mcp.json"), mcp.to_string()).unwrap();
     let scenario = json!({
         "user_messages": ["use the mcp tools"],
         "model_scripts": [[
@@ -2369,11 +2381,16 @@ fn wp702_mcp_crash_lazy_reconnect() {
     let agent_dir = tmp.join("agent-dir");
     std::fs::create_dir_all(&agent_dir).unwrap();
     let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
-    std::fs::write(
-        agent_dir.join("mcp.json"),
-        format!(r#"{{"mcpServers":{{"fixture":{{"command":"node","args":["{f}","--die-after-first-call"],"exposure":"direct"}}}}}}"#, f = fixture.display().to_string().replace('"', "\\\"")),
-    )
-    .unwrap();
+    let mcp = json!({
+        "mcpServers": {
+            "fixture": {
+                "command": "node",
+                "args": [fixture.to_string_lossy(), "--die-after-first-call"],
+                "exposure": "direct"
+            }
+        }
+    });
+    std::fs::write(agent_dir.join("mcp.json"), mcp.to_string()).unwrap();
     let scenario = json!({
         "user_messages": ["count, let it die, count again"],
         "model_scripts": [[
