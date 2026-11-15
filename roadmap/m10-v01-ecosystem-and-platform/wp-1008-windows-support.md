@@ -68,4 +68,33 @@ candidate from a Windows terminal (PowerShell or Git Bash):
   SIGTERM->143 test are unix-gated; the two skill goldens now build
   expectations from the loaded skill's own paths (windows string-join vs
   dir-walk separator serialization). Fix commit `4989344`; linux suite
-  re-green.
+  re-green. Third run: 271/272 — the write-to-directory golden
+  (`tools::write_to_directory_eisdir_upstream_error`) because libuv maps a
+  write-open on a directory to `EISDIR` on unix but `EACCES` on windows
+  (both correct rejections); the golden now accepts the platform errno. Fix
+  commit `ace1897`; linux suite re-green. Fourth run: all 42 e2e tests
+  failed with `ERR_UNSUPPORTED_ESM_URL_SCHEME` — Node's ESM loader rejects
+  `import("D:\\...\\index.mjs")` because the drive letter parses as an
+  unknown URL protocol; the sidecar's dynamic imports (`bridge.mjs`,
+  `auth-login.mjs`) now go through `pathToFileURL(p).href` (the CLI entry
+  points stay plain paths — Node resolves the entry itself, and
+  `node file://...` is not a valid entry on any platform). Fix commit
+  `e3af7a3`; fifth run: windows e2e 42/45 — the last three were test-side
+  path serialization: the wp702 `mcp.json` fixtures embedded raw Windows
+  paths (invalid JSON escapes) and the upstream-SessionManager cross-check
+  embedded a native path in a JS string + a `file://`-prefixed specifier
+  (both invalid on windows); both now travel via `json!`/env +
+  `pathToFileURL`. Fix commit `a7e0e01` (with the auth-login PTY harness
+  diagnostics for the concurrent ubuntu round-6 failure). Local linux suite
+  green throughout each round (276/2/1/45/4/3/4, fmt + clippy clean);
+  the windows gate is the CI `windows-latest` job itself (local
+  cross-compilation of `aws-lc-sys` from linux to msvc is impossible).
+  Sixth run: e2e 45/45; the two remaining failures were the rpc tool-event
+  tests — the bash tool child hung after `tool_execution_start` (Git Bash
+  on windows-latest, 30s timeout). Root cause: pi-rust inherited stdin
+  into the shell child, and in rpc mode that is the RPC client pipe;
+  upstream parity is `stdio:["ignore","pipe","pipe"]` + `windowsHide:true`
+  (`core/tools/bash.ts`). Fix commit `c8e7730`: `Stdio::null()` for the
+  shell child (also stops a stdin-reading tool command from swallowing
+  RPC protocol bytes on any platform) + `CREATE_NO_WINDOW` on windows.
+  Local linux suite re-green.
