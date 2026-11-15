@@ -1,49 +1,55 @@
-# pi-rust v0.1.0
+# pi-rust v0.2.0
 
-First stable release. `pi-rust` is a Rust port of [earendil-works/pi](https://github.com/earendil-works/pi) with a compatibility layer: original pi extensions (TypeScript) run **unmodified** through the Node sidecar.
+The ecosystem + platform release: unmodified upstream extensions keep
+gaining surface (`ctx.ui.custom` panes, oauth credentials, codemode
+hosting, llama native providers, tool-search), and pi-rust now runs on
+**five platforms** including Windows.
 
-## What's in it
+## What's new since v0.1.0
 
-**Core (Rust):** providers (OpenAI, Anthropic, Google, Bedrock) with typed error
-classification and retry, built-in tools (read, write, edit, bash, grep, find,
-ls, web), sessions with upstream-compatible files, compaction, skills,
-slash-commands, print/RPC modes, an interactive TUI (markdown, dialogs,
-pickers, themes, keybindings), and an RPC surface for programmatic use.
+**Extension bridge (upstream pin refreshed to `17d6ca7`, 157/157 exports):**
+- `ctx.ui.custom` — descriptor pane (title/lines/list/input, live updates,
+  keys, dialog-like timeout); headless keeps the upstream noOp (WP-1006)
+- `pi-rust auth login` — the upstream terminal login flow runs unmodified
+  in a dedicated sidecar; oauth credential kinds (radius, kimi-coding,
+  github-copilot, xai, meta) work end to end with sidecar-side token
+  refresh — no token crosses the wire (WP-1007)
+- codemode hosting (`models: false`) and llama native provider capture
+  (WP-1004/WP-1005); tool-search activation (WP-1003)
+- TUI parity pass vs the refreshed upstream (WP-1009): non-vision image UX
+  (named-model warning, per-request image placeholder), bash capture
+  temp-file hygiene
 
-**Extension bridge (sidecar on Node, upstream pinned at `17d6ca7`):**
-unmodified upstream extensions load and run — custom providers, MCP servers
-(stdio + HTTP/SSE), shortcuts, extension UI chrome, compaction events, the
-built-in mcp extension. The unmodified-extension matrix is the standing CI
-gate.
+**Platforms:**
+- **Windows x86_64 (msvc)** — fifth release target; CI test matrix includes
+  windows-latest; install documented (no Windows installer, like upstream)
+  (WP-1008)
+- `--version` now ships with the binary (WP-1002)
 
-**M9 hardening:** full CI (tests, clippy/fmt hard gates, bench baseline,
-fresh-clone acceptance in a clean container), release pipeline for
-linux-gnu / linux-musl / darwin ×2 with smoke checks (aarch64 under QEMU),
-owner-only permissions for agent-dir artifacts.
+**Hardening:** advisory sweep with per-line resolutions, CI upstream-tree
+verify/repair (import oracle + self-heal), sidecar stdio chunk-safety.
 
 ## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | bash
 # pinned version:
-curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=v0.2.0 bash
 ```
 
-Targets: Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64.
-Requires bash, curl, tar and **node ≥ 22.19**.
+Targets: Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64,
+Windows x86_64 (msvc, `pi-rust.exe`).
+Requires bash, curl, tar and **node ≥ 22.19** (Windows: Git for Windows
+for the bash tool; the TUI PTY test matrix is POSIX-only by design).
 
-Verify: `pi-rust --version` → `pi-rust 0.1.0`.
+Verify: `pi-rust --version` → `pi-rust 0.2.0`.
 
 From source: see the README ("From source (fresh clone)") — the CI
 `fresh-clone` job follows that recipe in a clean container on every push.
 
 ## Known limitations (v0)
 
-- `ctx.ui.custom` is a graceful no-op (parity with upstream RPC mode); a
-  descriptor pane is planned for v0.2.
-- `auth.json` oauth credentials are a typed error (api_key credentials only);
-  oauth support lands in v0.2.
-- No Windows target yet (planned v0.2).
-- TUI parity is *functional*, not pixel-perfect (ratatui vs Ink/React).
-- The `pi-rust auth` command surface does not exist yet; manage
-  `auth.json` by hand (upstream shape, `api_key` entries).
+Unchanged from v0.1.0, plus: no project-level `.pi/mcp.json` (needs the
+project-trust model, a v1 item — agent-dir `mcp.json` works), no
+Windows ARM64, `ctx.ui.custom` stays a descriptor subset, pixel-perfect
+TUI parity is not the bar (functional parity is).
