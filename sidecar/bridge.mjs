@@ -6,24 +6,28 @@
  */
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createSessionView } from "./session.mjs";
 import { createDialogManager, createPaneHost, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
+
+// WP-1008: node's ESM loader takes file:// URLs for absolute paths
+// (windows drive letters parse as unknown schemes otherwise).
+const mod = (p) => pathToFileURL(p).href;
 
 const DIST =
 	process.env.PI_EXTENSION_SIDECAR_DIST ??
 	path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "upstream", "packages", "coding-agent", "dist", "index.js");
-const ca = await import(DIST);
+const ca = await import(mod(DIST));
 // The prompt builder is not re-exported by dist/index.js; import the built
 // module directly (source of truth: src/core/system-prompt.ts).
-const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(path.join(path.dirname(DIST), "core", "system-prompt.js"));
+const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(mod(path.join(path.dirname(DIST), "core", "system-prompt.js")));
 // WP-702: upstream MCP server config validation (source of truth:
 // src/core/mcp-servers.ts) — not re-exported by dist/index.js either.
-const { validateMcpServerConfig } = await import(path.join(path.dirname(DIST), "core", "mcp-servers.js"));
+const { validateMcpServerConfig } = await import(mod(path.join(path.dirname(DIST), "core", "mcp-servers.js")));
 // WP-1005: the llama extension factory is not re-exported by dist/index.js.
-const { default: llamaExtensionFactory } = await import(path.join(path.dirname(DIST), "extensions", "llama", "index.js"));
+const { default: llamaExtensionFactory } = await import(mod(path.join(path.dirname(DIST), "extensions", "llama", "index.js")));
 // WP-1006: pi-tui dist for the pane host (component tree walk + keybindings).
-const tui = await import(path.join(path.dirname(DIST), "..", "..", "tui", "dist", "index.js"));
+const tui = await import(mod(path.join(path.dirname(DIST), "..", "..", "tui", "dist", "index.js")));
 const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 
 const F_AND_FORGET = new Set(

@@ -22,7 +22,11 @@
  * (core -> sidecar) and the auth.json write; it is never logged here.
  */
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// WP-1008: node's ESM loader takes file:// URLs for absolute paths
+// (windows drive letters parse as unknown schemes otherwise).
+const mod = (p) => pathToFileURL(p).href;
 
 const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "upstream", "packages", "coding-agent", "dist");
 
@@ -43,9 +47,9 @@ if (!agentDir) {
 }
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
-const { getAgentDir, SettingsManager } = await import(path.join(DIST_DIR, "index.js"));
-const { ModelRuntime } = await import(path.join(DIST_DIR, "core", "model-runtime.js"));
-const { runAuthLogin } = await import(path.join(DIST_DIR, "cli", "auth-login.js"));
+const { getAgentDir, SettingsManager } = await import(mod(path.join(DIST_DIR, "index.js")));
+const { ModelRuntime } = await import(mod(path.join(DIST_DIR, "core", "model-runtime.js")));
+const { runAuthLogin } = await import(mod(path.join(DIST_DIR, "cli", "auth-login.js")));
 
 const log = (line) => console.error(`[auth-login] ${line}`);
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
