@@ -64,9 +64,9 @@ quoted per WP:
 - T4 / WP-1004 — Codemode hosting (factory + model-call bridge) — S2.4 — issue #125 — branch `feat/wp-1004-codemode` — PR #—
 - T5 / WP-1005 — Llama native provider capture — S2.5 — issue #126 — branch `feat/wp-1005-llama-native` — PR #—
 - T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — issue #127 — branch `feat/wp-1006-ui-custom-pane` — PR #—
-- T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 — branch `feat/wp-1007-oauth-credentials` — PR #—
-- T8 / WP-1008 — Windows support — S2.8 — issue #139 — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #140
-- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #—
+- T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 (closed) — branch `feat/wp-1007-oauth-credentials` — PR #138 (merged) — merged into main via stack merge `d0e1325`
+- T8 / WP-1008 — Windows support — S2.8 — issue #139 (closed) — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #140 (merged) — merged into main via stack merge `d0e1325`; CI 7/7 incl. windows-latest; staging `v0.2.0-staging.1` built all 5 release targets
+- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #— — audit done (2026-11-15, explore subagent): implement (a) project `.pi/mcp.json` per-location loading, (b) non-vision image UX parity (`imageUnsupportedByModel`), (c) WP-906 #5 BashCapture leak (Drop cleanup); documented-out: system/generated theme, terminal appearance auto-pair (no crossterm OSC query in v0), win32/darwin keybinding overrides (WP-1008 scope note), keybinding manager hot-reload (minor)
 - T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
 
 
@@ -159,3 +159,27 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   (UND_ERR_SOCKET at ~900s, ~100k thinking chars, no output) twice
   identically; lineage stays 'reviewing' (unconsumed), retry offered as
   a human decision, not auto-replayed.
+- **L10** (2026-11-15): **WP-1007 + WP-1008 delivered and merged.** PR #140
+  CI-green 7/7 (incl. windows-latest after six windows fix rounds: unix
+  compile gates, Git Bash resolution, EACCES golden, sidecar ESM file
+  URLs, mcp.json/sessionmanager path serialization, bash-tool stdin
+  parity, skills per-component joins — fail-fast had masked skills/tui
+  in every earlier windows run). Staging tag `v0.2.0-staging.1` built all
+  five release targets incl. `x86_64-pc-windows-msvc` (release.yml
+  proof; release + tag deleted after the proof). Issues #137/#139
+  closed. Stack merged bottom-up via direct merge of the CI-green head
+  into main: merge commit `d0e1325` (same pattern as #132/#133); main CI
+  7/7 after merge. WP-1008 branch commits: a1ff0fc, c7e938b, 4989344,
+  ace1897, e3af7a3, a7e0e01, c8e7730, 5ef5289, 963e975.
+- **L11** (2026-11-15): **WP-1009 started** (branch `feat/wp-1009-tui-parity`
+  from main). Explore-subagent audit at the new pin: keybindings are
+  fully at parity (zero functional deltas); in-range upstream TUI fixes
+  (5b5be2c self-render crash, 4be4cb4 image-warning-in-context) are
+  already-safe in pi-rust; theme token grammar at parity. Implement:
+  (a) project `<cwd>/.pi/mcp.json` per-location loading with upstream
+  override/trust semantics + `autoEnableCodemode`, (b) non-vision image
+  UX parity (`imageUnsupportedByModel` detail + TUI-only warning),
+  (c) WP-906 #5 BashCapture temp-file leak via Drop. Documented-out:
+  system/generated theme + terminal appearance auto-pair (no crossterm
+  OSC query in v0), win32/darwin keybinding platform overrides,
+  keybinding manager hot-reload API.
