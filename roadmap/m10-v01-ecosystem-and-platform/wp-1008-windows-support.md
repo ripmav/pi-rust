@@ -98,3 +98,14 @@ candidate from a Windows terminal (PowerShell or Git Bash):
   shell child (also stops a stdin-reading tool command from swallowing
   RPC protocol bytes on any platform) + `CREATE_NO_WINDOW` on windows.
   Local linux suite re-green.
+  Seventh run: rpc 3/3 — but `tests/skills.rs` failed 0/3 for the first
+  time because it ran for the first time: cargo test is fail-fast per
+  test binary, and `rpc` (alphabetically earlier) had masked `skills` and
+  `tui` in every prior windows run. The skills integration tests built
+  path expectations with string joins (mixed separators on windows) vs
+  the core's native backslashes. Per-component joins + a separator-free
+  warning check fix them. Fix commit `5ef5289`; linux suite re-green.
+  Eighth run (2026-11-15): **all 7 checks green**, including
+  `windows-latest` (lib 272, auth 2, cli_help 1, e2e 45, rpc 3, skills 3,
+  tui 4 self-skipped; ubuntu + macos suites green; clippy/rustfmt/bench/
+  fresh-clone green). PR #140 is delivery-ready.
