@@ -34,68 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Upstream (pinned clone + npm install + build, cached)
-        id: upstream
-        uses: actions/cache@v6
+      - name: Upstream (pinned clone + npm install + build, cached + verified)
+        uses: ./.github/actions/upstream-setup
         with:
-          path: |
-            upstream/node_modules
-            upstream/packages
-          key: upstream-17d6ca79-${{ matrix.os }}-v2
-
-      - name: Fetch pinned upstream (cache miss)
-        if: steps.upstream.outputs.cache-hit != 'true'
-        run: |
-          git init upstream
-          git -C upstream remote add origin https://github.com/earendil-works/pi.git
-          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
-          git -C upstream checkout --detach FETCH_HEAD
-
-      - name: Node setup
-        uses: actions/setup-node@v7
-        with:
-          node-version: 26
-
-      - name: Verify upstream workspace links (install if absent or the cache damaged them)
-        # Cache miss: the whole tree is absent (installs once below). Cache
-        # hit: actions/cache does not round-trip npm workspace links
-        # (junctions on Windows) deterministically — a restored tree can lose
-        # a node_modules/<pkg> entry, leave it as an empty directory, or
-        # lose files (ERR_MODULE_NOT_FOUND for @earendil-works/pi-ai,
-        # WP-1009 CI rounds 1-4; a directory-level check missed the damage
-        # because the surviving layers looked intact). Oracle: import the
-        # three dist entry points the sidecar actually loads — side-effect
-        # free, and together they exercise workspace resolution, dist
-        # contents and transitive imports. Repair (fetch source + npm ci +
-        # build) only when one fails.
-        working-directory: upstream
-        run: |
-          if ! node --input-type=module -e "
-            const here = process.cwd();
-            for (const m of [
-              'packages/coding-agent/dist/core/settings-defaults.js',
-              'packages/coding-agent/dist/index.js',
-              'packages/tui/dist/index.js',
-            ]) {
-              await import('file://' + here + '/' + m);
-            }
-            console.log('upstream entry points import ok');
-          "; then
-            echo "upstream tree absent or damaged — installing"
-            if [ ! -f package.json ]; then
-              # damaged-cache hit: only node_modules + packages/ were cached,
-              # the source (root package.json, lockfile) was never fetched
-              git init .
-              git remote add origin https://github.com/earendil-works/pi.git
-              git fetch --depth 1 origin "$UPSTREAM_SHA"
-              git checkout -f --detach FETCH_HEAD
-            fi
-            npm ci
-            npm run build
-          fi
-
-      - name: Verify upstream dist
-        run: test -f upstream/packages/coding-agent/dist/cli.js
+          os: ${{ matrix.os }}
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.1
@@ -166,30 +108,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-      - name: Upstream (pinned clone + npm install + build, cached)
-        id: upstream
-        uses: actions/cache@v6
+      - name: Upstream (pinned clone + npm install + build, cached + verified)
+        uses: ./.github/actions/upstream-setup
         with:
-          path: |
-            upstream/node_modules
-            upstream/packages
-          key: upstream-17d6ca79-ubuntu-latest-v1
-      - name: Fetch pinned upstream (cache miss)
-        if: steps.upstream.outputs.cache-hit != 'true'
-        run: |
-          git init upstream
-          git -C upstream remote add origin https://github.com/earendil-works/pi.git
-          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
-          git -C upstream checkout --detach FETCH_HEAD
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 26
-      - name: Upstream npm install + build (cache miss)
-        if: steps.upstream.outputs.cache-hit != 'true'
-        working-directory: upstream
-        run: |
-          npm ci
-          npm run build
+          os: ubuntu-latest
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Build (release)
