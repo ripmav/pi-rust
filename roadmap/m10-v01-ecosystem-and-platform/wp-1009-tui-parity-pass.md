@@ -71,3 +71,13 @@ functional-parity standard (pixel-perfect stays a non-goal).
   still has `node_modules/<name>/package.json` and reinstalls (fetching the
   source first when the damaged hit left the root `package.json` absent) only
   when one is missing — no-op on a healthy hit, single install on a miss.
+- Round 3 (`43740094041`): windows green (cache fix confirmed — v2 fresh
+  install path); macOS failed `auth_login_api_key_stores_upstream_credential`
+  again (2nd of 3 rounds) with the transcript showing the real root cause:
+  the sidecar's answer JSON arrived as two pipe chunks
+  (`{"id":"auth_prompt_1","answer":` + `"<key>"}`) and the sidecar's
+  `chunk.toString().split("\n")` reader (no cross-chunk buffer) dropped both
+  fragments as "malformed", hanging the pending prompt until the test's 120s
+  save timeout. Timing-dependent → the 1-in-3 macOS flake. Fix: buffer
+  across chunks in `sidecar/auth-login.mjs` (the same pattern the main
+  bridge already uses); 3× local rerun green.
