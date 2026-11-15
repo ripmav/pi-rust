@@ -341,14 +341,31 @@ async fn bash(input: &Value) -> ExecResult {
             Some((t, std::time::Duration::from_secs_f64(t)))
         }
     };
-    let Ok(mut child) = Command::new("bash")
+    // WP-1008: on Windows the default `bash` on PATH is the WSL launcher
+    // (System32\bash.exe), which exits 1 without an installed distro —
+    // prefer Git Bash, the POSIX shell that is actually there.
+    let bash_prog: std::path::PathBuf = if cfg!(windows) {
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            git_bash.to_path_buf()
+        } else {
+            std::path::PathBuf::from("bash")
+        }
+    } else {
+        std::path::PathBuf::from("bash")
+    };
+    let Ok(mut child) = Command::new(bash_prog)
         .arg("-c")
         .arg(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
     else {
-        return ExecResult::err("bash: failed to start".into());
+        return ExecResult::err(if cfg!(windows) {
+            "bash: failed to start — no POSIX shell found (the bash tool needs Git for Windows or a WSL distribution on Windows)".into()
+        } else {
+            "bash: failed to start".into()
+        });
     };
     let wall_start = std::time::Instant::now();
     let mut capture = BashCapture::new();
@@ -1879,6 +1896,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_signal_killed_exit_137_golden() {
         let r = bash_tool(json!({"command": "kill -9 $$"})).await;
