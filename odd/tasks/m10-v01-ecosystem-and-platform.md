@@ -67,7 +67,7 @@ quoted per WP:
 - T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 (closed) — branch `feat/wp-1007-oauth-credentials` — PR #138 (merged) — merged into main via stack merge `d0e1325`
 - T8 / WP-1008 — Windows support — S2.8 — issue #139 (closed) — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #140 (merged) — merged into main via stack merge `d0e1325`; CI 7/7 incl. windows-latest; staging `v0.2.0-staging.1` built all 5 release targets
 - T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #141 — **merged into main as `277e17c` (2026-11-15), issue #130 closed, CI 7/7 green incl. windows-latest (run 43743752370)** — audit done (2026-11-15, explore subagent): implemented (b) non-vision image UX parity (`53492be`), (c) WP-906 #5 BashCapture leak (`f709caa`); CI defect fixes along the way: upstream cache verify step (import oracle + repair, `ca245b3`/`3140f7f`) + sidecar answer chunk-buffering (`d8f5f21`, the real root cause of the macOS auth PTY flake); documented-out: project `.pi/mcp.json` per-location MCP (needs a trust model the core does not have — same non-goal as the `.pi/settings.json` merge; extensions are host-fed), system/generated theme, terminal appearance auto-pair (no crossterm OSC query in v0), win32/darwin keybinding overrides (WP-1008 scope note), keybinding manager hot-reload (minor); keybindings + in-range fixes + token grammar verified at parity
-- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
+- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #142 — **merged into main as `918796a` (2026-11-15), issue #131 closed, CI 7/7 green (runs 43746294023 + 43746614970 incl. windows-latest)** — advisory sweep: R2-001/R2-004 fixed (composite upstream-setup action), R3-UPSTREAM-SHA fixed (cache key from env), R2-002 fixed (atomic create_dir in ensure_agent_dir), R2-003 re-documented, WP-906 LOWs resolved (install.sh signing re-documented v0, BashCapture leak fixed in 1009), R3-001 accepted v0 limitation; cleanup: M9 branches 905/906/907 deleted; v0.2.0 tag follows this record
 
 
 ## Log
@@ -196,3 +196,11 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   was real: the sidecar answer JSON split across two pipe chunks, dropped by
   a chunk-only line reader — cross-chunk buffer in auth-login.mjs (same
   pattern as the main bridge).
+
+- **L13** (2026-11-15): WP-1010 delivered + merged: PR #142 merged into main
+  as `918796a`, issue #131 closed, CI 7/7 green (both runs, all targets incl.
+  windows-latest on the new composite upstream-setup action). M10 is
+  complete: 10/10 WPs delivered (1001 merged, 1002 v0.1.0, 1003 merged,
+  1004+1005+1006 merged as 786bcf7, 1007+1008 merged as d0e1325, 1009
+  merged as 277e17c, 1010 merged as 918796a). The v0.2.0 tag + release
+  (5 targets) is the final close step of this milestone.
