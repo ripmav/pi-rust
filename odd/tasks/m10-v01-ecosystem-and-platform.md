@@ -66,7 +66,7 @@ quoted per WP:
 - T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — issue #127 — branch `feat/wp-1006-ui-custom-pane` — PR #—
 - T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 (closed) — branch `feat/wp-1007-oauth-credentials` — PR #138 (merged) — merged into main via stack merge `d0e1325`
 - T8 / WP-1008 — Windows support — S2.8 — issue #139 (closed) — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #140 (merged) — merged into main via stack merge `d0e1325`; CI 7/7 incl. windows-latest; staging `v0.2.0-staging.1` built all 5 release targets
-- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #— — audit done (2026-11-15, explore subagent): implement (b) non-vision image UX parity (done, `53492be`), (c) WP-906 #5 BashCapture leak (done, `f709caa`); documented-out: project `.pi/mcp.json` per-location MCP (needs a trust model the core does not have — same non-goal as the `.pi/settings.json` merge; extensions are host-fed), system/generated theme, terminal appearance auto-pair (no crossterm OSC query in v0), win32/darwin keybinding overrides (WP-1008 scope note), keybinding manager hot-reload (minor); keybindings + in-range fixes + token grammar verified at parity
+- T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #141 — **merged into main as `277e17c` (2026-11-15), issue #130 closed, CI 7/7 green incl. windows-latest (run 43743752370)** — audit done (2026-11-15, explore subagent): implemented (b) non-vision image UX parity (`53492be`), (c) WP-906 #5 BashCapture leak (`f709caa`); CI defect fixes along the way: upstream cache verify step (import oracle + repair, `ca245b3`/`3140f7f`) + sidecar answer chunk-buffering (`d8f5f21`, the real root cause of the macOS auth PTY flake); documented-out: project `.pi/mcp.json` per-location MCP (needs a trust model the core does not have — same non-goal as the `.pi/settings.json` merge; extensions are host-fed), system/generated theme, terminal appearance auto-pair (no crossterm OSC query in v0), win32/darwin keybinding overrides (WP-1008 scope note), keybinding manager hot-reload (minor); keybindings + in-range fixes + token grammar verified at parity
 - T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
 
 
@@ -103,7 +103,7 @@ tests, docs, src comments, vision. Full suite on the new pin: 271 in-crate,
 - **L6** (2026-11-14): slice strategy for the M10 stack: each WP is one stacked PR and one review unit (the ~400-line
 slice rule applies per WP commit, not per accumulated stack; sizes on top of main — 1001: 261, 1002: 139, 1003: 423,
 1004: 190, 1005: 1 commit, 1006: 515 + 402 + 57, 1007: 662 + 266 + 50, 1008: 337 (275+/62- on top of the 1007
-head; the 1386 on top of main includes the stacked 1007 slice), 1009: ~260 (docs + f709caa + 53492be on top of main) lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
+head; the 1386 on top of main includes the stacked 1007 slice), 1009: 403 (docs + f709caa + 53492be + 4 CI defect-fix commits on top of main; 3 over the ~400 line budget due to the CI repair chain) lines). Note: #132/#133 landed on stacked bases (GitHub stacked-merge race, same as M9) — content merged into main
 via direct merge; PRs closed with explanation.
 
 - **L7** (2026-11-14): **WP-1004 delivered** (codemode hosting). Built-in codemode extension hosted with `models: false`
@@ -183,3 +183,16 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   system/generated theme + terminal appearance auto-pair (no crossterm
   OSC query in v0), win32/darwin keybinding platform overrides,
   keybinding manager hot-reload API.
+
+- **L12** (2026-11-15): WP-1009 delivered + merged: PR #141 merged into main
+  as `277e17c`, issue #130 closed, CI 7/7 green incl. windows-latest
+  (run 43743752370). CI defect chain along the way (all root-caused, none
+  flake-waved): (1) upstream cache entry damaged its npm workspace links on
+  windows (actions/cache junction round-trip) — v2 key + verify/repair step;
+  (2) directory-level verify missed the damage — replaced by an import
+  oracle (the three sidecar dist entry points, side-effect free) +
+  source fetch + npm ci repair; (3) repair checkout refused untracked
+  cache files — `checkout -f`; (4) the macOS auth PTY "flake" (2/3 rounds)
+  was real: the sidecar answer JSON split across two pipe chunks, dropped by
+  a chunk-only line reader — cross-chunk buffer in auth-login.mjs (same
+  pattern as the main bridge).

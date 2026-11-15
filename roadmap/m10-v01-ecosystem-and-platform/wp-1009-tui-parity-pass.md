@@ -1,6 +1,6 @@
 # WP-1009 — TUI parity pass vs upstream p2
 
-**Milestone:** M10 · **Size:** M · **Status:** delivered (2026-11-15) · **Depends on:** 1001
+**Milestone:** M10 · **Size:** M · **Status:** delivered — merged into main as `277e17c` (2026-11-15), PR #141, issue #130 closed, CI 7/7 green · **Depends on:** 1001
 
 ## Goal
 Close the functional TUI gaps that opened when upstream moved past the
