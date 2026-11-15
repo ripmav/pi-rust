@@ -330,16 +330,26 @@ mod agent_dir_tests {
 /// WP-906: create the agent dir; owner-only (0700) when pi-rust created it.
 /// The dir holds auth.json (API keys) and session transcripts, which must not
 /// be world-readable on shared hosts. Pre-existing dirs keep their mode.
+/// Advisory R2-002: the `create_dir` result is the authoritative "we
+/// created it" signal — no `exists()` pre-check.
 pub fn ensure_agent_dir(path: &std::path::Path) -> Result<()> {
-    let existed = path.exists();
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("creating agent dir {}", path.display()))?;
-    if !existed {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("setting 0700 on agent dir {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating agent dir parent {}", parent.display()))?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            // Only dirs pi-rust just created get 0700.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("setting 0700 on agent dir {}", path.display()))?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("creating agent dir {}", path.display()));
         }
     }
     Ok(())

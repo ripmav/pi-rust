@@ -16,7 +16,7 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 | M7 | Extension completeness | the remaining contract rows: providers, MCP, compaction, shortcuts | 701–708 | ✅ done (stack #3461256, PRs #83–#91, pending merge) |
 | M8 | Ecosystem | skills, RPC-mode parity, package + export-HTML evaluation | 801–804 | ✅ done (PRs #96–#99 merged) |
 | M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | ✅ delivered (2026-11-14, in main) |
-| M10 | v0.1 & ecosystem + platform | pin refresh, v0.1.0, tool-search/codemode/llama, ui.custom pane, oauth, Windows, TUI parity | 1001–1010 | planned (2026-11-14) |
+| M10 | v0.1 & ecosystem + platform | pin refresh, v0.1.0, tool-search/codemode/llama, ui.custom pane, oauth, Windows, TUI parity | 1001–1010 | delivered (2026-11-15) |
 
 ## Milestone entry/exit
 

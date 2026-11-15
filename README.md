@@ -505,10 +505,12 @@ upstream/       earendil-works/pi @ 17d6ca7 (gitignored reference clone)
 
 ## Roadmap status
 
-M1–M9 delivered and merged: bridge PoC, config/state, model ecosystem,
+M1–M10 delivered and merged: bridge PoC, config/state, model ecosystem,
 built-in tools, interactive TUI, extension completeness (providers, MCP,
 compaction, shortcuts), ecosystem (skills, RPC, print modes), hardening
-& release. Full per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
+& release, v0.1 + ecosystem & platform (pin refresh, tool-search/codemode/
+llama, ui.custom pane, oauth, Windows, TUI parity, v0.2.0). Full
+per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
 
 Known v0 non-goals (v1): non-`api_key` credential kinds beyond the
 upstream oauth set (command refs — typed rejection), ARM64 Windows
