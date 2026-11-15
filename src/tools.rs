@@ -1346,13 +1346,17 @@ mod tests {
         let dir = tmpdir();
         let r = write_tool(json!({"path": dir.display().to_string(), "content": "x"})).await;
         assert!(r.is_error);
-        assert_eq!(
-            text(&r),
+        // WP-1008: libuv maps a write-open on a directory to EISDIR on unix
+        // and EACCES on windows — both are the correct rejection.
+        let expected = if cfg!(windows) {
+            format!("EACCES: permission denied, open '{}'", dir.display())
+        } else {
             format!(
                 "EISDIR: illegal operation on a directory, open '{}'",
                 dir.display()
             )
-        );
+        };
+        assert_eq!(text(&r), expected);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
