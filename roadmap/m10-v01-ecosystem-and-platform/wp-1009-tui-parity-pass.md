@@ -57,3 +57,17 @@ functional-parity standard (pixel-perfect stays a non-goal).
 - T9b — `imageUnsupportedByModel` detail + TUI-only read warning + per-request image swap + tests — done (`53492be`)
 - T9c — BashCapture Drop cleanup + regression test — done (`f709caa`)
 - T9d — this table + stale m6 doc line + PTY/full-suite matrix re-run
+
+### CI evidence
+- Round 1 (`1766680`): macos-latest flake on `auth_login_api_key_stores_upstream_credential`
+  (the documented WP-1008 PTY flake class; green on rerun); windows-latest 42/45 e2e
+  failed with `ERR_MODULE_NOT_FOUND: Cannot find package '@earendil-works/pi-ai'
+  imported from upstream\...\dist\core\settings-defaults.js` — the restored
+  `actions/cache` entry `upstream-17d6ca79-windows-latest-v1` had lost its npm
+  workspace links (cache hit confirmed in the log). Root cause: `actions/cache`
+  does not round-trip npm workspace links (junctions on Windows) deterministically.
+- Fix: ci.yml cache key bumped to `-v2` (dumps the damaged entry) + a
+  "Verify upstream workspace links" step that checks every `packages/*/` name
+  still has `node_modules/<name>/package.json` and reinstalls (fetching the
+  source first when the damaged hit left the root `package.json` absent) only
+  when one is missing — no-op on a healthy hit, single install on a miss.

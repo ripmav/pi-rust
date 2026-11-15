@@ -41,7 +41,7 @@ jobs:
           path: |
             upstream/node_modules
             upstream/packages
-          key: upstream-17d6ca79-${{ matrix.os }}-v1
+          key: upstream-17d6ca79-${{ matrix.os }}-v2
 
       - name: Fetch pinned upstream (cache miss)
         if: steps.upstream.outputs.cache-hit != 'true'
@@ -56,12 +56,37 @@ jobs:
         with:
           node-version: 26
 
-      - name: Upstream npm install + build (cache miss)
-        if: steps.upstream.outputs.cache-hit != 'true'
+      - name: Verify upstream workspace links (install if absent or the cache damaged them)
+        # On a cache miss the whole tree is absent (installs once below). On a
+        # hit, actions/cache does not round-trip npm workspace links
+        # (junctions on Windows) deterministically — a restored tree can lose
+        # a node_modules/<pkg> entry (ERR_MODULE_NOT_FOUND for
+        # @earendil-works/pi-ai, WP-1009 CI round 1). Verify each workspace
+        # package still resolves and reinstall only when one is gone.
         working-directory: upstream
         run: |
-          npm ci
-          npm run build
+          missing=()
+          for d in packages/*/; do
+            name=$(node -p "require('./$d/package.json').name")
+            if [ ! -f "node_modules/$name/package.json" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "absent or damaged workspace packages: ${missing[*]} — installing"
+            if [ ! -f package.json ]; then
+              # damaged-cache hit: only node_modules + packages/ were cached,
+              # the source (root package.json, lockfile) was never fetched
+              git init .
+              git remote add origin https://github.com/earendil-works/pi.git
+              git fetch --depth 1 origin "$UPSTREAM_SHA"
+              git checkout --detach FETCH_HEAD
+            fi
+            npm ci
+            npm run build
+          else
+            echo "workspace links intact (cache hit, no repair needed)"
+          fi
 
       - name: Verify upstream dist
         run: test -f upstream/packages/coding-agent/dist/cli.js
