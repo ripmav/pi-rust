@@ -57,23 +57,31 @@ jobs:
           node-version: 26
 
       - name: Verify upstream workspace links (install if absent or the cache damaged them)
-        # On a cache miss the whole tree is absent (installs once below). On a
-        # hit, actions/cache does not round-trip npm workspace links
+        # Cache miss: the whole tree is absent (installs once below). Cache
+        # hit: actions/cache does not round-trip npm workspace links
         # (junctions on Windows) deterministically — a restored tree can lose
-        # a node_modules/<pkg> entry (ERR_MODULE_NOT_FOUND for
-        # @earendil-works/pi-ai, WP-1009 CI round 1). Verify each workspace
-        # package still resolves and reinstall only when one is gone.
+        # a node_modules/<pkg> entry, leave it as an empty directory, or
+        # lose files (ERR_MODULE_NOT_FOUND for @earendil-works/pi-ai,
+        # WP-1009 CI rounds 1-4; a directory-level check missed the damage
+        # because the surviving layers looked intact). Oracle: import the
+        # three dist entry points the sidecar actually loads — side-effect
+        # free, and together they exercise workspace resolution, dist
+        # contents and transitive imports. Repair (fetch source + npm ci +
+        # build) only when one fails.
         working-directory: upstream
         run: |
-          missing=()
-          for d in packages/*/; do
-            name=$(node -p "require('./$d/package.json').name")
-            if [ ! -f "node_modules/$name/package.json" ]; then
-              missing+=("$name")
-            fi
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "absent or damaged workspace packages: ${missing[*]} — installing"
+          if ! node --input-type=module -e "
+            const here = process.cwd();
+            for (const m of [
+              'packages/coding-agent/dist/core/settings-defaults.js',
+              'packages/coding-agent/dist/index.js',
+              'packages/tui/dist/index.js',
+            ]) {
+              await import('file://' + here + '/' + m);
+            }
+            console.log('upstream entry points import ok');
+          "; then
+            echo "upstream tree absent or damaged — installing"
             if [ ! -f package.json ]; then
               # damaged-cache hit: only node_modules + packages/ were cached,
               # the source (root package.json, lockfile) was never fetched
@@ -84,8 +92,6 @@ jobs:
             fi
             npm ci
             npm run build
-          else
-            echo "workspace links intact (cache hit, no repair needed)"
           fi
 
       - name: Verify upstream dist

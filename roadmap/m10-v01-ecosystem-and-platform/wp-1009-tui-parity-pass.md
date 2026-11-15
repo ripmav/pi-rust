@@ -81,3 +81,14 @@ functional-parity standard (pixel-perfect stays a non-goal).
   save timeout. Timing-dependent → the 1-in-3 macOS flake. Fix: buffer
   across chunks in `sidecar/auth-login.mjs` (the same pattern the main
   bridge already uses); 3× local rerun green.
+- Round 4 (`43741456939`): macOS green (sidecar buffer fix confirmed), but
+  windows failed the same ERR_MODULE_NOT_FOUND again — even with the v2 key
+  + directory verify. The directory check reported "intact" (the surviving
+  node_modules layers still had their package.json files) while Node's real
+  resolution still failed: the junction damage mode is not detectable by
+  directory inspection. Fix: the verify step now imports the three dist entry
+  points the sidecar actually loads (settings-defaults.js, coding-agent
+  dist/index.js, tui dist/index.js — side-effect free, verified locally) and
+  repairs (source fetch + npm ci + build) when any import fails. Local probe
+  test: healthy tree ok, damaged tree (pi-ai link removed) → 3×
+  ERR_MODULE_NOT_FOUND, restored → ok.
