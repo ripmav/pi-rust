@@ -88,7 +88,7 @@ jobs:
               git init .
               git remote add origin https://github.com/earendil-works/pi.git
               git fetch --depth 1 origin "$UPSTREAM_SHA"
-              git checkout --detach FETCH_HEAD
+              git checkout -f --detach FETCH_HEAD
             fi
             npm ci
             npm run build

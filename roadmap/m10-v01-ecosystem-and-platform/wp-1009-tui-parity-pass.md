@@ -92,3 +92,10 @@ functional-parity standard (pixel-perfect stays a non-goal).
   repairs (source fetch + npm ci + build) when any import fails. Local probe
   test: healthy tree ok, damaged tree (pi-ai link removed) → 3×
   ERR_MODULE_NOT_FOUND, restored → ok.
+- Round 5 (`43743134036`): the import oracle fired correctly (windows:
+  import failed → repair started) but the repair's `git checkout --detach`
+  was refused — the cache-restored files are untracked in the fresh
+  `git init` state and checkout will not overwrite untracked files. Fix:
+  `git checkout -f` in the repair path (the force is exactly the intent:
+  the damaged cache files must lose to the clean source; `npm ci` then
+  wipes the damaged node_modules anyway).
