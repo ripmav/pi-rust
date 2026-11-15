@@ -65,7 +65,7 @@ quoted per WP:
 - T5 / WP-1005 — Llama native provider capture — S2.5 — issue #126 — branch `feat/wp-1005-llama-native` — PR #—
 - T6 / WP-1006 — ctx.ui.custom descriptor overlay pane — S2.6 — issue #127 — branch `feat/wp-1006-ui-custom-pane` — PR #—
 - T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 — branch `feat/wp-1007-oauth-credentials` — PR #—
-- T8 / WP-1008 — Windows support — S2.8 — issue #129 — branch `feat/wp-1008-windows` — PR #—
+- T8 / WP-1008 — Windows support — S2.8 — issue #139 — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #—
 - T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #—
 - T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #—
 

@@ -134,6 +134,13 @@ sys.exit(0 if (ok and ok2 and ok3 and code == 0
 
 #[test]
 fn auth_login_api_key_stores_upstream_credential() {
+    // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (the `--api-key` path itself is plain stdio and
+    // stays covered by the arg-shape test below).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("pi-rust-auth-login-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let agent_dir = tmp.join("agent-dir");

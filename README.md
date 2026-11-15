@@ -23,9 +23,18 @@ curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI
 
 Installs to `~/.local/share/pi-rust`, links `~/.local/bin/pi-rust` (both
 overridable with `PI_RUST_INSTALL_ROOT` / `PI_RUST_BIN_DIR`). Targets:
-Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64. Requires
-bash, curl, tar and **node ≥ 22.19** (the extension sidecar runs on Node;
-the tarball ships the built `upstream/` tree, no npm install needed).
+Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64, Windows
+x86_64 (msvc). Requires bash, curl, tar and **node ≥ 22.19** (the
+extension sidecar runs on Node; the tarball ships the built `upstream/`
+tree, no npm install needed).
+
+**Windows (WP-1008):** `install.sh` stays POSIX-only (upstream ships no
+Windows installer either) — download the
+`pi-rust-<tag>-x86_64-pc-windows-msvc.tar.gz` artifact, extract it, put
+the directory on `PATH` and run `pi-rust.exe` (node ≥ 22.19 on PATH).
+The `bash` tool uses the system bash (Git Bash on the CI runners); the
+PTY-based TUI tests are Linux/macOS-only, so TUI on Windows is covered by
+a manual smoke checklist, not automation.
 
 ### From source (fresh clone)
 
@@ -501,9 +510,11 @@ built-in tools, interactive TUI, extension completeness (providers, MCP,
 compaction, shortcuts), ecosystem (skills, RPC, print modes), hardening
 & release. Full per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
 
-Known v0 non-goals (v1): `ctx.ui.custom` (evaluated, documented in the
-M7 WP memos), non-`api_key` credential kinds (oauth, command refs — typed
-rejection), Windows support (upstream targets macOS/Linux first),
-upstream internal/experimental packages (`chord`, `codemode`, `durable`,
-`evals`, `telemetry`), pixel-perfect TUI parity (functional parity is
-the bar), multi-agent orchestration beyond pi's own model.
+Known v0 non-goals (v1): non-`api_key` credential kinds beyond the
+upstream oauth set (command refs — typed rejection), ARM64 Windows
+(revisit with demand), upstream internal/experimental packages
+(`chord`, `codemode`, `durable`, `evals`, `telemetry`), pixel-perfect TUI
+parity (functional parity is the bar), multi-agent orchestration beyond
+pi's own model. Delivered during v0: `ctx.ui.custom` (WP-1006,
+descriptor subset), oauth credential kinds (WP-1007), Windows x86_64
+(WP-1008).

@@ -33,3 +33,22 @@ release target and CI job.
 ## Out of scope
 - TUI PTY-level automation on Windows (no harness; manual checklist only).
 - ARM64 Windows (revisit with demand).
+
+## Manual TUI smoke checklist (Windows)
+
+No PTY automation on Windows (WP out-of-scope); run once per release
+candidate from a Windows terminal (PowerShell or Git Bash):
+
+1. `pi-rust.exe --provider fake --prompt hi` prints `echo: hi` (headless,
+   covered by the release smoke in CI).
+2. `pi-rust.exe` (no one-shot flags) on a TTY: TUI opens, alt-screen,
+   type a prompt, ctrl+c / `exit` closes it without crashing the
+   terminal (crossterm alt-screen restore).
+3. `/theme` and `/model` dialogs render and esc closes them.
+4. An extension dialog (select/confirm/input) opens from a scenario run
+   and responds to keys.
+5. Windows console: no garbled ANSI (the TUI emits ANSI via crossterm;
+   Windows Terminal + VS Code terminal handle it — classic
+   conhost pre-Win10 is not a supported target).
+
+## Evidence (2026-11-14)
