@@ -354,9 +354,20 @@ async fn bash(input: &Value) -> ExecResult {
     } else {
         std::path::PathBuf::from("bash")
     };
-    let Ok(mut child) = Command::new(bash_prog)
-        .arg("-c")
-        .arg(command)
+    // Upstream parity (core/tools/bash.ts): the shell child gets ignored
+    // stdin ("ignore") and windowsHide — on Windows the inherited stdin is
+    // the RPC client pipe in rpc mode, which made Git Bash hang; and a
+    // stdin-reading command would swallow protocol bytes on any platform.
+    let mut cmd = Command::new(bash_prog);
+    cmd.arg("-c").arg(command);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(mut child) = cmd
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
