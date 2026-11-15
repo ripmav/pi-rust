@@ -67,7 +67,7 @@ quoted per WP:
 - T7 / WP-1007 — OAuth credential support — S2.7 — issue #137 (closed) — branch `feat/wp-1007-oauth-credentials` — PR #138 (merged) — merged into main via stack merge `d0e1325`
 - T8 / WP-1008 — Windows support — S2.8 — issue #139 (closed) — branch `feat/wp-1008-windows` (stacked on `feat/wp-1007-oauth-credentials`) — PR #140 (merged) — merged into main via stack merge `d0e1325`; CI 7/7 incl. windows-latest; staging `v0.2.0-staging.1` built all 5 release targets
 - T9 / WP-1009 — TUI parity pass vs upstream p2 — S2.9 — issue #130 — branch `feat/wp-1009-tui-parity` — PR #141 — **merged into main as `277e17c` (2026-11-15), issue #130 closed, CI 7/7 green incl. windows-latest (run 43743752370)** — audit done (2026-11-15, explore subagent): implemented (b) non-vision image UX parity (`53492be`), (c) WP-906 #5 BashCapture leak (`f709caa`); CI defect fixes along the way: upstream cache verify step (import oracle + repair, `ca245b3`/`3140f7f`) + sidecar answer chunk-buffering (`d8f5f21`, the real root cause of the macOS auth PTY flake); documented-out: project `.pi/mcp.json` per-location MCP (needs a trust model the core does not have — same non-goal as the `.pi/settings.json` merge; extensions are host-fed), system/generated theme, terminal appearance auto-pair (no crossterm OSC query in v0), win32/darwin keybinding overrides (WP-1008 scope note), keybinding manager hot-reload (minor); keybindings + in-range fixes + token grammar verified at parity
-- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #142 — **merged into main as `918796a` (2026-11-15), issue #131 closed, CI 7/7 green (runs 43746294023 + 43746614970 incl. windows-latest)** — advisory sweep: R2-001/R2-004 fixed (composite upstream-setup action), R3-UPSTREAM-SHA fixed (cache key from env), R2-002 fixed (atomic create_dir in ensure_agent_dir), R2-003 re-documented, WP-906 LOWs resolved (install.sh signing re-documented v0, BashCapture leak fixed in 1009), R3-001 accepted v0 limitation; cleanup: M9 branches 905/906/907 deleted; v0.2.0 tag follows this record
+- T10 / WP-1010 — M10 close (advisory sweep + verification + v0.2.0) — S2.10 — issue #131 — branch `feat/wp-1010-m10-close` — PR #142 — **merged into main as `918796a` (2026-11-15), issue #131 closed, CI 7/7 green (runs 43746294023 + 43746614970 incl. windows-latest)** — advisory sweep: R2-001/R2-004 fixed (composite upstream-setup action), R3-UPSTREAM-SHA fixed (cache key from env), R2-002 fixed (atomic create_dir in ensure_agent_dir), R2-003 re-documented, WP-906 LOWs resolved (install.sh signing re-documented v0, BashCapture leak fixed in 1009), R3-001 accepted v0 limitation; cleanup: M9 branches 905/906/907 deleted; release: v0.2.1 tag on `1794a5b` (v0.2.0 retracted — see L14), acceptance check green
 
 
 ## Log
@@ -212,3 +212,12 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   (GH013 "creations being restricted") forbids re-pushing the tag name,
   and semver does not reuse a published version either — so the M10
   release ships as v0.2.1 (Cargo.toml 0.2.1, same content as 76eff7e).
+- **L15** (2026-11-15): **v0.2.1 released** — tag on `1794a5b`, release
+  run 43751691418 success (all 5 targets: x86_64-unknown-linux-gnu,
+  aarch64-unknown-linux-musl, aarch64-apple-darwin, x86_64-apple-darwin,
+  x86_64-pc-windows-msvc + install.sh). Acceptance: isolated install of
+  the published aarch64-musl artifact from the release, `pi-rust
+  --version` → `pi-rust 0.2.1`. (An x86_64-unknown-linux-gnu artifact on
+  the aarch64 host gives Exec format error — architecture mismatch, not a
+  release defect; install.sh picks the native target.) **M10 is complete:
+  10/10 WPs delivered and released.**
