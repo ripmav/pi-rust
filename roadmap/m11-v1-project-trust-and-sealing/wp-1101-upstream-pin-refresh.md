@@ -52,3 +52,39 @@ the new pin.
 ## Out of scope
 - Adopting new upstream *features* (p2/p3/chord/durable) — v1 non-goals.
 - Any M11 feature WPs (1102–1104).
+
+## Evidence (2026-11-16)
+
+Pin target: `64a15f4bee63d761d5398bf4126ea63abef0dc98` (upstream origin/main,
+73 commits past `17d6ca7`).
+
+Contract inspection (17d6ca7 → 64a15f4, consumed packages: 9 files):
+- **Export surface: unchanged** — rebuilt and diffed dist entry points:
+  coding-agent 157, ai 87, tui 93, mcp 27 exports; 0 added / 0 removed.
+- `@earendil-works/pi-ai`: the documented Mistral strict-mode fix —
+  `toFunctionTools(..., model.compat?.supportsStrictMode ?? false)` (opt-in,
+  default false, new `supportsStrictMode` compat property); pi-rust sends no
+  `strict` field in tool definitions (none in src/provider), so no
+  behavioral gap.
+- `@earendil-works/pi-coding-agent`: src/dist unchanged; package.json +
+  install-lock = undici 8.12.3 → 8.12.4 only.
+- Lockfile diff (pin-to-pin): only undici 8.12.4 + its integrity lines.
+- Expected code migration: **zero** — confirmed by matrix + suite.
+
+Pin references bumped in: README.md (5), .github/workflows/{ci,release}.yml
+(`UPSTREAM_SHA` env), docs/bridge-protocol.md, roadmap/00-vision.md,
+src/{session,skills,tools}.rs + src/provider/{mod,google,bedrock}.rs
+(comments), tests/{rpc,extension_bridge}.rs, feature-doc header. Historical
+memos (roadmap/m10-*, odd/tasks/m10-*, RELEASE_NOTES.md) keep the old SHA.
+
+Verification on the new pin (local, node v26.13.0, 2026-11-16):
+- `cargo fmt --check`: clean.
+- `cargo clippy --all-targets`: 0 warnings.
+- `cargo test`: 341 passed, 0 failed — 282 in-crate, 2 auth PTY, 1
+  cli-help, 45 e2e (unmodified-extension matrix), 4 rpc, 3 skills, 4 tui PTY.
+- Sidecar smoke: 74 passed, 0 failed.
+- Bench baseline re-recorded (3-sample median on the new pin):
+  cold_start 1196.6 ms, idle_rss 5.4 MB, events/s 5429.8 (samples:
+  1188.9/1196.6/1204.4, 5.4/5.4/5.4, 4979.4/5429.8/5621.5); CI band check
+  passes against the re-recorded baseline.
+- Code migration: **none** (S2 acceptance met).

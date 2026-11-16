@@ -2,8 +2,8 @@
 
 Rust port of earendil-works/pi: milestone M11 — pin cycle, project trust
 model, project `.pi/` config under the gate, v1.0 sealing & release.
-Upstream pin: `earendil-works/pi @ 17d6ca759a070c377147f6d76b72dab9a3ba42a3`
-(at M11 start; WP-1101 bumps to `64a15f4`).
+Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
+(WP-1101 bump 2026-11-16; was `17d6ca759a070c377147f6d76b72dab9a3ba42a3` at M11 start).
 
 ## Specs
 - S1 (M11 start): "M11 mit Pin-Zyklus starten (empfohlen)" — user-selected
@@ -42,3 +42,14 @@ Upstream pin: `earendil-works/pi @ 17d6ca759a070c377147f6d76b72dab9a3ba42a3`
   (consumed packages: coding-agent/tui/mcp unchanged, ai +9-3 Mistral
   strict-mode fix — not a gap, pi-rust sends no strict field; undici
   8.12.4 dep bump rides along; p2/p3/chord/durable = v1 non-goals).
+- **L3** (2026-11-16): T2/WP-1101 — pin bumped 17d6ca7 →
+  64a15f4bee63d761d5398bf4126ea63abef0dc98 (origin/main, +73). Consumed
+  packages: coding-agent/tui/mcp unchanged, ai = Mistral strict-mode
+  opt-in fix (no pi-rust impact — no `strict` field in src/provider),
+  lockfile diff = undici 8.12.4 only. Export matrix: 157/87/93/27
+  (coding-agent/ai/tui/mcp), 0 added / 0 removed. Suite: 341 passed / 0
+  failed (282 in-crate, 2 auth PTY, 1 cli-help, 45 e2e matrix, 4 rpc,
+  3 skills, 4 tui PTY); smoke 74/0; fmt + clippy clean. Bench re-recorded
+  (3-sample median: 1196.6 ms / 5.4 MB / 5429.8 events/s). Zero code
+  migration. S2 met. Note: Cargo.lock auto-synced 0.2.0 → 0.2.1 by cargo
+  (pre-existing drift from the v0.2.1 release — Cargo.toml already 0.2.1).

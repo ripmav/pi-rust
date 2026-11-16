@@ -1838,7 +1838,7 @@ mod tests {
         assert_eq!(text(&r), "edit: missing string field `path`");
     }
 
-    // ---- WP-504: bash tool, mirroring the pinned upstream behavior (bash.ts @ 17d6ca7) ----
+    // ---- WP-504: bash tool, mirroring the pinned upstream behavior (bash.ts @ 64a15f4) ----
 
     #[cfg(unix)]
     #[test]
