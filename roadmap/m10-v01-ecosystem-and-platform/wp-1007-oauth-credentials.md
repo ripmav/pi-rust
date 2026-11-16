@@ -101,15 +101,23 @@ pinned upstream does.
     reads the active set); agent-loop context only, no self-deadlock.
   - Post-fix: full suite green (276/2/1/45/4/3/4), smoke 74,
     fmt + clippy clean; wp1003 3/3 + full-suite-under-load 3/3 locally.
-- **Native review (in progress, blocked on provider)** — assess
+- **Native review (blocked on provider, 3 identical failures)** — assess
   `reviewDue=true` (native high risk; rddLine on), lineage
   `review-bb11d6f28e12c977` started (tier high, lenses risk/resilience/
   reliability, 1045 lines, correction budget 200, base 786bcf7). CI for
-  PR #138 green (6/6) on head 021c083. The reviewer group failed twice
-  identically in the `review-risk` lens: the host-relay reviewer
+  PR #138 green (6/6) on head 021c083. The reviewer group failed three
+  times identically in the `review-risk` lens: the host-relay reviewer
   (solheim/qwen3.8-27b) hits the provider's 15-minute completion limit
-  (`UND_ERR_SOCKET` at ~900 s, 88k–100k thinking chars, 0 output text) —
-  a provider-transport limit, not a review finding; nothing was admitted
-  or burned. The lineage stays in `reviewing` (authority intact) and the
-  native STATUS re-offers the collect set; a bounded retry is offered to
-  the human (next M10 step) rather than replayed blindly.
+  (`UND_ERR_SOCKET` at ~900–940 s, 88k–120k thinking chars, 0 output
+  text, 0 tokens) — a provider-transport/model-completion limit, not a
+  review finding; nothing was admitted or burned. Attempt 3 (2026-11-15):
+  940,390 ms elapsed, 119,728 thinking chars, 0 text blocks, socket
+  closed by the provider. The lineage stays in `reviewing` (authority
+  intact, generation 1, revision sha256:bacc62558b…) and the native
+  STATUS re-offers the same collect set; `automatic_retry: false`. The
+  retry is blocked on the provider (completion limit / thinking loop),
+  not on this repository — a retry with the same host model repeats the
+  failure. Unblocking options: provider fix, a host relay model that
+  completes this workload, or an explicit human decision to accept the
+  WP-1007 code as delivered with CI + suite evidence and the review
+  recorded as not-completed.
