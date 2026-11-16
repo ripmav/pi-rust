@@ -221,3 +221,14 @@ legacy form unchanged. Full suite + 73 smoke green, fmt/clippy clean.
   the aarch64 host gives Exec format error — architecture mismatch, not a
   release defect; install.sh picks the native target.) **M10 is complete:
   10/10 WPs delivered and released.**
+- **L16** (2026-11-16): **WP-1007 native review discarded by operator
+  decision.** Retry attempt 3 failed identically to attempts 1–2
+  (provider solheim/qwen3.8-27b: 940 s, 119,728 thinking chars, 0
+  output, UND_ERR_SOCKET — provider completion limit, automatic_retry
+  false). User decision ("akzeptieren und review streichen"): WP-1007
+  accepted as delivered on CI 6/6 + full suite + E2E evidence; native
+  review abandoned. Executed: `review abandon` reason
+  `operator_disposition`, actor `user` — committed, lineage quarantined
+  (record `review-bb11d6f28e12c977-2276863311`), discarded_work:
+  captured_lens_results [], findings_present false (zero artifacts). No
+  open review lineages remain; M10's last open item is closed.

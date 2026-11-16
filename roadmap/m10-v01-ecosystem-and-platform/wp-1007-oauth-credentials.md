@@ -101,23 +101,23 @@ pinned upstream does.
     reads the active set); agent-loop context only, no self-deadlock.
   - Post-fix: full suite green (276/2/1/45/4/3/4), smoke 74,
     fmt + clippy clean; wp1003 3/3 + full-suite-under-load 3/3 locally.
-- **Native review (blocked on provider, 3 identical failures)** — assess
+- **Native review (DISCARDED by operator decision, 2026-11-15/16)** — assess
   `reviewDue=true` (native high risk; rddLine on), lineage
   `review-bb11d6f28e12c977` started (tier high, lenses risk/resilience/
   reliability, 1045 lines, correction budget 200, base 786bcf7). CI for
   PR #138 green (6/6) on head 021c083. The reviewer group failed three
   times identically in the `review-risk` lens: the host-relay reviewer
-  (solheim/qwen3.8-27b) hits the provider's 15-minute completion limit
+  (solheim/qwen3.8-27b) hit the provider's 15-minute completion limit
   (`UND_ERR_SOCKET` at ~900–940 s, 88k–120k thinking chars, 0 output
   text, 0 tokens) — a provider-transport/model-completion limit, not a
-  review finding; nothing was admitted or burned. Attempt 3 (2026-11-15):
-  940,390 ms elapsed, 119,728 thinking chars, 0 text blocks, socket
-  closed by the provider. The lineage stays in `reviewing` (authority
-  intact, generation 1, revision sha256:bacc62558b…) and the native
-  STATUS re-offers the same collect set; `automatic_retry: false`. The
-  retry is blocked on the provider (completion limit / thinking loop),
-  not on this repository — a retry with the same host model repeats the
-  failure. Unblocking options: provider fix, a host relay model that
-  completes this workload, or an explicit human decision to accept the
-  WP-1007 code as delivered with CI + suite evidence and the review
-  recorded as not-completed.
+  review finding; nothing was ever admitted or burned (attempt 3:
+  940,390 ms, 119,728 thinking chars, 0 text blocks). The user decided
+  (2026-11-15, "akzeptieren und review streichen"): WP-1007 is accepted
+  as delivered on CI (6/6) + full suite + E2E evidence, and the native
+  review is discarded. Executed as native `review abandon` with
+  reason `operator_disposition`, actor `user` — committed record:
+  quarantine `review-bb11d6f28e12c977-2276863311`,
+  `discarded_work: {captured_lens_results: [], findings_present: false}`
+  (zero review artifacts — the lineage held no findings to lose).
+  WP-1007 delivery evidence stands: PR #138 CI 6/6 green, full suite
+  (276/2/1/45/4/3/4 + smoke 74), merged into main as `d0e1325`.
