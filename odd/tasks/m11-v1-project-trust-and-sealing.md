@@ -25,7 +25,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 
 ## Tasks
 - T1 / M11 setup — feature doc + todo + branch — S1 — branch `feat/wp-1101-upstream-pin-refresh` — commit: (see L2)
-- T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — commit: `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
+- T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — **merged into main as `c3c5a91` (2026-11-16), CI 7/7 green (run 44158531958)** — commits `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
 - T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch: — PR: — commit:
 - T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch: — PR: — commit:
 - T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
@@ -53,6 +53,13 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   (3-sample median: 1196.6 ms / 5.4 MB / 5429.8 events/s). Zero code
   migration. S2 met. Note: Cargo.lock auto-synced 0.2.0 → 0.2.1 by cargo
   (pre-existing drift from the v0.2.1 release — Cargo.toml already 0.2.1).
+- **L5** (2026-11-16): WP-1101 merged into main as `c3c5a91` (PR #146,
+  CI 7/7 green incl. bench baseline compare + windows-latest). M11 is at
+  1/4 WPs; next: WP-1102 project trust model (design phase). Note: a
+  stale M7-era stash (`a7bc0fb`) was accidentally popped during the
+  post-merge doc commit and conflicted on src/tui/{mod,terminal}.rs;
+  resolved by restoring HEAD content (the stash-side content was an old
+  M7 relic), stash entries left intact in `git stash list`.
 - **L4** (2026-11-16): Native review for the WP-1101 commit range:
   assess flagged the range high-risk (ci.yml `UPSTREAM_SHA` = shell_source)
   with reviewDue=true; the RDD pre-delivery guard then blocked PR

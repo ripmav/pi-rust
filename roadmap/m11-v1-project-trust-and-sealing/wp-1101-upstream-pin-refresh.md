@@ -1,6 +1,6 @@
 # WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4)
 
-**Milestone:** M11 · **Size:** M · **Status:** planned · **Depends on:** M10 (done)
+**Milestone:** M11 · **Size:** M · **Status:** delivered · **Depends on:** M10 (done)
 
 ## Goal
 Bump the upstream pin from `17d6ca759a070c377147f6d76b72dab9a3ba42a3` to
@@ -98,4 +98,6 @@ the provider defect that killed the WP-1007 candidate (1045 lines) did not
 recur at this size. Acknowledgement committed, authority burned
 (consumed revision sha256:92368b72…). Delivery: PR #146.
 
-Status: PR #146 open, CI running (2026-11-16).
+Status: PR #146 merged into main as `c3c5a91` (2026-11-16), CI 7/7
+green (run 44158531958: test matrix linux/macos/windows, clippy,
+rustfmt, fresh-clone, bench baseline compare). **WP-1101 complete.**
