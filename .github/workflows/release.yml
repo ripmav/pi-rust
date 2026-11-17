@@ -20,7 +20,7 @@ on:
     tags: ["v*"]
 
 env:
-  UPSTREAM_SHA: "17d6ca759a070c377147f6d76b72dab9a3ba42a3"
+  UPSTREAM_SHA: "64a15f4bee63d761d5398bf4126ea63abef0dc98"
   CARGO_TERM_COLOR: always
 
 jobs:

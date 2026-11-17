@@ -71,7 +71,7 @@ Upstream pi extensions run unmodified for this surface (status per milestone):
 
 ## Principles
 
-1. **Upstream is the reference**, pinned per milestone (currently `17d6ca7`);
+1. **Upstream is the reference**, pinned per milestone (currently `64a15f4`);
    behavior questions are answered by reading upstream source.
 2. **Small work packages**: one issue, one reviewable PR, TDD where runnable
    checks exist (RED → GREEN), mock servers for provider tests (no live APIs
