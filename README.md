@@ -134,6 +134,7 @@ milestone (all milestone stacks are merged into `main`):
 | headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
 | `ctx.ui.custom` (descriptor pane: title/lines/list/input, live updates, keys; dialog-like timeout) | ✅ M10 (TUI; headless keeps the upstream noOp — WP-707 subset, full component model stays a non-goal) |
 | `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10 (the upstream oauth providers — radius, kimi-coding, github-copilot, xai, meta — are sidecar-routed; the token refresh + rotated write-back run sidecar-side, no token crosses the wire) |
+| project `.pi/` config under the trust gate (D8 project skills now; the settings merge + project MCP are WP-1103) | ✅ M11 (delivered (trusted projects) — gate, flags, `/trust`, store, WP-1102) |
 
 Evaluated, documented v0 limits: `ctx.ui.custom` full component model (mouse, focus trees, overlays — WP-707 decision memo in
 `odd/tasks/m7-extension-completeness.md`; the descriptor subset ships in M10), bundled extensions beyond `mcp`
@@ -155,6 +156,47 @@ resolved path), so your global extensions in `~/.pi/agent/extensions/` load.
 Run with `--isolated` for a fresh temp agent dir instead (the M1 hermetic
 behavior — used by all tests). Individual extensions can of course still
 access `~/.pi` themselves (the sidecar is a regular Node process).
+
+### Project trust (M11, WP-1102)
+
+Project-local config is trust-gated (upstream parity): untrusted
+`<cwd>/.pi/` content has **zero behavioral effect**. The trust-requiring
+resources are every project surface pi-rust reads (D2): `settings.json`,
+`mcp.json`, `skills`, `prompts`, `extensions` under `<cwd>/.pi/`.
+
+- **Store:** `<agentDir>/trust.json` —
+  `{ "<canonical-path>": true | false | null }`, per-path with
+  **nearest-ancestor** lookup (a decision for a parent dir covers
+  everything below it; `null` clears). No file lock — pi-rust is
+  single-process (documented D1 deviation).
+- **Resolution order** (upstream `resolveProjectTrusted`): CLI override —
+  `--approve`/`-a` (trust for this run) / `--no-approve`/`-na` (deny for
+  this run) → no trust-requiring resources → trusted (clean dirs never
+  prompt) → stored decision → `defaultProjectTrust` setting (`"ask"`
+  default, `"always"`, `"never"`) → interactive prompt → headless →
+  **not trusted** (default-deny, D7). There is no `project_trust`
+  extension event in v0 (D3 — project extensions load only *after*
+  resolution and only when trusted, so no untrusted project extension
+  can answer the decision).
+- **Interactive (D6):** the startup prompt (5 options in upstream
+  order/labels, incl. "Trust parent folder (X)" and the session-only
+  variants — non-session-only selections persist, session-only apply to
+  the run without writing) appears only when resolution reaches the
+  interactive ask step; `/trust` re-opens the selector, persists the
+  decision and reports `Saved trust decision: trusted|untrusted. Restart
+  pi for this to take effect.` (no live re-resolve). An untrusted run
+  with trust-requiring resources shows one warning line in the
+  transcript.
+- **Behavior change (D8 + D2):** project skills `<cwd>/.pi/skills`,
+  project prompts `<cwd>/.pi/prompts` and project extensions
+  `<cwd>/.pi/extensions` are now loaded **only when trusted**
+  (agent-dir and CLI/`--extension-dir` resources are unaffected).
+  Untrusted projects with such resources no longer load them.
+
+The gate is delivered; the project `settings.json` merge and the project
+`mcp.json` wiring sit behind it in WP-1103. The earlier documented
+non-goals for project `.pi/` config (the WP-307 settings merge, the
+WP-1009 T9a project MCP) are superseded by this gate.
 
 ### Sessions
 
@@ -197,6 +239,7 @@ pi-rust [options]                      # TTY + no one-shot flags = interactive T
         [--command <name> [args...]]   # repeatable; after ready, before the runs
         [--session-file <p>] [--resume <file|id>] [--fork <file|id>] [--list-sessions]
         [-p | --print] | --mode text|json|rpc
+        [--approve | --no-approve]     # project trust override for this run
         [--print-usage] [--bench]
         [-h | --help]
 ```
@@ -336,7 +379,9 @@ recorded v0 deviations in `roadmap/m3-config-and-state/wp-307-prompt-templates.m
 
 ### Skills (M8, WP-801)
 
-`<agentDir>/skills/` and `<cwd>/.pi/skills/` are scanned for `SKILL.md`
+`<agentDir>/skills/` is always scanned; `<cwd>/.pi/skills/` only for
+**trusted** projects (WP-1102, D8 — the trust gate). Both are scanned for
+`SKILL.md`
 files (a directory containing one is a skill root; otherwise direct `.md`
 children of the root count too). Frontmatter `name` (falls back to the
 parent directory name) and `description` are validated per the Agent Skills
@@ -509,7 +554,9 @@ M1–M10 delivered and merged: bridge PoC, config/state, model ecosystem,
 built-in tools, interactive TUI, extension completeness (providers, MCP,
 compaction, shortcuts), ecosystem (skills, RPC, print modes), hardening
 & release, v0.1 + ecosystem & platform (pin refresh, tool-search/codemode/
-llama, ui.custom pane, oauth, Windows, TUI parity, v0.2.0). Full
+llama, ui.custom pane, oauth, Windows, TUI parity, v0.2.0). M11 in
+progress: upstream pin refresh (WP-1101, merged) and the project trust
+model (WP-1102 — the trust gate above). Full
 per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
 
 Known v0 non-goals (v1): non-`api_key` credential kinds beyond the

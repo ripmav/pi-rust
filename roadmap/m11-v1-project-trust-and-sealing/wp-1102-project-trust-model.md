@@ -1,6 +1,6 @@
 # WP-1102 — Project trust model (parity port)
 
-**Milestone:** M11 · **Size:** L · **Status:** in progress · **Depends on:** 1101
+**Milestone:** M11 · **Size:** L · **Status:** implemented (verification below) · **Depends on:** 1101
 
 ## Goal
 Port the upstream project-trust model (present in the pinned pi at
@@ -44,14 +44,20 @@ merge and project MCP config.
   nearest-ancestor lookup (port verbatim, no file lock — pi-rust is
   single-process; document the deviation).
 - **D2 — Trust-requiring resources (pi-rust surface):** `settings.json`,
-  `mcp.json`, `skills` under `<cwd>/.pi/`. Upstream's `extensions`,
-  `prompts`, `themes`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `.agents/skills`
-  are NOT loaded by pi-rust at all → not part of the trigger list.
-  (Documented; re-evaluated when those surfaces land.)
+  `mcp.json`, `skills`, `prompts`, `extensions` under `<cwd>/.pi/`.
+  (Revised 2026-11-16 after implementation: the core loads
+  `<cwd>/.pi/prompts` (templates.rs) and the sidecar's upstream loader
+  discovers `<cwd>/.pi/extensions` (bridge.mjs `discoverAndLoadExtensions`) —
+  both project surfaces are trust-gated, matching the upstream
+  TRUST_REQUIRING list for the surfaces pi-rust has.) Upstream's
+  `themes`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `.agents/skills` are NOT
+  loaded by pi-rust at all → not part of the trigger list.
 - **D3 — No `project_trust` extension event in v0:** pi-rust loads no
-  project extensions (agent-dir + CLI extensions only), so there is no
-  project-extension handler to consult and no untrusted-extension load
-  window to close. The event arrives with project-extension support.
+  project extensions **before** trust resolution, so there is no
+  untrusted project-extension handler to consult for the decision
+  itself. Project extensions are loaded (after resolution) only when
+  trusted (D2). The upstream event mechanism arrives with full
+  extension-event parity.
 - **D4 — `defaultProjectTrust` global setting** added to AgentConfig
   (`"ask"` default, `"always"`, `"never"`), same semantics.
 - **D5 — CLI flags:** `--approve` / `-a` and `--no-approve` / `-na`
@@ -67,7 +73,8 @@ merge and project MCP config.
   time). With the port, project skills load **only when trusted** —
   matching upstream (package-manager.ts:2666-2670). Untrusted projects
   with project skills: skills no longer load (documented in README +
-  release notes as the trust-model change).
+  release notes as the trust-model change). Same change covers prompts
+  and extensions with the D2 revision.
 
 ## Scope
 - `src/trust.rs`: ProjectTrustStore (read/write/nearest lookup),
@@ -76,11 +83,16 @@ merge and project MCP config.
 - `src/cli.rs`: `--approve`/`-a`, `--no-approve`/`-na` flags; resolution
   wired at startup before project-gated loads.
 - `src/skills.rs`: project skill dir gated on trust (D8).
+- `src/templates.rs`: project prompt dir gated on trust (D2 revision);
+  sidecar init payload gains `projectTrusted`; bridge.mjs excludes
+  project-scope extensions (`<cwd>/.pi/` paths) when untrusted
+  (D2 revision; docs/bridge-protocol.md updated in lockstep).
 - TUI: startup prompt + `/trust` + untrusted warning (D6).
 - Tests: store (set/get/nearest-ancestor/null/clear, path canonicalization
   incl. Windows casing), resource trigger, resolution order (override /
   no-resources / stored / default always|never|ask / no-UI=false),
-  skill gate trusted vs untrusted, flag parsing.
+  skill gate trusted vs untrusted, prompt gate trusted vs untrusted,
+  project-extension gate trusted vs untrusted (sidecar e2e), flag parsing.
 - Docs: README (compatibility matrix: project config rows → "delivered
   (trusted projects)"), cli-reference (flags, /trust), superseding notes
   on WP-307 and WP-1009 T9a non-goal lines.
@@ -99,3 +111,17 @@ merge and project MCP config.
 - `project_trust` extension event (D3).
 - Upstream's `.agents/skills`, SYSTEM.md, project extensions, package
   install gating (surfaces pi-rust does not have).
+
+## Implementation record (2026-11-17)
+- Core port by gentle-ai-worker (trust.rs store/resolution, config
+  setting, CLI flags, skill gate, TUI prompt + `/trust` + warning,
+  docs); D2 revision (prompts + extensions gates, bridge
+  `projectTrusted` init field + project-extension filter, protocol
+  doc) by the parent inline after two worker stalls on e2e runs.
+- Sidecar `contextActions.isProjectTrusted` now returns the real
+  decision (was a hardcoded `true` stub).
+- Verification: fmt clean, clippy 0 warnings, in-crate 305, cli_help
+  1, e2e 46 (incl. new project-extension gate), rpc 4, skills 3,
+  trust 7, tui PTY 6, auth PTY 2 — 374/0; sidecar smoke 74/74.
+- Behavior changes (README-documented): project skills/prompts/
+  extensions now load only when trusted.
