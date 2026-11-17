@@ -25,7 +25,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 
 ## Tasks
 - T1 / M11 setup — feature doc + todo + branch — S1 — branch `feat/wp-1101-upstream-pin-refresh` — commit: (see L2)
-- T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR: — commit: (see L3)
+- T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — commit: `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
 - T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch: — PR: — commit:
 - T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch: — PR: — commit:
 - T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
@@ -53,3 +53,16 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   (3-sample median: 1196.6 ms / 5.4 MB / 5429.8 events/s). Zero code
   migration. S2 met. Note: Cargo.lock auto-synced 0.2.0 → 0.2.1 by cargo
   (pre-existing drift from the v0.2.1 release — Cargo.toml already 0.2.1).
+- **L4** (2026-11-16): Native review for the WP-1101 commit range:
+  assess flagged the range high-risk (ci.yml `UPSTREAM_SHA` = shell_source)
+  with reviewDue=true; the RDD pre-delivery guard then blocked PR
+  creation. User decision: attempt the native review (consent granted in
+  UI). Lineage `review-119f0170c6991780` (tier high, lenses
+  risk+reliability): both reviewers COMPLETED — review-risk 91.3 s,
+  review-reliability 248.5 s, both stopReason `stop` (the solheim
+  provider defect that killed the WP-1007 candidate at 1045 lines did
+  not recur at 304 lines). Outcome **approved**, acknowledgement
+  committed, authority burned (consumed revision sha256:92368b72…).
+  PR #146 created via GitHub REST API (the RDD guard's `gh pr create`
+  repository resolution fails in this environment; git push and the REST
+  API both work). CI on PR #146 running.
