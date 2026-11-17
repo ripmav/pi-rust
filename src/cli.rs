@@ -186,6 +186,8 @@ pub const USAGE: &str = "usage: pi-rust [options]
   -p, --print               print mode: stdout = final assistant text only (same as --mode text)
   --mode <m>                text|json|rpc — text = --print; json = upstream-shaped event stream; rpc = the upstream NDJSON command protocol on stdin/stdout (no --prompt/--scenario)
   --bench                   measure the perf baseline (cold start, idle RSS, bridge throughput), then exit
+  --approve, -a             Trust project-local files for this run
+  --no-approve, -na         Ignore project-local files for this run
   --version                 print the version and exit
   -h, --help                show this help and exit
 
@@ -220,6 +222,7 @@ pub async fn run() -> Result<i32> {
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
     let mut provider_flag: Option<String> = None;
     let mut model_id: Option<String> = None;
+    let mut trust_override: Option<bool> = None;
     let mut prompt: Option<String> = None;
     let mut bench = false;
     let mut image_paths: Vec<PathBuf> = Vec::new();
@@ -257,6 +260,10 @@ pub async fn run() -> Result<i32> {
             // WP-905: perf baseline run (no prompt/scenario; exits after
             // measuring cold start, idle RSS and bridge throughput).
             "--bench" => bench = true,
+            // WP-1102 (D5): project trust override (upstream flag names;
+            // last occurrence wins, as upstream).
+            "--approve" | "-a" => trust_override = Some(true),
+            "--no-approve" | "-na" => trust_override = Some(false),
             // WP-610: one-shot stdout variants (upstream print-mode parity).
             "-p" | "--print" => {
                 let m = out_mode.unwrap_or(crate::agent::OutputMode::Text);
@@ -324,6 +331,17 @@ pub async fn run() -> Result<i32> {
 
     let cwd = std::env::current_dir().context("cwd")?;
 
+    // WP-610: interactive mode — no --scenario/--prompt and a TTY on stdin.
+    // (Computed here because the trust gate (WP-1102) needs it; the TUI
+    // block below reuses the value. `--template` counts as a prompt: it
+    // expands to one below, before the TUI block is reached.)
+    let tui_mode = scenario_path.is_none()
+        && prompt.is_none()
+        && template_name.is_none()
+        && !bench
+        && !list_sessions
+        && out_mode != Some(crate::agent::OutputMode::Rpc);
+
     // Agent dir (S6): --agent-dir > PI_CODING_AGENT_DIR > ~/.pi/agent
     // (upstream getAgentDir). --isolated forces a fresh temp dir (the M1
     // hermetic behavior, now opt-in).
@@ -341,10 +359,60 @@ pub async fn run() -> Result<i32> {
     };
     crate::config::ensure_agent_dir(&agent_dir)?;
 
+    // M3/WP-301: agent settings from the agent dir (global file only — the
+    // project `cwd/.pi/settings.json` merge is WP-1103, gated on the trust
+    // model below). Flags beat settings; settings beat the fake-driver
+    // default. (Loaded before the trust gate: it reads
+    // `defaultProjectTrust`, D4.)
+    let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
+
+    // WP-1102: project trust gate — resolved before every project-gated
+    // load (D8: the project skill dir below; WP-1103: the settings/mcp
+    // merges). D3: no `project_trust` extension event in v0 (the resolve
+    // documents the skipped step).
+    let trust_store = crate::trust::ProjectTrustStore::new(&agent_dir);
+    let project_trusted = match crate::trust::resolve_project_trusted(
+        &cwd,
+        &trust_store,
+        trust_override,
+        agent_config.default_project_trust.as_deref(),
+        tui_mode,
+    )
+    .with_context(|| "resolving project trust")?
+    {
+        crate::trust::TrustResolution::Resolved(t) => t,
+        // D6: the interactive "ask" step — 5 options in upstream
+        // order/labels; non-session-only selections persist via the
+        // store, session-only apply to this run without writing.
+        crate::trust::TrustResolution::Ask => {
+            let options = crate::trust::trust_options(&cwd, true);
+            match crate::tui::terminal::run_trust_prompt(
+                &cwd.display().to_string(),
+                &agent_dir,
+                &options,
+            )
+            .with_context(|| "trust prompt")?
+            {
+                Some(i) => {
+                    let opt = &options[i];
+                    if !opt.updates.is_empty() {
+                        trust_store
+                            .set_many(&opt.updates)
+                            .with_context(|| "saving trust decision")?;
+                    }
+                    opt.trusted
+                }
+                // Upstream: a closed prompt (no selection) = not trusted.
+                None => false,
+            }
+        }
+    };
+
     // WP-801: discover skills (<agentDir>/skills + <cwd>/.pi/skills); invalid
     // skills are skipped with a core-log warning (upstream diagnostics).
+    // WP-1102 (D8): the project skill dir is scanned only when trusted.
     let mut skill_warnings: Vec<String> = Vec::new();
-    let skills = crate::skills::load(&agent_dir, &cwd, &mut skill_warnings);
+    let skills = crate::skills::load(&agent_dir, &cwd, project_trusted, &mut skill_warnings);
     for w in &skill_warnings {
         crate::corelog::line(&format!("[core] skill: {w}"));
     }
@@ -361,7 +429,13 @@ pub async fn run() -> Result<i32> {
     // --template expands to the prompt (S7); discovery reads
     // <agentDir>/prompts + .pi/prompts.
     if let Some(name) = &template_name {
-        let text = crate::templates::apply(&agent_dir, &cwd, name, &template_args.join(" "))?;
+        let text = crate::templates::apply(
+            &agent_dir,
+            &cwd,
+            project_trusted,
+            name,
+            &template_args.join(" "),
+        )?;
         prompt = Some(text);
     }
 
@@ -430,15 +504,14 @@ pub async fn run() -> Result<i32> {
     // project directory (the child inherits the core's cwd); the agent dir
     // is discovery-only.
     // M3/WP-301: agent settings from the agent dir (global file only — the
-    // project `cwd/.pi/settings.json` merge needs a trust model, out of
-    // scope for the headless core). Flags beat settings; settings beat the
-    // fake-driver default.
+    // project `cwd/.pi/settings.json` merge is WP-1103, gated by the WP-1102
+    // trust model; the gate itself landed in WP-1102). Flags beat settings;
+    // settings beat the fake-driver default.
     if list_sessions {
         list_sessions_json(&agent_dir)?;
         return Ok(0);
     }
 
-    let agent_config = crate::config::load(&agent_dir).with_context(|| "loading agent config")?;
     // WP-702/702c: agent-dir MCP server config (absent file = no servers).
     let mcp_config =
         crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
@@ -565,13 +638,6 @@ pub async fn run() -> Result<i32> {
     sidecar_args.push("--agent-dir".into());
     sidecar_args.push(agent_dir.to_string_lossy().into());
 
-    // WP-601: interactive mode — no --scenario/--prompt and a TTY on stdin.
-    let tui_mode = scenario_path.is_none()
-        && prompt.is_none()
-        && !bench
-        && !list_sessions
-        && out_mode != Some(crate::agent::OutputMode::Rpc);
-
     // TUI mode owns the terminal: the sidecar's stderr and the core's own
     // diagnostic lines must not corrupt the screen — both go to a log file
     // in the agent dir.
@@ -651,6 +717,9 @@ pub async fn run() -> Result<i32> {
     if let Some(cfg) = &mcp_config {
         init["mcpConfig"] = cfg.clone();
     }
+    // WP-1102 (D2): the trust gate for project-scoped resources (the sidecar
+    // excludes project extensions when untrusted).
+    init["projectTrusted"] = json!(project_trusted);
     // WP-705: resolved action -> keys (the sidecar runs upstream
     // getShortcuts against this table).
     let mut kb_map = serde_json::Map::new();
@@ -690,6 +759,7 @@ pub async fn run() -> Result<i32> {
         run_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cost_total: Arc::default(),
         tui: tui_mode,
+        project_trusted,
         ui_tx,
         tools_sync_tx,
         compact_override,
@@ -917,7 +987,7 @@ pub async fn run() -> Result<i32> {
                 });
             }
         }
-        let tui_templates = crate::templates::discover(&agent_dir, &cwd);
+        let tui_templates = crate::templates::discover(&agent_dir, &cwd, project_trusted);
         let mut app = crate::tui::TuiApp::with_kb(
             kb,
             model_label,
@@ -948,6 +1018,15 @@ pub async fn run() -> Result<i32> {
         }
         let submit_tx = msg_tx.clone();
         let end_tx = msg_tx.clone();
+        // WP-1102 (D6): the upstream renderProjectTrustWarningIfNeeded —
+        // one transcript line when the run resolved untrusted AND
+        // trust-requiring resources exist.
+        if !project_trusted && crate::trust::has_trust_requiring_resources(&cwd) {
+            app.transcript.push(crate::tui::Msg {
+                role: "system",
+                text: "Project is not trusted: .pi settings/mcp/skills are ignored. Use /trust to change this.".into(),
+            });
+        }
         let dialog_client = client.clone();
         let dialog_log = log.clone();
         let result = crate::tui::terminal::run(

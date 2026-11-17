@@ -165,6 +165,11 @@ pub struct Core {
     /// TUI mode (WP-604): blocking ui dialogs are forwarded to the TUI
     /// instead of answering with the upstream defaults.
     pub tui: bool,
+    /// WP-1102: the resolved project-trust value (shared startup state for
+    /// the project-gated loads — D8 skills now, WP-1103 settings/mcp next).
+    /// WP-1103 reads it; allow until then (dead-code gate).
+    #[allow(dead_code)]
+    pub project_trusted: bool,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
     /// WP-702: drain barrier for event_task — `sync_tool_set` sends a ping

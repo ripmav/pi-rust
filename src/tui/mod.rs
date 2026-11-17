@@ -29,6 +29,8 @@ pub enum PickerKind {
     #[default]
     Model,
     Session,
+    /// WP-1102: the `/trust` selector (upstream TrustSelectorComponent).
+    Trust,
 }
 
 /// One transcript line. Roles: `user`, `assistant`, `tool`, `system`.
@@ -119,6 +121,9 @@ pub enum TuiAction {
     /// WP-609: `/resume` — the terminal loads the session list and opens
     /// the picker (it owns the agent dir).
     OpenSessionsPicker,
+    /// WP-1102: `/trust` — open the trust selector; the selection is
+    /// persisted by the terminal (it owns the agent dir for the store).
+    Trust,
     /// WP-705: a registered extension shortcut (ready.shortcuts); the key
     /// string as registered (the terminal sends it back over the bridge).
     BridgeShortcut { key: String },
@@ -290,6 +295,18 @@ impl TuiApp {
                 self.exit = true;
                 self.input.clear();
                 return None;
+            }
+            // WP-1102 (D6): /trust re-opens the selector (3 options — no
+            // session-only, upstream TrustSelectorComponent behavior);
+            // persisting + the status line happen in the terminal (it owns
+            // the store). No live re-resolve: the decision takes effect on
+            // the next start (upstream "restart" status line).
+            "trust" => {
+                self.input.clear();
+                self.cursor = (0, 0);
+                self.leave_history();
+                self.scroll = 0;
+                return Some(TuiAction::Trust);
             }
             "session" => {
                 self.push_command_output(format!(

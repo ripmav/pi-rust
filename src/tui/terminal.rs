@@ -12,12 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::DisableBracketedPaste;
-use crossterm::event::EnableBracketedPaste;
-use crossterm::event::{self, Event as TermEvent};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, SetTitle};
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -170,6 +171,29 @@ where
                                             }
                                         }
                                     }
+                                    (super::PickerKind::Trust, super::picker::PickerOutcome::Selected { value, .. }) => {
+                                        // WP-1102 (D6): persist the selection (no live
+                                        // re-resolve — the decision applies on the
+                                        // next start, per the status line).
+                                        let options = crate::trust::trust_options(
+                                            std::path::Path::new(&app.cwd),
+                                            false,
+                                        );
+                                        let idx: usize = value.parse().unwrap_or(0);
+                                        if let Some(opt) = options.get(idx) {
+                                            let store = crate::trust::ProjectTrustStore::new(&agent_dir);
+                                            match store.set_many(&opt.updates) {
+                                                Ok(()) => app.push_command_output(format!(
+                                                    "Saved trust decision: {}. Restart pi for this to take effect.",
+                                                    if opt.trusted { "trusted" } else { "untrusted" }
+                                                )),
+                                                Err(e) => {
+                                                    crate::corelog::line(&format!("[core] trust: {e}"));
+                                                    app.last_error = Some(format!("trust: {e}"));
+                                                }
+                                            }
+                                        }
+                                    }
                                     (_, super::picker::PickerOutcome::Cancelled) => {}
                                 }
                             }
@@ -238,6 +262,26 @@ where
                                         app.picker_kind = super::PickerKind::Session;
                                         app.picker = Some(super::picker::Picker::new("Resume session", items));
                                     }
+                                }
+                                // WP-1102 (D6): the /trust selector (3 options, no
+                                // session-only — upstream TrustSelectorComponent).
+                                super::TuiAction::Trust => {
+                                    app.picker_kind = super::PickerKind::Trust;
+                                    let items = crate::trust::trust_options(
+                                        std::path::Path::new(&app.cwd),
+                                        false,
+                                    )
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, o)| super::picker::PickerItem {
+                                        display: o.label,
+                                        value: i.to_string(),
+                                    })
+                                    .collect();
+                                    app.picker = Some(super::picker::Picker::new(
+                                        "Trust project folder?",
+                                        items,
+                                    ));
                                 }
                             }
                         }
@@ -353,4 +397,123 @@ where
     let _ = terminal::disable_raw_mode();
     let _ = reader.join();
     result
+}
+
+/// WP-1102 (D6): the blocking pre-TUI project-trust prompt — the upstream
+/// interactive "ask" step (step 7 of `resolveProjectTrusted`), shown before
+/// the TUI owns the terminal. Reuses `picker::Picker` for input (the
+/// `tui.select.*` keys, typed prefix filter) and row rendering; returns the
+/// chosen option index, or `None` on cancel (the caller resolves a closed
+/// prompt to "not trusted" — upstream returns `false` when no option is
+/// selected).
+pub fn run_trust_prompt(
+    cwd: &str,
+    agent_dir: &std::path::Path,
+    options: &[crate::trust::TrustOption],
+) -> anyhow::Result<Option<usize>> {
+    let items: Vec<super::picker::PickerItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| super::picker::PickerItem {
+            display: o.label.clone(),
+            value: i.to_string(),
+        })
+        .collect();
+    let mut picker = super::picker::Picker::new("Trust project folder?", items);
+    // The user's keybindings (same load/fallback pattern as the TUI).
+    let kb = crate::tui::keybindings::KeybindingManager::load(agent_dir).unwrap_or_default();
+
+    let mut backend = CrosstermBackend::new(std::io::stdout());
+    terminal::enable_raw_mode().context("enabling raw mode")?;
+    execute!(backend, EnterAlternateScreen)?;
+    let mut term = Terminal::new(backend).context("init terminal")?;
+
+    // Stdin reader: crossterm's blocking poll+read into a channel (the same
+    // pattern as run(), but a std channel — a plain blocking `recv` is safe
+    // on this (runtime) thread; tokio's `blocking_recv` would panic).
+    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<TermEvent>();
+    let reader_stop = Arc::new(AtomicBool::new(false));
+    let reader_stop_r = reader_stop.clone();
+    let reader = std::thread::spawn(move || loop {
+        if reader_stop_r.load(Ordering::Relaxed) {
+            break;
+        }
+        match event::poll(Duration::from_millis(50)) {
+            Ok(true) => {
+                if let Ok(ev) = event::read() {
+                    if stdin_tx.send(ev).is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(_) => break,
+        }
+    });
+
+    let muted = Style::default().fg(Color::DarkGray);
+    let accent = Style::default().fg(Color::Cyan);
+    let result = (|| -> anyhow::Result<Option<usize>> {
+        loop {
+            if let Err(e) = term.autoresize() {
+                eprintln!("[tui] resize: {e}");
+            }
+            term.draw(|f| {
+                let mut lines: Vec<Line> = vec![
+                    Line::from(Span::styled(
+                        "Trust project folder?",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(cwd.to_string(), muted)),
+                    Line::from(Span::raw("")),
+                    Line::from(Span::styled(
+                        "This allows pi-rust to load the project's .pi settings, mcp.json and skills.",
+                        muted,
+                    )),
+                    Line::from(Span::raw("")),
+                ];
+                // The picker's rows (its title line is replaced by the
+                // header above).
+                lines.extend(
+                    picker
+                        .render_rows(accent, Style::default(), muted)
+                        .into_iter()
+                        .skip(1),
+                );
+                lines.push(Line::from(Span::raw("")));
+                lines.push(Line::from(Span::styled(
+                    "\u{2191}\u{2193} choose \u{b7} enter ok \u{b7} esc cancel",
+                    muted,
+                )));
+                Paragraph::new(lines).render(f.area(), f.buffer_mut());
+            })?;
+            match stdin_rx.recv() {
+                Ok(TermEvent::Key(k)) => match picker.handle_key(&k, &kb) {
+                    Some(super::picker::PickerOutcome::Selected { value, .. }) => {
+                        return Ok(Some(value.parse::<usize>().unwrap_or(0)));
+                    }
+                    Some(super::picker::PickerOutcome::Cancelled) => return Ok(None),
+                    None => {}
+                },
+                Ok(TermEvent::Resize(_, _)) => {}
+                Ok(_) => {}
+                // The reader exited (terminal error): treat as cancel.
+                Err(_) => return Ok(None),
+            }
+        }
+    })();
+
+    // Always restore the terminal, even on error.
+    reader_stop.store(true, Ordering::Relaxed);
+    let _ = term.show_cursor();
+    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    let _ = terminal::disable_raw_mode();
+    let _ = reader.join();
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    // The prompt loop is PTY-tested end to end (tests/tui.rs); the in-crate
+    // coverage for the picker input semantics lives in tui/picker.rs.
 }

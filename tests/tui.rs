@@ -591,6 +591,326 @@ fn tui_interactive_smoke() {
     );
 }
 
+/// WP-1102 acceptance: the startup trust prompt (D6) — a project with
+/// trust-requiring resources, no stored decision and the default "ask"
+/// resolves to the interactive prompt BEFORE the TUI; selecting "Trust"
+/// persists the decision and the TUI starts trusted (no warning line).
+const PYTHON_TRUST_PROMPT: &str = r#"
+#!/usr/bin/env python3
+import os, pty, select, sys, time, fcntl, termios, struct, re
+
+BIN = os.path.join(sys.argv[1], "target", "debug", "pi-rust")
+WORKDIR = sys.argv[2]
+AGENT_DIR = sys.argv[3]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["PI_RUST_SIDECAR"] = os.path.join(sys.argv[1], "sidecar", "index.mjs")
+    os.chdir(WORKDIR)
+    os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR])
+
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+
+ROWS, COLS = 24, 120
+grid = [[" "] * COLS for _ in range(ROWS)]
+cur = [0, 0]
+
+def feed(data: bytes):
+    i, n = 0, len(data)
+    while i < n:
+        b = data[i:i+1]
+        if b == b"\x1b":
+            m = re.match(rb"\x1b\[(\d+);(\d+)H", data[i:])
+            if m:
+                cur[0] = min(int(m.group(1)) - 1, ROWS - 1)
+                cur[1] = min(int(m.group(2)) - 1, COLS - 1)
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b.", data[i:])
+            if m:
+                i += 2
+                continue
+            i += 1
+            continue
+        if b == b"\r":
+            cur[1] = 0
+            i += 1
+            continue
+        if b == b"\n":
+            cur[0] = min(cur[0] + 1, ROWS - 1)
+            i += 1
+            continue
+        if 32 <= data[i] < 127:
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = chr(data[i])
+            cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
+        i += 1
+
+def screen_text():
+    return "\n".join("".join(r).rstrip() for r in grid)
+
+def wait_for(needle: bytes, timeout=15.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return needle in screen_text().encode("latin-1")
+            if not data:
+                return needle in screen_text().encode("latin-1")
+            feed(data)
+            if needle in screen_text().encode("latin-1"):
+                return True
+    return needle in screen_text().encode("latin-1")
+
+steps = []
+steps.append(wait_for(b"Trust project folder?"))        # startup prompt (before the TUI)
+steps.append(wait_for(b"Do not trust"))                 # the 5 options render
+os.write(fd, b"\r")                                     # select "Trust" (first option)
+steps.append(wait_for(b"fake/fake"))                    # TUI ready (trusted)
+steps.append(not wait_for(b"Project is not trusted", timeout=2.0))  # no warning when trusted
+os.write(fd, b"\x04")                                   # ctrl+d exit
+
+time.sleep(0.5)
+try:
+    os.close(fd)
+except OSError:
+    pass
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+sys.stderr.write(screen_text())
+sys.stderr.write("\n===EXIT %d STEPS %s\n" % (code, "".join(map(str, steps))))
+sys.exit(0 if (code == 0 and all(steps)) else 11)
+"#;
+
+/// WP-1102 acceptance: the untrusted warning line (D6) + `/trust` — a
+/// stored `false` decision starts untrusted (the warning renders),
+/// `/trust` re-opens the selector, and the selection persists with the
+/// "Saved trust decision" status line (no live re-resolve).
+const PYTHON_TRUST_CMD: &str = r#"
+#!/usr/bin/env python3
+import os, pty, select, sys, time, fcntl, termios, struct, re
+
+BIN = os.path.join(sys.argv[1], "target", "debug", "pi-rust")
+WORKDIR = sys.argv[2]
+AGENT_DIR = sys.argv[3]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["PI_RUST_SIDECAR"] = os.path.join(sys.argv[1], "sidecar", "index.mjs")
+    os.chdir(WORKDIR)
+    os.execvp(BIN, [BIN, "--provider", "fake", "--agent-dir", AGENT_DIR])
+
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+
+ROWS, COLS = 24, 120
+grid = [[" "] * COLS for _ in range(ROWS)]
+cur = [0, 0]
+
+def feed(data: bytes):
+    i, n = 0, len(data)
+    while i < n:
+        b = data[i:i+1]
+        if b == b"\x1b":
+            m = re.match(rb"\x1b\[(\d+);(\d+)H", data[i:])
+            if m:
+                cur[0] = min(int(m.group(1)) - 1, ROWS - 1)
+                cur[1] = min(int(m.group(2)) - 1, COLS - 1)
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\[[0-9;?]*[A-Za-z]", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?", data[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+            m = re.match(rb"\x1b.", data[i:])
+            if m:
+                i += 2
+                continue
+            i += 1
+            continue
+        if b == b"\r":
+            cur[1] = 0
+            i += 1
+            continue
+        if b == b"\n":
+            cur[0] = min(cur[0] + 1, ROWS - 1)
+            i += 1
+            continue
+        if 32 <= data[i] < 127:
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = chr(data[i])
+            cur[1] = min(cur[1] + 1, COLS - 1)
+        elif data[i] >= 0xC0:
+            length = 2 if data[i] < 0xE0 else 3
+            if cur[0] < ROWS and cur[1] < COLS:
+                grid[cur[0]][cur[1]] = "."
+            cur[1] = min(cur[1] + 1, COLS - 1)
+            i += length
+            continue
+        i += 1
+
+def screen_text():
+    return "\n".join("".join(r).rstrip() for r in grid)
+
+def wait_for(needle: bytes, timeout=15.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return needle in screen_text().encode("latin-1")
+            if not data:
+                return needle in screen_text().encode("latin-1")
+            feed(data)
+            if needle in screen_text().encode("latin-1"):
+                return True
+    return needle in screen_text().encode("latin-1")
+
+steps = []
+steps.append(wait_for(b"fake/fake"))                    # TUI ready (stored untrusted: no prompt)
+steps.append(wait_for(b"Project is not trusted:"))      # the untrusted warning line
+os.write(fd, b"/trust")
+os.write(fd, b"\r")                                     # complete / submit the command
+os.write(fd, b"\r")
+steps.append(wait_for(b"Trust parent folder"))          # the /trust selector opened
+os.write(fd, b"\r")                                     # select "Trust" (first option)
+steps.append(wait_for(b"Saved trust decision: trusted. Restart pi for this to take effect."))
+os.write(fd, b"\x04")                                   # ctrl+d exit
+
+time.sleep(0.5)
+try:
+    os.close(fd)
+except OSError:
+    pass
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+sys.stderr.write(screen_text())
+sys.stderr.write("\n===EXIT %d STEPS %s\n" % (code, "".join(map(str, steps))))
+sys.exit(0 if (code == 0 and all(steps)) else 11)
+"#;
+
+#[test]
+fn tui_trust_startup_prompt() {
+    // WP-1108: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1102)");
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("pi-rust-tui-trustp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    // A trust-requiring resource so resolution reaches the interactive ask.
+    std::fs::create_dir_all(tmp.join(".pi/skills/proj")).unwrap();
+    std::fs::write(
+        tmp.join(".pi/skills/proj/SKILL.md"),
+        "---\nname: proj\ndescription: p\n---\nb",
+    )
+    .unwrap();
+
+    let py = tmp.join("trust_prompt_harness.py");
+    std::fs::write(&py, PYTHON_TRUST_PROMPT).unwrap();
+
+    let out = Command::new("python3")
+        .args([
+            py.display().to_string().as_str(),
+            repo().display().to_string().as_str(),
+            tmp.display().to_string().as_str(),
+            tmp.join("agent-dir").display().to_string().as_str(),
+        ])
+        .output()
+        .expect("running trust-prompt pty harness");
+    let screen = String::from_utf8_lossy(&out.stderr).to_string();
+    let code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 0,
+        "pty trust-prompt harness failed (prompt not shown/answered). Screen:\n{screen}"
+    );
+    // "Trust" (the first option) persisted the decision for the cwd.
+    let trust = std::fs::read_to_string(tmp.join("agent-dir/trust.json")).unwrap_or_default();
+    let key = std::fs::canonicalize(&tmp).unwrap();
+    assert!(trust.contains(&format!("\"{}\"", key.display())), "{trust}");
+    assert!(trust.contains("true"), "{trust}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn tui_trust_command_and_warning() {
+    // WP-1108: the PTY harness needs the POSIX pty module; Windows runs the
+    // headless suite only (manual TUI smoke checklist instead).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1102)");
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("pi-rust-tui-trustc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    // A trust-requiring resource + a stored "false" decision: the run starts
+    // untrusted (no prompt) with the warning line.
+    std::fs::create_dir_all(tmp.join(".pi/skills/proj")).unwrap();
+    std::fs::write(
+        tmp.join(".pi/skills/proj/SKILL.md"),
+        "---\nname: proj\ndescription: p\n---\nb",
+    )
+    .unwrap();
+    let agent = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent).unwrap();
+    let key = std::fs::canonicalize(&tmp).unwrap();
+    std::fs::write(
+        agent.join("trust.json"),
+        format!("{{\"{}\": false}}", key.display()),
+    )
+    .unwrap();
+
+    let py = tmp.join("trust_cmd_harness.py");
+    std::fs::write(&py, PYTHON_TRUST_CMD).unwrap();
+
+    let out = Command::new("python3")
+        .args([
+            py.display().to_string().as_str(),
+            repo().display().to_string().as_str(),
+            tmp.display().to_string().as_str(),
+            agent.display().to_string().as_str(),
+        ])
+        .output()
+        .expect("running trust-cmd pty harness");
+    let screen = String::from_utf8_lossy(&out.stderr).to_string();
+    let code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 0,
+        "pty /trust harness failed (warning/selector/status line missing). Screen:\n{screen}"
+    );
+    // The /trust selection persisted the decision (true replaces false).
+    let trust = std::fs::read_to_string(agent.join("trust.json")).unwrap_or_default();
+    assert!(trust.contains(&format!("\"{}\"", key.display())), "{trust}");
+    assert!(trust.contains("true"), "{trust}");
+    assert!(!trust.contains("false"), "{trust}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn tui_slash_command_roundtrip() {
     // WP-1008: the PTY harness needs the POSIX pty module; Windows runs the
