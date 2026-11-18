@@ -44,7 +44,7 @@ functional-parity standard (pixel-perfect stays a non-goal).
 | 4 | Light/dark auto-pair following terminal appearance | `theme-controller.ts:200-253`, `settings-selector.ts:342-373` | `src/tui/theme.rs` (`resolve_theme_setting`) | documented-out | needs terminal color-scheme OSC query; crossterm has no query API in v0 |
 | 5 | Runtime theme switch | `theme-controller.ts` `setThemeName` | `/theme <name>` + `set_theme` event + `pi.setTheme` | already-safe | implemented |
 | 6 | Token grammar / 60 tokens / dark+light JSON / custom themes | `theme/theme.ts`, `light.json`, `dark.json`, `oklab.ts` | `src/tui/theme.rs` + `src/tui/themes/` | already-safe | verbatim port + golden vectors |
-| 7 | Project `<cwd>/.pi/mcp.json` per-location MCP (+override merge, trust gate, `autoEnableCodemode`) | `extensions/mcp/config.ts:92-178` | `src/config.rs:85-100` (agent-dir only) | documented-out | needs a project-trust model, which the headless core does not have (same documented v0 non-goal as the `.pi/settings.json` merge, `src/cli.rs:433`); without the gate it would run code from an untrusted cwd. The WP trigger ("where an unmodified extension depends on them") does not hold: the upstream built-in mcp extension is host-fed (pi-rust passes the loaded `mcpConfig` via init) and reads no project file itself. Reopen together with a trust model |
+| 7 | Project `<cwd>/.pi/mcp.json` per-location MCP (+override merge, trust gate, `autoEnableCodemode`) | `extensions/mcp/config.ts:92-178` | `src/config.rs:85-100` (agent-dir only) | **gate delivered (WP-1102); merge pending (WP-1103)** | The blocking precondition — a project-trust model — landed in WP-1102 (`src/trust.rs`, per-path `trust.json` store, `--approve`/`--no-approve`, `/trust`, headless default-deny). The per-location `mcp.json` merge itself is WP-1103 (same milestone, next WP); until then the project file stays unread. The original documented-out rationale ("needs a trust model; reopen together with a trust model") is superseded 2026-11-17 |
 | 8 | Keybinding deltas (linux non-WSL) | `packages/tui/src/keybindings.ts` | `src/tui/keybindings.rs` | already-safe | all 47 TUI + 43 APP actions match line-by-line; golden test asserts the set |
 | 9 | Win32/WSL + darwin keybinding platform overrides | `core/keybindings.ts` `useWindowsKeybindings` | hardcoded linux table | documented-out | platform-override table is a v1 nicety; documented, not wired |
 | 10 | Keybinding manager hot `reload()` / user-binding API | `core/keybindings.ts` | `KeybindingManager::load` (load-once) | documented-out | minor; no unmodified extension depends on it in v0 |
@@ -53,7 +53,7 @@ functional-parity standard (pixel-perfect stays a non-goal).
 | 13 | Stale doc: "picker/theme actions resolve but are unwired" | `odd/tasks/m6-interactive-tui.md:123` | wired by WP-609/WP-607 | **doc fix (T9d)** | stale v0 note |
 
 ### Tasks
-- ~~T9a~~ — project `.pi/mcp.json` loading — **re-evaluated: documented-out** (needs a trust model; see item 7)
+- ~~T9a~~ — project `.pi/mcp.json` loading — **re-evaluated: documented-out** (needs a trust model; see item 7) — **superseded (2026-11-17): the trust model landed in WP-1102; the per-location merge is WP-1103**
 - T9b — `imageUnsupportedByModel` detail + TUI-only read warning + per-request image swap + tests — done (`53492be`)
 - T9c — BashCapture Drop cleanup + regression test — done (`f709caa`)
 - T9d — this table + stale m6 doc line + PTY/full-suite matrix re-run

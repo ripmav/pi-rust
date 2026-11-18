@@ -2,8 +2,8 @@
 //!
 //! Upstream reads the global settings file from the agent dir; project
 //! `cwd/.pi/settings.json` is only merged in for trusted projects — the
-//! headless core has no trust model, so it reads the global file only
-//! (WP-301 scope; recorded in the WP file).
+//! trust model landed in WP-1102 (gate + `defaultProjectTrust`), the
+//! settings merge itself is WP-1103.
 //!
 //! Unknown keys are ignored (forward compat). Missing file = all defaults.
 use anyhow::{bail, Context, Result};
@@ -27,6 +27,11 @@ pub struct AgentConfig {
     /// Settings `theme` (consumed by M6 WP-607): a theme name, or a
     /// `light/dark` auto pair (v0 takes the dark side).
     pub theme: Option<String>,
+    /// Settings `defaultProjectTrust` (WP-1102, D4): `"ask"` (default) |
+    /// `"always"` | `"never"` — the fallback when a project with trust-
+    /// requiring resources has no stored decision. Unknown values are an
+    /// error naming the path (consistent with the other settings errors).
+    pub default_project_trust: Option<String>,
 }
 
 /// Loads `<agent_dir>/settings.json`; absent file → defaults, malformed
@@ -40,6 +45,16 @@ pub fn load(agent_dir: &Path) -> Result<AgentConfig> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: AgentConfig = serde_json::from_str(&raw)
         .with_context(|| format!("parsing agent settings {}", path.display()))?;
+    // WP-1102 (D4): closed value set, validated here (unknown value → error
+    // naming the path, same rule as the other settings errors).
+    if let Some(v) = &parsed.default_project_trust {
+        if !matches!(v.as_str(), "ask" | "always" | "never") {
+            bail!(
+                "invalid defaultProjectTrust value '{v}' in {} (valid: ask, always, never)",
+                path.display()
+            );
+        }
+    }
     Ok(parsed)
 }
 
@@ -80,8 +95,8 @@ pub fn resolve_provider_flags(
 /// Upstream shape `{"mcpServers": {...}}` (the file `loadMcpConfig` reads);
 /// absent file → `Ok(None)` (no MCP servers). Malformed file, a non-object
 /// top level, or a non-object `mcpServers` → error naming the path (same
-/// rule as settings.json). Project `<cwd>/.pi/mcp.json` is a documented v0
-/// non-goal (agent-dir only, same rule as settings.json).
+/// rule as settings.json). Project `<cwd>/.pi/mcp.json` is gated by the
+/// WP-1102 trust model; the per-location merge is WP-1103.
 pub fn load_mcp_config(agent_dir: &Path) -> Result<Option<Value>> {
     let path = agent_dir.join("mcp.json");
     if !path.exists() {
@@ -148,6 +163,33 @@ mod tests {
         let d = tmpdir();
         std::fs::write(d.join("settings.json"), "{not json").unwrap();
         let err = load(&d).unwrap_err().to_string();
+        assert!(err.contains("settings.json"), "{err}");
+    }
+
+    #[test]
+    fn default_project_trust_valid_values_load() {
+        for v in ["ask", "always", "never"] {
+            let d = tmpdir();
+            std::fs::write(
+                d.join("settings.json"),
+                format!("{{\"defaultProjectTrust\":\"{v}\"}}"),
+            )
+            .unwrap();
+            let cfg = load(&d).unwrap();
+            assert_eq!(cfg.default_project_trust.as_deref(), Some(v));
+        }
+    }
+
+    #[test]
+    fn default_project_trust_unknown_value_errors_with_path() {
+        let d = tmpdir();
+        std::fs::write(
+            d.join("settings.json"),
+            r#"{"defaultProjectTrust":"sometimes"}"#,
+        )
+        .unwrap();
+        let err = load(&d).unwrap_err().to_string();
+        assert!(err.contains("defaultProjectTrust"), "{err}");
         assert!(err.contains("settings.json"), "{err}");
     }
 

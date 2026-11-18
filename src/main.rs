@@ -14,6 +14,7 @@ mod skills;
 mod templates;
 mod tools;
 mod transport;
+mod trust;
 mod tui;
 
 use anyhow::Result;

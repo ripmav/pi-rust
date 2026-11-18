@@ -3746,3 +3746,63 @@ fn wp1007_oauth_credential_refreshes_before_provider_call() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// WP-1102 (D2): a project extension under <cwd>/.pi/extensions/ loads only
+/// when the project is trusted. Default resolution for a trust-requiring
+/// project in headless mode ("ask" + no UI) = not trusted.
+#[test]
+fn project_extensions_gated_on_trust() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-trust-ext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let proj = tmp.join("proj");
+    std::fs::create_dir_all(proj.join(".pi/extensions")).unwrap();
+    std::fs::copy(
+        repo().join("tests/fixtures/trust-marker.ts"),
+        proj.join(".pi/extensions/trust-marker.ts"),
+    )
+    .unwrap();
+    let scenario = json!({ "user_messages": ["hi"], "model_scripts": [[{ "text": "done" }]] });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let run = |extra: &[&std::ffi::OsStr]| -> String {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+        cmd.current_dir(&proj)
+            .arg("--agent-dir")
+            .arg(&agent_dir)
+            .arg("--scenario")
+            .arg(&scen)
+            .arg("--session-file")
+            .arg(&session_file);
+        for a in extra {
+            cmd.arg(a);
+        }
+        let out = cmd.output().expect("running pi-rust");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "pi-rust exited non-zero\n{stderr}"
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Untrusted (headless "ask" = deny): the project extension never ran.
+    let untrusted = run(&[]);
+    assert!(
+        !untrusted.contains("TRUST-MARKER-SENTINEL"),
+        "project extension took effect in an untrusted project"
+    );
+
+    // --approve: the project extension is loaded and its system-prompt
+    // injection lands in the before_agent_start decision.
+    let trusted = run(&[std::ffi::OsStr::new("--approve")]);
+    assert!(
+        trusted.contains("TRUST-MARKER-SENTINEL"),
+        "project extension missing with --approve"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

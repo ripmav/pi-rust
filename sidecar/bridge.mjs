@@ -107,6 +107,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	// ---- state (filled by init)
 	let runner = null;
 	let extensions = [];
+	let projectTrusted = false; // WP-1102 (D2): project-scoped extension gate
 	let session = null;
 	let dialog = null;
 	let paneHost = null; // WP-1006
@@ -545,10 +546,29 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			process.exit(1);
 		}
 		capabilities = { ui: command.capabilities?.ui ?? [], timeoutMs: command.capabilities?.timeoutMs ?? 30000 };
+		// WP-1102 (D2): the core resolves project trust before spawning the
+		// sidecar and sends the decision here. Absent = untrusted (safe
+		// default; every core build sends it).
+		projectTrusted = command.projectTrusted === true;
 		log(`loading extensions (dirs: ${JSON.stringify(extensionDirs)}, cwd: ${cwd})`);
 
 		const loaded = await ca.discoverAndLoadExtensions(extensionDirs, cwd, agentDir, ca.createEventBus());
-		extensions = loaded.extensions;
+		let exts = loaded.extensions;
+		if (!projectTrusted) {
+			// Trust gate: project-scope extensions (<cwd>/.pi/...) are not
+			// loaded for untrusted projects (upstream gates the same surface;
+			// agent-dir and explicitly configured paths are user/CLI scope).
+			const projectPrefix = path.join(cwd, ".pi");
+			exts = exts.filter((e) => {
+				const p = e.sourceInfo?.path;
+				if (!p || p.startsWith("<")) return true; // builtins/synthetic: never project scope
+				const canon = path.resolve(p);
+				return !(canon === projectPrefix || canon.startsWith(projectPrefix + path.sep));
+			});
+			const excluded = loaded.extensions.length - exts.length;
+			if (excluded > 0) log(`trust gate: excluded ${excluded} project extension(s) (untrusted)`);
+		}
+		extensions = exts;
 		loaded.errors.forEach((e) => log(`extension load error ${e.path}: ${e.error}`));
 		session = createSessionView(cwd);
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
@@ -569,7 +589,7 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			getModel: () => session.view.model,
 			getScopedModels: () => [],
 			isIdle: () => true,
-			isProjectTrusted: () => true,
+			isProjectTrusted: () => projectTrusted,
 			getSignal: () => undefined,
 			abort: () => {},
 			hasPendingMessages: () => false,

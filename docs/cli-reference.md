@@ -25,6 +25,8 @@ usage: pi-rust [options]
   -p, --print               print mode: stdout = final assistant text only (same as --mode text)
   --mode <m>                text|json|rpc — text = --print; json = upstream-shaped event stream; rpc = the upstream NDJSON command protocol on stdin/stdout (no --prompt/--scenario)
   --bench                   measure the perf baseline (cold start, idle RSS, bridge throughput), then exit
+  --approve, -a             Trust project-local files for this run
+  --no-approve, -na         Ignore project-local files for this run
   --version                 print the version and exit
   -h, --help                show this help and exit
 

@@ -270,10 +270,24 @@ pub fn load_from_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<Skill> {
 
 /// Upstream `loadSkills` core: agent dir first, then project dir;
 /// first-loaded name wins (collisions are warned).
-pub fn load(agent_dir: &Path, cwd: &Path, warnings: &mut Vec<String>) -> Vec<Skill> {
+///
+/// WP-1102 (D8): the project skill dir `<cwd>/.pi/skills` is scanned only
+/// when the project is trusted (upstream package-manager gate);
+/// `<agentDir>/skills` is always scanned.
+pub fn load(
+    agent_dir: &Path,
+    cwd: &Path,
+    project_trusted: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<Skill> {
     let mut out: Vec<Skill> = Vec::new();
     let mut names: std::collections::HashSet<String> = Default::default();
-    for dir in [agent_dir.join("skills"), cwd.join(".pi").join("skills")] {
+    let dirs: Vec<PathBuf> = if project_trusted {
+        vec![agent_dir.join("skills"), cwd.join(".pi").join("skills")]
+    } else {
+        vec![agent_dir.join("skills")]
+    };
+    for dir in dirs {
         for s in load_from_dir(&dir, warnings) {
             if !names.insert(s.name.clone()) {
                 warnings.push(format!(
@@ -487,7 +501,7 @@ mod tests {
             "---\nname: proj\ndescription: project skill\n---\nbody",
         );
         let mut w = Vec::new();
-        let s = load(&agent, &cwd, &mut w);
+        let s = load(&agent, &cwd, true, &mut w);
         // `loose.md` (root .md, no name field) falls back to the parent dir
         // name "skills" — upstream `parentDirName` behavior. readdir order
         // is filesystem-dependent, so compare as a set.
@@ -603,13 +617,39 @@ mod tests {
             "---\nname: dup\ndescription: project one\n---\nbody",
         );
         let mut w = Vec::new();
-        let s = load(&agent, &cwd, &mut w);
+        let s = load(&agent, &cwd, true, &mut w);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].description, "agent one");
         assert!(
             w.iter().any(|m| m.starts_with("name \"dup\" collision")),
             "{w:?}"
         );
+    }
+
+    // WP-1102 (D8): the project skill dir is trust-gated; agent-dir skills
+    // are always scanned.
+    #[test]
+    fn project_skills_gated_on_trust() {
+        let d = dir();
+        let agent = d.join("agent");
+        let cwd = d.join("cwd");
+        skill(
+            &agent,
+            "skills/greet/SKILL.md",
+            "---\nname: greet\ndescription: agent greet\n---\nbody",
+        );
+        skill(
+            &cwd,
+            ".pi/skills/proj/SKILL.md",
+            "---\nname: proj\ndescription: project skill\n---\nbody",
+        );
+        let names = |trusted: bool| {
+            let mut s = load(&agent, &cwd, trusted, &mut Vec::new());
+            s.sort_by(|a, b| a.name.cmp(&b.name));
+            s.into_iter().map(|x| x.name).collect::<Vec<_>>()
+        };
+        assert_eq!(names(true), vec!["greet", "proj"], "trusted: both dirs");
+        assert_eq!(names(false), vec!["greet"], "untrusted: agent dir only");
     }
 
     #[test]

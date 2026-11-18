@@ -1,7 +1,8 @@
 //! Prompt templates (WP-307), ported semantics from upstream
 //! `core/prompt-templates.ts` with recorded v0 deviations:
 //! - discovery: `<agentDir>/prompts/*.md` + `<cwd>/.pi/prompts/*.md`
-//!   (project wins on name collisions)
+//!   (project wins on name collisions; project dir only when the project
+//!   is trusted — WP-1102 D2)
 //! - name = file stem (frontmatter is NOT parsed in v0 — content is the
 //!   raw file)
 //! - expansion: `$1`..`$9`, `$@`/`$ARGUMENTS`, `${N:-default}`,
@@ -17,9 +18,13 @@ pub struct Template {
 }
 
 /// Discovers prompt templates; project-dir templates shadow agent-dir ones.
-pub fn discover(agent_dir: &Path, cwd: &Path) -> Vec<Template> {
+/// The project dir is only scanned when `project_trusted` (WP-1102 D2).
+pub fn discover(agent_dir: &Path, cwd: &Path, project_trusted: bool) -> Vec<Template> {
     let mut map: std::collections::BTreeMap<String, Template> = std::collections::BTreeMap::new();
     for dir in [agent_dir.join("prompts"), cwd.join(".pi").join("prompts")] {
+        if dir == cwd.join(".pi").join("prompts") && !project_trusted {
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -162,8 +167,14 @@ pub fn expand(content: &str, args: &[String]) -> String {
 }
 
 /// Resolves a template by name and expands it with the given argument string.
-pub fn apply(agent_dir: &Path, cwd: &Path, name: &str, arg_string: &str) -> Result<String> {
-    let t = discover(agent_dir, cwd)
+pub fn apply(
+    agent_dir: &Path,
+    cwd: &Path,
+    project_trusted: bool,
+    name: &str,
+    arg_string: &str,
+) -> Result<String> {
+    let t = discover(agent_dir, cwd, project_trusted)
         .into_iter()
         .find(|t| t.name == name)
         .ok_or_else(|| {
@@ -199,11 +210,44 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".pi/prompts")).unwrap();
         std::fs::write(cwd.join(".pi/prompts/greet.md"), "proj-greet $1").unwrap();
         std::fs::write(cwd.join(".pi/prompts/notes.txt"), "not a template").unwrap();
-        let t = discover(&agent, &cwd);
+        let t = discover(&agent, &cwd, true);
         let names: Vec<&str> = t.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, vec!["greet", "only-agent"], "{names:?}");
         let greet = t.iter().find(|x| x.name == "greet").unwrap();
         assert_eq!(greet.content, "proj-greet $1", "project shadows agent");
+    }
+
+    #[test]
+    fn project_prompts_gated_on_trust() {
+        let d = dir();
+        let agent = d.join("agent");
+        std::fs::create_dir_all(agent.join("prompts")).unwrap();
+        std::fs::write(agent.join("prompts/only-agent.md"), "A").unwrap();
+        let cwd = d.join("cwd");
+        std::fs::create_dir_all(cwd.join(".pi/prompts")).unwrap();
+        std::fs::write(cwd.join(".pi/prompts/proj.md"), "P").unwrap();
+
+        let untrusted = discover(&agent, &cwd, false);
+        assert_eq!(
+            untrusted
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["only-agent"],
+            "project prompts hidden when untrusted"
+        );
+        let err = apply(&agent, &cwd, false, "proj", "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("proj"), "{err}");
+
+        let trusted = discover(&agent, &cwd, true);
+        assert_eq!(
+            trusted.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            vec!["only-agent", "proj"],
+            "agent-dir prompts unaffected by trust"
+        );
+        assert_eq!(apply(&agent, &cwd, true, "proj", "x").unwrap(), "P");
     }
 
     #[test]
@@ -234,7 +278,7 @@ mod tests {
     #[test]
     fn apply_unknown_template_is_typed_error() {
         let d = dir();
-        let err = apply(&d, &d, "nope", "").unwrap_err().to_string();
+        let err = apply(&d, &d, true, "nope", "").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
     }
 }

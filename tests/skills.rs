@@ -66,6 +66,9 @@ fn wp801_skill_block_in_system_prompt() {
         .arg(tmp.join("agent"))
         .arg("--session-file")
         .arg(tmp.join("session.jsonl"))
+        // WP-1102 (D8): project skills are trust-gated now — this test
+        // pins the TRUSTED path via the explicit grant.
+        .arg("--approve")
         .arg("--extension-dir")
         .arg(tmp.join("ext/capture.ts"))
         .output()
