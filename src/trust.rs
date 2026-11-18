@@ -372,6 +372,13 @@ mod tests {
         (root, a, b, sib)
     }
 
+    /// Same normalization the implementation applies (canonicalize with
+    /// fallback): expected values must use this, never the raw tmp path
+    /// (macOS /tmp -> /private/tmp symlink; Windows case folding).
+    fn canon(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
     // --- store: set/get, nearest-ancestor, null clears, canonicalization ---
 
     #[test]
@@ -406,7 +413,7 @@ mod tests {
         // get_entry carries the deciding path (upstream ProjectTrustStoreEntry).
         let e = store.get_entry(&deep).unwrap().unwrap();
         assert!(e.decision);
-        assert_eq!(Path::new(&e.path), b, "{e:?}");
+        assert_eq!(Path::new(&e.path), canon(&b), "{e:?}");
     }
 
     #[test]
@@ -423,8 +430,8 @@ mod tests {
         // The cleared key is gone from the file (upstream shape: null is
         // a clearing value, not a stored one).
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
-        assert!(!raw.contains(b.to_string_lossy().as_ref()), "{raw}");
-        assert!(raw.contains(a.to_string_lossy().as_ref()), "{raw}");
+        assert!(!raw.contains(canon(&b).to_string_lossy().as_ref()), "{raw}");
+        assert!(raw.contains(canon(&a).to_string_lossy().as_ref()), "{raw}");
         // A later set after a clear replaces cleanly.
         store.set(&b, Some(true)).unwrap();
         assert_eq!(store.get(&b).unwrap(), Some(true));
@@ -444,7 +451,7 @@ mod tests {
         assert_eq!(store.get(&proj).unwrap(), Some(false));
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
         // Both writes hit the one canonical key (no duplicate entries).
-        let key = proj.to_string_lossy().to_string();
+        let key = canon(&proj).to_string_lossy().to_string();
         assert_eq!(raw.matches(key.as_str()).count(), 1, "{raw}");
     }
 
@@ -515,8 +522,12 @@ mod tests {
         );
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
         assert!(
-            !raw.contains(b.to_string_lossy().as_ref()),
+            !raw.contains(canon(&b).to_string_lossy().as_ref()),
             "cleared key is removed: {raw}"
+        );
+        assert!(
+            raw.contains(canon(&a).to_string_lossy().as_ref()),
+            "parent key stored canonical: {raw}"
         );
     }
 
@@ -525,6 +536,7 @@ mod tests {
     #[test]
     fn options_order_labels_and_updates() {
         let (_root, a, b, _sib) = tree();
+        let (a, b) = (canon(&a), canon(&b));
         let opts = trust_options(&b, true);
         assert_eq!(opts.len(), 5);
         assert_eq!(
@@ -592,7 +604,10 @@ mod tests {
         assert_eq!(opts[0].label, "Trust");
         assert_eq!(
             opts[1].label,
-            format!("Trust parent folder ({})", b.parent().unwrap().display())
+            format!(
+                "Trust parent folder ({})",
+                canon(b.parent().unwrap()).display()
+            )
         );
         assert_eq!(opts[2].label, "Do not trust");
     }
