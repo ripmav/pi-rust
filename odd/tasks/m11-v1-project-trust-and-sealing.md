@@ -26,7 +26,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 ## Tasks
 - T1 / M11 setup — feature doc + todo + branch — S1 — branch `feat/wp-1101-upstream-pin-refresh` — commit: (see L2)
 - T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — **merged into main as `c3c5a91` (2026-11-16), CI 7/7 green (run 44158531958)** — commits `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
-- T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch: — PR: — commit:
+- T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch `feat/wp-1102-project-trust` — PR #147 — **merged into main as `7992629` (2026-11-18), CI 7/7 green (run 44396426386)** — commits `907eea8` (impl) + `686e614` (docs) + `c5272f2`/`8d78fd4`/`85c273d` (platform test fixes); native review attempted (`review-2c3d53db76ef3311`), provider size wall at 2152 lines, abandoned via `operator_disposition` (see L7); S3 met on CI + 374-test + identity-e2e evidence
 - T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch: — PR: — commit:
 - T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
 
@@ -73,3 +73,42 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   PR #146 created via GitHub REST API (the RDD guard's `gh pr create`
   repository resolution fails in this environment; git push and the REST
   API both work). CI on PR #146 running.
+- **L6** (2026-11-18): T3/WP-1102 implemented as an **upstream parity
+  port** (correcting the design framing — upstream has
+  `core/trust-manager.ts` + `project-trust.ts`). Delivered: `trust.json`
+  store (canonical path → true|false|null, nearest-ancestor lookup),
+  `resolve_project_trusted` in upstream order, `--approve`/`-a` +
+  `--no-approve`/`-na`, `defaultProjectTrust` setting, TUI startup
+  prompt (5 upstream options) + `/trust` + untrusted warning, headless
+  default-deny. Gates: project skills, prompts and extensions load only
+  when trusted. **D2 revision** (mid-implementation): pi-rust actually
+  loads `<cwd>/.pi/prompts` (core) and `<cwd>/.pi/extensions` (sidecar)
+  ungated — both added to the gate (sidecar `projectTrusted` init field
+  + path filter; hardcoded `isProjectTrusted: () => true` stub replaced).
+  S3 verified: 374/374 tests incl. identity e2e (untrusted = zero
+  effect), smoke 74/74, fmt + clippy clean.
+- **L7** (2026-11-18): Native review for the WP-1102 candidate (assess:
+  nativeRisk high, reviewDue): START failed 3× (1× `/tmp` 100% full →
+  3.9G stale scratch cleaned; 2× sanitized `native-operation-failed` —
+  root cause: two stale 0-byte locks from the disk-full crash in
+  `.git/gentle-ai/`, deleted with explicit user approval). After the
+  lock cleanup START succeeded: lineage `review-2c3d53db76ef3311`
+  (high, risk+reliability), but the host-relay reviewer
+  (`solheim/qwen3.8-27b`) hit the 15-minute provider limit on the 2152-
+  line candidate (900 s, `UND_ERR_SOCKET`, 65k thinking chars, 0 output —
+  the WP-1007 size wall; WP-1101 succeeded at 304 lines). User decision:
+  accept on evidence, deliver without the native review → lineage
+  abandoned `operator_disposition` (quarantine
+  `review-2c3d53db76ef3311-44075547`, no findings present), clone-scoped
+  review switch left **off** per user decision (global stays on).
+- **L8** (2026-11-18): CI platform fixes on PR #147 (test-only, behavior
+  unchanged): round 1 red on macOS (3) + Windows (5) — store
+  canonicalizes paths (macOS /tmp → /private/tmp symlink, Windows case
+  folding) but tests compared raw tmp paths → `canon` helper (`c5272f2`);
+  round 2 red on Windows (3) — substring checks on the stored JSON never
+  match Windows backslash-escaped paths → parse the JSON, compare keys
+  (`8d78fd4`); round 3 red on Windows (2 e2e) — trust.json fixtures
+  hand-embedded Windows paths via `format!` (invalid JSON escapes) →
+  `serde_json` writer (`85c273d`). Round 4: 7/7 green (run
+  44396426386, incl. bench + fresh-clone). Merged as `7992629`. M11 is
+  at 2/4 WPs; next: WP-1103 project `.pi/` config under the gate.

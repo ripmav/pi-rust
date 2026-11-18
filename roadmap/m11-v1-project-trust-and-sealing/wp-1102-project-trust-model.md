@@ -1,6 +1,6 @@
 # WP-1102 — Project trust model (parity port)
 
-**Milestone:** M11 · **Size:** L · **Status:** implemented (verification below) · **Depends on:** 1101
+**Milestone:** M11 · **Size:** L · **Status:** delivered — merged into main as `7992629` (PR #147, 2026-11-18) · **Depends on:** 1101
 
 ## Goal
 Port the upstream project-trust model (present in the pinned pi at
@@ -125,3 +125,18 @@ merge and project MCP config.
   trust 7, tui PTY 6, auth PTY 2 — 374/0; sidecar smoke 74/74.
 - Behavior changes (README-documented): project skills/prompts/
   extensions now load only when trusted.
+
+## Delivery record (2026-11-18)
+- PR #147, merged into main as `7992629`; CI 7/7 green on the final
+  run (44396426386, incl. bench baseline compare + fresh-clone).
+- Native review: lineage `review-2c3d53db76ef3311` (high,
+  risk+reliability) — the host-relay reviewer cannot complete a 2152-
+  line candidate (15-min provider limit, `UND_ERR_SOCKET`, 65k thinking
+  chars, 0 output — the WP-1007 size wall). Abandoned via
+  `operator_disposition` (quarantine `review-2c3d53db76ef3311-44075547`,
+  no findings present); accepted on CI + full-suite + identity-e2e
+  evidence. Clone-scoped review switch left off per operator decision.
+- CI platform fixes (test-only): macOS/Windows path canonicalization
+  expectations (`c5272f2`), JSON key checks via parsed file instead of
+  substring (`8d78fd4`), trust.json fixtures via serde_json
+  (`85c273d`).
