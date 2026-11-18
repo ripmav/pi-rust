@@ -379,6 +379,13 @@ mod tests {
         std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
     }
 
+    /// trust.json keys, parsed (never substring-match the file: Windows
+    /// path backslashes are JSON-escaped in the stored form).
+    fn trust_keys(raw: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        v.as_object().unwrap().keys().cloned().collect()
+    }
+
     // --- store: set/get, nearest-ancestor, null clears, canonicalization ---
 
     #[test]
@@ -430,8 +437,15 @@ mod tests {
         // The cleared key is gone from the file (upstream shape: null is
         // a clearing value, not a stored one).
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
-        assert!(!raw.contains(canon(&b).to_string_lossy().as_ref()), "{raw}");
-        assert!(raw.contains(canon(&a).to_string_lossy().as_ref()), "{raw}");
+        let keys = trust_keys(&raw);
+        assert!(
+            !keys.contains(&canon(&b).to_string_lossy().to_string()),
+            "{raw}"
+        );
+        assert!(
+            keys.contains(&canon(&a).to_string_lossy().to_string()),
+            "{raw}"
+        );
         // A later set after a clear replaces cleanly.
         store.set(&b, Some(true)).unwrap();
         assert_eq!(store.get(&b).unwrap(), Some(true));
@@ -451,8 +465,12 @@ mod tests {
         assert_eq!(store.get(&proj).unwrap(), Some(false));
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
         // Both writes hit the one canonical key (no duplicate entries).
-        let key = canon(&proj).to_string_lossy().to_string();
-        assert_eq!(raw.matches(key.as_str()).count(), 1, "{raw}");
+        let keys = trust_keys(&raw);
+        assert_eq!(
+            keys,
+            vec![canon(&proj).to_string_lossy().to_string()],
+            "{raw}"
+        );
     }
 
     #[cfg(unix)]
@@ -521,12 +539,13 @@ mod tests {
             "cleared entry falls back to the ancestor"
         );
         let raw = std::fs::read_to_string(store.trust_path()).unwrap();
+        let keys = trust_keys(&raw);
         assert!(
-            !raw.contains(canon(&b).to_string_lossy().as_ref()),
+            !keys.contains(&canon(&b).to_string_lossy().to_string()),
             "cleared key is removed: {raw}"
         );
         assert!(
-            raw.contains(canon(&a).to_string_lossy().as_ref()),
+            keys.contains(&canon(&a).to_string_lossy().to_string()),
             "parent key stored canonical: {raw}"
         );
     }
