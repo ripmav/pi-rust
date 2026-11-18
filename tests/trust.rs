@@ -34,6 +34,13 @@ export default function (pi: any) {
 "#;
 
 /// One headless run: agent skill `greet` + project skill `proj` in
+/// Writes a single-entry trust.json with proper JSON escaping (Windows
+/// path backslashes must not be hand-embedded into the JSON text).
+fn write_trust(agent: &Path, key: &Path, decision: bool) {
+    let v = serde_json::json!({ key.to_string_lossy().to_string(): decision });
+    std::fs::write(agent.join("trust.json"), v.to_string()).unwrap();
+}
+
 /// `<workdir>/.pi/skills`; returns (exit code, captured system prompt,
 /// stderr).
 fn run(workdir: &Path, agent: &Path, extra: &[&str]) -> (i32, String, String) {
@@ -147,11 +154,7 @@ fn stored_decisions_headless() {
     // {cwd: true}
     let (work, agent) = fixture("wp1102d");
     let key = std::fs::canonicalize(&work).unwrap();
-    std::fs::write(
-        agent.join("trust.json"),
-        format!("{{\"{}\": true}}", key.display()),
-    )
-    .unwrap();
+    write_trust(&agent, &key, true);
     let (code, prompt, stderr) = run(&work, &agent, &[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(has_proj(&prompt), "stored true must trust\n{prompt}");
@@ -160,11 +163,7 @@ fn stored_decisions_headless() {
     // {cwd: false}
     let (work, agent) = fixture("wp1102e");
     let key = std::fs::canonicalize(&work).unwrap();
-    std::fs::write(
-        agent.join("trust.json"),
-        format!("{{\"{}\": false}}", key.display()),
-    )
-    .unwrap();
+    write_trust(&agent, &key, false);
     let (code, prompt, stderr) = run(&work, &agent, &[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(!has_proj(&prompt), "stored false must not trust\n{prompt}");
@@ -186,11 +185,7 @@ fn stored_decisions_headless() {
         "---\nname: proj\ndescription: project skill\n---\nBody.",
     );
     let pkey = std::fs::canonicalize(&parent).unwrap();
-    std::fs::write(
-        agent.join("trust.json"),
-        format!("{{\"{}\": true}}", pkey.display()),
-    )
-    .unwrap();
+    write_trust(&agent, &pkey, true);
     let (code, prompt, stderr) = run(&work, &agent, &[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
@@ -206,11 +201,7 @@ fn stored_decisions_headless() {
 fn no_approve_overrides_stored_true() {
     let (work, agent) = fixture("wp1102g");
     let key = std::fs::canonicalize(&work).unwrap();
-    std::fs::write(
-        agent.join("trust.json"),
-        format!("{{\"{}\": true}}", key.display()),
-    )
-    .unwrap();
+    write_trust(&agent, &key, true);
     let (code, prompt, stderr) = run(&work, &agent, &["--no-approve"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
@@ -246,11 +237,7 @@ fn default_project_trust_always_never() {
     )
     .unwrap();
     let key = std::fs::canonicalize(&work).unwrap();
-    std::fs::write(
-        agent.join("trust.json"),
-        format!("{{\"{}\": true}}", key.display()),
-    )
-    .unwrap();
+    write_trust(&agent, &key, true);
     let (code, prompt, stderr) = run(&work, &agent, &[]);
     assert_eq!(code, 0, "{stderr}");
     // A stored decision wins over "never" (upstream order: step 4 before 5).
