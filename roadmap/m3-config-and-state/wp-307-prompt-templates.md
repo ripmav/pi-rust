@@ -15,5 +15,5 @@ to a prompt.
 - TUI rendering (WP-608).
 - Project `.pi/settings.json` merge — the documented v0 non-goal for the
   project settings merge (recorded in `src/config.rs`) is **superseded by
-  WP-1102** (the project trust gate, M11); the merge itself lands in
-  WP-1103 behind that gate.
+  WP-1102** (the project trust gate, M11) and **delivered in WP-1103**
+  (merged into main as `cb4b47c`, 2026-11-18) behind that gate.

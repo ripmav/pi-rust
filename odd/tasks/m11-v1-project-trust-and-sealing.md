@@ -27,7 +27,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 - T1 / M11 setup — feature doc + todo + branch — S1 — branch `feat/wp-1101-upstream-pin-refresh` — commit: (see L2)
 - T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — **merged into main as `c3c5a91` (2026-11-16), CI 7/7 green (run 44158531958)** — commits `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
 - T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch `feat/wp-1102-project-trust` — PR #147 — **merged into main as `7992629` (2026-11-18), CI 7/7 green (run 44396426386)** — commits `907eea8` (impl) + `686e614` (docs) + `c5272f2`/`8d78fd4`/`85c273d` (platform test fixes); native review attempted (`review-2c3d53db76ef3311`), provider size wall at 2152 lines, abandoned via `operator_disposition` (see L7); S3 met on CI + 374-test + identity-e2e evidence
-- T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch `feat/wp-1103-project-pi-config` — PR: — commit:
+- T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch `feat/wp-1103-project-pi-config` — PR #148 — **merged into main as `cb4b47c` (2026-11-18), CI 7/7 green first try (run 44612758644)** — commit `1f37087`; S4 met on CI + 394-test + MCP-roundtrip-e2e evidence
 - T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
 
 ## Log
@@ -139,3 +139,9 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   MCP surface, with the per-field merge unit-tested). S4 verified:
   394/394 suite (17 new unit + 3 new e2e), smoke 74/74, fmt + clippy
   clean.
+- **L10** (2026-11-18): WP-1103 delivered — PR #148 merged into main
+  as `cb4b47c`; CI 7/7 green on the first run (44612758644, incl. bench
+  + fresh-clone) — the WP-1102 platform lessons (canonicalized
+  expectations, parsed-JSON key checks, serde_json fixtures) paid off
+  immediately: no platform round. M11 is at 3/4 WPs; next: WP-1104
+  v1.0 sealing & release.

@@ -53,7 +53,7 @@ functional-parity standard (pixel-perfect stays a non-goal).
 | 13 | Stale doc: "picker/theme actions resolve but are unwired" | `odd/tasks/m6-interactive-tui.md:123` | wired by WP-609/WP-607 | **doc fix (T9d)** | stale v0 note |
 
 ### Tasks
-- ~~T9a~~ — project `.pi/mcp.json` loading — **re-evaluated: documented-out** (needs a trust model; see item 7) — **superseded (2026-11-17): the trust model landed in WP-1102; the per-location merge is WP-1103**
+- ~~T9a~~ — project `.pi/mcp.json` loading — **re-evaluated: documented-out** (needs a trust model; see item 7) — **delivered (2026-11-18): trust model WP-1102 + per-location merge WP-1103, merged as `cb4b47c`**
 - T9b — `imageUnsupportedByModel` detail + TUI-only read warning + per-request image swap + tests — done (`53492be`)
 - T9c — BashCapture Drop cleanup + regression test — done (`f709caa`)
 - T9d — this table + stale m6 doc line + PTY/full-suite matrix re-run

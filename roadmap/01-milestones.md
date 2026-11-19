@@ -17,7 +17,7 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 | M8 | Ecosystem | skills, RPC-mode parity, package + export-HTML evaluation | 801–804 | ✅ done (PRs #96–#99 merged) |
 | M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | ✅ delivered (2026-11-14, in main) |
 | M10 | v0.1 & ecosystem + platform | pin refresh, v0.1.0, tool-search/codemode/llama, ui.custom pane, oauth, Windows, TUI parity | 1001–1010 | delivered (2026-11-15) |
-| M11 | v1: project trust & sealing | pin cycle, project trust model, project `.pi/` config under the gate, v1.0 sealing & release | 1101–1104 | in progress (2/4: 1101+1102 delivered) |
+| M11 | v1: project trust & sealing | pin cycle, project trust model, project `.pi/` config under the gate, v1.0 sealing & release | 1101–1104 | in progress (3/4: 1101+1102+1103 delivered) |
 
 ## Milestone entry/exit
 

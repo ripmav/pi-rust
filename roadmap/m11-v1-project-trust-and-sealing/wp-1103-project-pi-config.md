@@ -1,6 +1,6 @@
 # WP-1103 — Project `.pi/` config under the trust gate
 
-**Milestone:** M11 · **Size:** M · **Status:** implemented (verification below) · **Depends on:** 1102
+**Milestone:** M11 · **Size:** M · **Status:** delivered — merged into main as `cb4b47c` (PR #148, 2026-11-18) · **Depends on:** 1102
 
 ## Goal
 Turn on the two documented project-config non-goals, gated by the WP-1102
@@ -69,3 +69,9 @@ trust model: `.pi/settings.json` merge (WP-307) and project
   project file (non-fatal reject) and the MCP surface applies.
 - Dead fields noted (pre-existing, untouched): `sessionDir` and
   `defaultTools` settings are parsed but never consumed.
+
+## Delivery record (2026-11-18)
+- PR #148 merged into main as `cb4b47c`; CI 7/7 green on the first run
+  (44612758644, incl. bench baseline compare + fresh-clone) — the
+  WP-1102 platform lessons (canonicalized expectations, parsed-JSON key
+  checks, serde_json fixtures) meant no platform round.
