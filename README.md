@@ -134,7 +134,7 @@ milestone (all milestone stacks are merged into `main`):
 | headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
 | `ctx.ui.custom` (descriptor pane: title/lines/list/input, live updates, keys; dialog-like timeout) | ✅ M10 (TUI; headless keeps the upstream noOp — WP-707 subset, full component model stays a non-goal) |
 | `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10 (the upstream oauth providers — radius, kimi-coding, github-copilot, xai, meta — are sidecar-routed; the token refresh + rotated write-back run sidecar-side, no token crosses the wire) |
-| project `.pi/` config under the trust gate (D8 project skills now; the settings merge + project MCP are WP-1103) | ✅ M11 (delivered (trusted projects) — gate, flags, `/trust`, store, WP-1102) |
+| project `.pi/` config under the trust gate (D8 project skills now; the settings merge + project MCP are WP-1103) | ✅ M11 (gate, flags, `/trust`, store — WP-1102; settings merge + project MCP — WP-1103) |
 
 Evaluated, documented v0 limits: `ctx.ui.custom` full component model (mouse, focus trees, overlays — WP-707 decision memo in
 `odd/tasks/m7-extension-completeness.md`; the descriptor subset ships in M10), bundled extensions beyond `mcp`
@@ -193,10 +193,27 @@ resources are every project surface pi-rust reads (D2): `settings.json`,
   (agent-dir and CLI/`--extension-dir` resources are unaffected).
   Untrusted projects with such resources no longer load them.
 
-The gate is delivered; the project `settings.json` merge and the project
-`mcp.json` wiring sit behind it in WP-1103. The earlier documented
-non-goals for project `.pi/` config (the WP-307 settings merge, the
-WP-1009 T9a project MCP) are superseded by this gate.
+**Project `.pi/` config under the gate (WP-1103):** for **trusted**
+projects only, pi-rust now also reads the two config files:
+
+- **`<cwd>/.pi/settings.json`** — merged over the agent-dir settings,
+  project values win per field (the documented WP-307 precedence).
+  An invalid project file is rejected with a logged message naming the
+  path; the session continues with the global settings (upstream
+  semantics — load errors are never fatal).
+- **`<cwd>/.pi/mcp.json`** — project MCP servers merged into the
+  agent-dir `mcp.json` with upstream `loadMcpConfig` semantics:
+  a full project entry replaces the same-named global server; an entry
+  without `command`/`url`/`type` is an override limited to
+  `enabled`/`exposure`/`toolExposure` (the global rest, including
+  credentials, is kept); `auth` on a project `url` server and
+  `-`/`_`-conflicting namespaces are rejected; top-level
+  `autoEnableCodemode` overrides the global. Rejected entries are
+  logged and skipped; the session keeps the valid servers.
+
+For **untrusted** projects neither file is read at all (zero effect —
+the earlier documented non-goals for project `.pi/` config are now
+delivered behind the gate).
 
 ### Sessions
 

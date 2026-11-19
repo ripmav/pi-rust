@@ -27,7 +27,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 - T1 / M11 setup — feature doc + todo + branch — S1 — branch `feat/wp-1101-upstream-pin-refresh` — commit: (see L2)
 - T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — **merged into main as `c3c5a91` (2026-11-16), CI 7/7 green (run 44158531958)** — commits `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
 - T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch `feat/wp-1102-project-trust` — PR #147 — **merged into main as `7992629` (2026-11-18), CI 7/7 green (run 44396426386)** — commits `907eea8` (impl) + `686e614` (docs) + `c5272f2`/`8d78fd4`/`85c273d` (platform test fixes); native review attempted (`review-2c3d53db76ef3311`), provider size wall at 2152 lines, abandoned via `operator_disposition` (see L7); S3 met on CI + 374-test + identity-e2e evidence
-- T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch: — PR: — commit:
+- T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch `feat/wp-1103-project-pi-config` — PR: — commit:
 - T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
 
 ## Log
@@ -112,3 +112,30 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   `serde_json` writer (`85c273d`). Round 4: 7/7 green (run
   44396426386, incl. bench + fresh-clone). Merged as `7992629`. M11 is
   at 2/4 WPs; next: WP-1103 project `.pi/` config under the gate.
+- **L9** (2026-11-18): T4/WP-1103 implemented — project `.pi/` config
+  under the trust gate (S4). **Settings merge** (`merge_project_settings`,
+  core): `<cwd>/.pi/settings.json` merged over the agent-dir settings,
+  per-field project-wins (the pi-rust settings surface is flat; the
+  upstream deep merge is equivalent for it), trusted only, invalid file
+  → rejected with a logged path-named message, session continues with
+  the global settings (upstream: settings load errors are collected,
+  never fatal). **Project MCP** (`merge_project_mcp`, core): upstream
+  `loadMcpConfig` semantics ported — full project entry replaces the
+  same-named global server (incl. dropping its credentials), override
+  entries (no `command`/`url`/`type`) limited to
+  `enabled`/`exposure`/`toolExposure` and merged over the global entry
+  (credentials kept), `auth` on project `url` servers rejected
+  (global-only), `-`/`_` namespace clashes rejected, top-level
+  `autoEnableCodemode` project overrides global; rejected entries logged
+  + skipped, session keeps the valid servers. Design decision: the merge
+  runs in the **core** (the sidecar stays byte-identical — it receives
+  the merged `mcpConfig` as before, no protocol change); the upstream
+  dist function `loadMcpConfig` re-reads files itself, which would have
+  required an `agentDir` in the init payload (protocol change) and
+  duplicated the core's fail-fast validation. No protocol change. The
+  dead `sessionDir`/`defaultTools` settings fields stay unconsumed
+  (pre-existing; the fake driver discards the resolved model id, so the
+  settings merge is e2e-proven through the non-fatal reject path + the
+  MCP surface, with the per-field merge unit-tested). S4 verified:
+  394/394 suite (17 new unit + 3 new e2e), smoke 74/74, fmt + clippy
+  clean.

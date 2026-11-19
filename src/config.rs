@@ -1,14 +1,14 @@
 //! Agent config from `<agent-dir>/settings.json` (WP-301).
 //!
 //! Upstream reads the global settings file from the agent dir; project
-//! `cwd/.pi/settings.json` is only merged in for trusted projects — the
-//! trust model landed in WP-1102 (gate + `defaultProjectTrust`), the
-//! settings merge itself is WP-1103.
+//! `cwd/.pi/settings.json` is merged in for trusted projects (WP-1103,
+//! `merge_project_settings`) — untrusted projects never read the project
+//! file at all. Project MCP is merged the same way (`merge_project_mcp`).
 //!
 //! Unknown keys are ignored (forward compat). Missing file = all defaults.
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -95,8 +95,8 @@ pub fn resolve_provider_flags(
 /// Upstream shape `{"mcpServers": {...}}` (the file `loadMcpConfig` reads);
 /// absent file → `Ok(None)` (no MCP servers). Malformed file, a non-object
 /// top level, or a non-object `mcpServers` → error naming the path (same
-/// rule as settings.json). Project `<cwd>/.pi/mcp.json` is gated by the
-/// WP-1102 trust model; the per-location merge is WP-1103.
+/// rule as settings.json). The project `<cwd>/.pi/mcp.json` merge (trusted
+/// only) is WP-1103 (`merge_project_mcp`).
 pub fn load_mcp_config(agent_dir: &Path) -> Result<Option<Value>> {
     let path = agent_dir.join("mcp.json");
     if !path.exists() {
@@ -117,10 +117,211 @@ pub fn load_mcp_config(agent_dir: &Path) -> Result<Option<Value>> {
     Ok(Some(parsed))
 }
 
+/// WP-1103: merges `<project_dir>/.pi/settings.json` over the agent-dir
+/// settings, only when the project is trusted (untrusted → the project
+/// file is never read — zero effect). The pi-rust settings surface is flat,
+/// so the upstream deep merge is a per-field override: each project value
+/// that is present wins, absent fields keep the agent-dir value.
+///
+/// An invalid project file does NOT break the session (upstream: settings
+/// load errors are collected and reported, the session continues with the
+/// global config): the error names the path and the caller keeps the
+/// unmerged config.
+pub fn merge_project_settings(
+    cfg: AgentConfig,
+    project_dir: &Path,
+    trusted: bool,
+) -> Result<AgentConfig> {
+    if !trusted {
+        return Ok(cfg);
+    }
+    let path = project_dir.join(".pi").join("settings.json");
+    if !path.exists() {
+        return Ok(cfg);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading project settings {}", path.display()))?;
+    let parsed: AgentConfig = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing project settings {}", path.display()))?;
+    // WP-1102 (D4): the closed value set is validated in the project file
+    // too (same rule as the agent-dir file).
+    if let Some(v) = &parsed.default_project_trust {
+        if !matches!(v.as_str(), "ask" | "always" | "never") {
+            bail!(
+                "invalid defaultProjectTrust value '{v}' in {} (valid: ask, always, never)",
+                path.display()
+            );
+        }
+    }
+    Ok(AgentConfig {
+        default_provider: parsed.default_provider.or(cfg.default_provider),
+        default_model: parsed.default_model.or(cfg.default_model),
+        default_thinking_level: parsed.default_thinking_level.or(cfg.default_thinking_level),
+        session_dir: parsed.session_dir.or(cfg.session_dir),
+        default_tools: parsed.default_tools.or(cfg.default_tools),
+        theme: parsed.theme.or(cfg.theme),
+        default_project_trust: parsed.default_project_trust.or(cfg.default_project_trust),
+    })
+}
+
+/// Upstream `OVERRIDE_KEYS`: the only keys a project `mcp.json` entry may
+/// use to override a global server (it must not touch config or
+/// credentials).
+const MCP_OVERRIDE_KEYS: [&str; 3] = ["enabled", "exposure", "toolExposure"];
+
+/// WP-1103: merges `<project_dir>/.pi/mcp.json` over the agent-dir MCP
+/// config, only when the project is trusted (untrusted → the project file
+/// is never read). Upstream semantics:
+///
+/// - a project entry without `command`/`url`/`type` is an **override**: it
+///   may only set `enabled`/`exposure`/`toolExposure` and is merged over
+///   the same-named global server (the rest — including credentials — is
+///   kept); an override without a global base, or with extra keys, is
+///   rejected
+/// - a full project entry **replaces** the same-named global server
+/// - `auth` on a project `url` server is rejected (global-only — a
+///   repository must not pick where the credential goes)
+/// - a project name differing only in `-`/`_` from an existing server is
+///   rejected (they would share the `mcp__<name>` namespace)
+/// - top-level `autoEnableCodemode`: a project boolean overrides the global
+///
+/// Rejected entries are skipped with a message naming the path; the valid
+/// servers (and the agent-dir config when the project file is unusable)
+/// are returned — never fatal (upstream: load errors are collected, the
+/// session continues).
+pub fn merge_project_mcp(
+    agent_cfg: Option<Value>,
+    project_dir: &Path,
+    trusted: bool,
+) -> (Option<Value>, Vec<String>) {
+    if !trusted {
+        return (agent_cfg, Vec::new());
+    }
+    let path = project_dir.join(".pi").join("mcp.json");
+    if !path.exists() {
+        return (agent_cfg, Vec::new());
+    }
+    let mut warnings = Vec::new();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            warnings.push(format!(
+                "{}: reading project mcp config: {e}",
+                path.display()
+            ));
+            return (agent_cfg, warnings);
+        }
+    };
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            warnings.push(format!(
+                "{}: parsing project mcp config: {e}",
+                path.display()
+            ));
+            return (agent_cfg, warnings);
+        }
+    };
+    if !parsed.is_object() {
+        warnings.push(format!("{}: expected a JSON object", path.display()));
+        return (agent_cfg, warnings);
+    }
+    let mut merged: Value = agent_cfg.unwrap_or_else(|| json!({"mcpServers": {}}));
+    if let Some(aec) = parsed.get("autoEnableCodemode") {
+        if aec.is_boolean() {
+            merged["autoEnableCodemode"] = aec.clone();
+        } else {
+            warnings.push(format!(
+                "{}: autoEnableCodemode must be a boolean",
+                path.display()
+            ));
+        }
+    }
+    let mut servers = merged
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let project_servers = parsed
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for (name, entry) in &project_servers {
+        if !entry.is_object() {
+            warnings.push(format!(
+                "{}: server \"{name}\" must be an object",
+                path.display()
+            ));
+            continue;
+        }
+        let entry = entry.as_object().unwrap();
+        let is_override = entry.get("command").is_none()
+            && entry.get("url").is_none()
+            && entry.get("type").is_none();
+        if is_override {
+            let extra: Vec<String> = entry
+                .keys()
+                .filter(|k| !MCP_OVERRIDE_KEYS.contains(&k.as_str()))
+                .cloned()
+                .collect();
+            match servers.get(name) {
+                None => warnings.push(format!(
+                    "{}: server \"{name}\" needs \"command\" or \"url\", or a global server to override",
+                    path.display()
+                )),
+                Some(_) if !extra.is_empty() => warnings.push(format!(
+                    "{}: server \"{name}\": an override can only set {}, {}, {}",
+                    path.display(),
+                    MCP_OVERRIDE_KEYS[0],
+                    MCP_OVERRIDE_KEYS[1],
+                    MCP_OVERRIDE_KEYS[2]
+                )),
+                Some(base) => {
+                    if let Value::Object(base) = base {
+                        let mut merged_entry = base.clone();
+                        for (k, v) in entry {
+                            merged_entry.insert(k.clone(), v.clone());
+                        }
+                        servers.insert(name.clone(), Value::Object(merged_entry));
+                    }
+                }
+            }
+            continue;
+        }
+        // Full entry: `auth` is global-only for url servers (upstream).
+        if entry.get("url").is_some() && entry.get("auth").is_some() {
+            warnings.push(format!(
+                "{}: server \"{name}\": auth is only allowed in the global mcp.json",
+                path.display()
+            ));
+            continue;
+        }
+        // Namespace clash: names differing only in `-`/`_` share the
+        // `mcp__<name>` tool namespace (upstream `mcpNamespace`).
+        let ns = name.replace('-', "_");
+        if servers
+            .keys()
+            .any(|other| other.as_str() != name && other.replace('-', "_") == ns)
+        {
+            warnings.push(format!(
+                "{}: server \"{name}\" conflicts with an existing server namespace",
+                path.display()
+            ));
+            continue;
+        }
+        servers.insert(name.clone(), Value::Object(entry.clone()));
+    }
+    merged["mcpServers"] = Value::Object(servers);
+    (Some(merged), warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn tmpdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -244,6 +445,280 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("mcpServers"));
+    }
+
+    // --- WP-1103: project settings merge (trusted only) ---
+
+    fn proj_dir(_tag: &str) -> (PathBuf, PathBuf) {
+        let d = tmpdir();
+        let pi = d.join(".pi");
+        std::fs::create_dir_all(&pi).unwrap();
+        (d, pi)
+    }
+
+    #[test]
+    fn project_settings_trusted_overrides_fieldwise() {
+        let (proj, pi) = proj_dir("a");
+        std::fs::write(
+            pi.join("settings.json"),
+            r#"{"defaultModel":"proj-model","theme":"light"}"#,
+        )
+        .unwrap();
+        let base = AgentConfig {
+            default_provider: Some("openai".into()),
+            default_model: Some("base-model".into()),
+            theme: Some("dark".into()),
+            ..Default::default()
+        };
+        let cfg = merge_project_settings(base, &proj, true).unwrap();
+        // Project values win...
+        assert_eq!(cfg.default_model.as_deref(), Some("proj-model"));
+        assert_eq!(cfg.theme.as_deref(), Some("light"));
+        // ...absent project fields keep the agent-dir value.
+        assert_eq!(cfg.default_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn project_settings_untrusted_is_never_read() {
+        let (proj, pi) = proj_dir("b");
+        std::fs::write(pi.join("settings.json"), r#"{"defaultModel":"proj-model"}"#).unwrap();
+        let base = AgentConfig {
+            default_model: Some("base-model".into()),
+            ..Default::default()
+        };
+        let cfg = merge_project_settings(base.clone(), &proj, false).unwrap();
+        assert_eq!(cfg, base);
+    }
+
+    #[test]
+    fn project_settings_missing_file_keeps_agent_dir() {
+        let (proj, _pi) = proj_dir("c");
+        let base = AgentConfig {
+            default_model: Some("base-model".into()),
+            ..Default::default()
+        };
+        let cfg = merge_project_settings(base.clone(), &proj, true).unwrap();
+        assert_eq!(cfg, base);
+    }
+
+    #[test]
+    fn project_settings_malformed_errors_with_path() {
+        let (proj, pi) = proj_dir("d");
+        std::fs::write(pi.join("settings.json"), "{not json").unwrap();
+        let err = merge_project_settings(AgentConfig::default(), &proj, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("settings.json"), "{err}");
+    }
+
+    #[test]
+    fn project_settings_bad_default_project_trust_errors() {
+        let (proj, pi) = proj_dir("e");
+        std::fs::write(
+            pi.join("settings.json"),
+            r#"{"defaultProjectTrust":"sometimes"}"#,
+        )
+        .unwrap();
+        let err = merge_project_settings(AgentConfig::default(), &proj, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("defaultProjectTrust"), "{err}");
+        assert!(err.contains("settings.json"), "{err}");
+    }
+
+    // --- WP-1103: project mcp.json merge (trusted only) ---
+
+    fn agent_mcp(servers: &str) -> Value {
+        json!({ "mcpServers": serde_json::from_str::<Value>(servers).unwrap() })
+    }
+
+    #[test]
+    fn mcp_project_full_entry_replaces_global() {
+        let (proj, pi) = proj_dir("f");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"srv":{"url":"https://p.example/mcp"}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp(r#"{"srv":{"url":"https://g.example/mcp","auth":{"provider":"x"}}}"#);
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        let m = merged.unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(m["mcpServers"]["srv"]["url"], "https://p.example/mcp");
+        assert!(
+            m["mcpServers"]["srv"].get("auth").is_none(),
+            "a full replacement drops the global entry incl. credentials"
+        );
+    }
+
+    #[test]
+    fn mcp_project_override_merges_only_override_keys() {
+        let (proj, pi) = proj_dir("g");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"srv":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp(
+            r#"{"srv":{"url":"https://g.example/mcp","headers":{"Authorization":"Bearer s"}}}"#,
+        );
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        let m = merged.unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // The override flips enabled; the global rest (incl. the credential)
+        // is kept.
+        assert_eq!(m["mcpServers"]["srv"]["enabled"], false);
+        assert_eq!(m["mcpServers"]["srv"]["url"], "https://g.example/mcp");
+        assert_eq!(
+            m["mcpServers"]["srv"]["headers"]["Authorization"],
+            "Bearer s"
+        );
+    }
+
+    #[test]
+    fn mcp_project_override_without_base_is_rejected() {
+        let (proj, pi) = proj_dir("h");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"ghost":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        let (merged, warnings) = merge_project_mcp(Some(agent_mcp("{}")), &proj, true);
+        assert_eq!(merged, Some(agent_mcp("{}")));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("ghost"), "{warnings:?}");
+        assert!(warnings[0].contains("mcp.json"), "{warnings:?}");
+    }
+
+    #[test]
+    fn mcp_project_override_with_extra_keys_is_rejected() {
+        let (proj, pi) = proj_dir("i");
+        // No command/url/type → override; `args` is not an override key.
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"srv":{"enabled":false,"args":["x.mjs"]}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp(r#"{"srv":{"url":"https://g.example/mcp"}}"#);
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        // Rejected wholesale: the global entry stays untouched.
+        assert_eq!(merged, Some(agent));
+        assert!(
+            warnings[0].contains("override can only set"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_project_url_server_auth_is_rejected() {
+        let (proj, pi) = proj_dir("j");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"srv":{"url":"https://p.example/mcp","auth":{"provider":"x"}}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp("{}");
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        assert_eq!(merged, Some(agent));
+        assert!(
+            warnings[0].contains("auth is only allowed in the global"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_project_namespace_clash_is_rejected() {
+        let (proj, pi) = proj_dir("k");
+        // `a_b` vs global `a-b`: same `mcp__a_b` namespace.
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"a_b":{"url":"https://p.example/mcp"}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp(r#"{"a-b":{"url":"https://g.example/mcp"}}"#);
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        assert_eq!(merged, Some(agent));
+        assert!(warnings[0].contains("conflicts"), "{warnings:?}");
+    }
+
+    #[test]
+    fn mcp_project_adds_new_servers_and_keeps_global_rest() {
+        let (proj, pi) = proj_dir("l");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"new":{"command":"node","args":["x.mjs"]}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp(r#"{"old":{"url":"https://g.example/mcp"}}"#);
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let m = merged.unwrap();
+        assert_eq!(m["mcpServers"]["new"]["command"], "node");
+        assert_eq!(m["mcpServers"]["old"]["url"], "https://g.example/mcp");
+    }
+
+    #[test]
+    fn mcp_project_auto_enable_codemode_overrides() {
+        let (proj, pi) = proj_dir("m");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"autoEnableCodemode":false,"mcpServers":{}}"#,
+        )
+        .unwrap();
+        let agent = Some(json!({"autoEnableCodemode":true,"mcpServers":{}}));
+        let (merged, warnings) = merge_project_mcp(agent.clone(), &proj, true);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(merged.unwrap()["autoEnableCodemode"], false);
+    }
+
+    #[test]
+    fn mcp_project_malformed_returns_agent_config_with_warning() {
+        let (proj, pi) = proj_dir("n");
+        std::fs::write(pi.join("mcp.json"), "{not json").unwrap();
+        let agent = agent_mcp(r#"{"old":{"url":"https://g.example/mcp"}}"#);
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, true);
+        assert_eq!(merged, Some(agent), "the session keeps the global servers");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("mcp.json"), "{warnings:?}");
+    }
+
+    #[test]
+    fn mcp_project_non_object_shape_is_rejected() {
+        let (proj, pi) = proj_dir("o");
+        std::fs::write(pi.join("mcp.json"), r#"[1,2]"#).unwrap();
+        let (merged, warnings) = merge_project_mcp(None, &proj, true);
+        assert_eq!(merged, None);
+        assert!(warnings[0].contains("JSON object"), "{warnings:?}");
+    }
+
+    #[test]
+    fn mcp_project_untrusted_is_never_read() {
+        let (proj, pi) = proj_dir("p");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"new":{"url":"https://p.example/mcp"}}}"#,
+        )
+        .unwrap();
+        let agent = agent_mcp("{}");
+        let (merged, warnings) = merge_project_mcp(Some(agent.clone()), &proj, false);
+        assert_eq!(merged, Some(agent));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn mcp_project_without_agent_config_still_applies() {
+        let (proj, pi) = proj_dir("q");
+        std::fs::write(
+            pi.join("mcp.json"),
+            r#"{"mcpServers":{"new":{"url":"https://p.example/mcp"}}}"#,
+        )
+        .unwrap();
+        let (merged, warnings) = merge_project_mcp(None, &proj, true);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            merged.unwrap()["mcpServers"]["new"]["url"],
+            "https://p.example/mcp"
+        );
     }
 
     #[test]
