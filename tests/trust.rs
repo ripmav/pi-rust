@@ -273,3 +273,139 @@ fn unknown_default_project_trust_errors() {
     assert!(stderr.contains("settings.json"), "{stderr}");
     let _ = std::fs::remove_dir_all(&work);
 }
+
+// --- WP-1103: project `.pi/` config under the trust gate ---
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+fn event_log(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("stdout line not JSON: {l}: {e}"))
+        })
+        .collect()
+}
+
+/// One headless run with a custom scenario; returns (exit code, stdout
+/// event log, stderr). No extension dump (WP-1103 asserts on the events).
+fn run_events(
+    workdir: &Path,
+    agent: &Path,
+    scenario: &serde_json::Value,
+    extra: &[&str],
+) -> (i32, String, String) {
+    std::fs::create_dir_all(agent).unwrap();
+    let scen = workdir.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .current_dir(workdir)
+        .args([
+            "--scenario",
+            scen.display().to_string().as_str(),
+            "--agent-dir",
+            agent.display().to_string().as_str(),
+            "--session-file",
+            workdir.join("session.jsonl").display().to_string().as_str(),
+        ])
+        .args(extra)
+        .output()
+        .expect("running pi-rust");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn project_mcp_fixture(work: &Path) {
+    let pi = work.join(".pi");
+    std::fs::create_dir_all(&pi).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    let mcp = json!({
+        "mcpServers": {
+            "fixture": {
+                "command": "node",
+                "args": [fixture.to_string_lossy()],
+                "exposure": "direct"
+            }
+        }
+    });
+    std::fs::write(pi.join("mcp.json"), mcp.to_string()).unwrap();
+}
+
+/// S4: a trusted project's `.pi/mcp.json` server is applied — the
+/// `mcp__fixture__echo` tool round-trips.
+#[test]
+fn trusted_project_mcp_applies() {
+    let (work, agent) = fixture("wp1103a");
+    project_mcp_fixture(&work);
+    let scenario = json!({
+        "user_messages": ["use the mcp tools"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__echo", "input": { "text": "wp1103" } } },
+            { "text": "done" }
+        ]]
+    });
+    let (code, stdout, stderr) = run_events(&work, &agent, &scenario, &["--approve"]);
+    assert_eq!(code, 0, "{stderr}");
+    let lines = event_log(&stdout);
+    let echo = lines
+        .iter()
+        .find(|l| {
+            l.get("kind").and_then(serde_json::Value::as_str) == Some("tool_execution")
+                && l.get("name").and_then(serde_json::Value::as_str) == Some("mcp__fixture__echo")
+        })
+        .expect("mcp__fixture__echo execution missing\n{stdout}");
+    assert_eq!(echo["blocked"], json!(false));
+    assert_eq!(echo["result_summary"], "echo:wp1103", "{echo}");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// S4: an untrusted project (headless default-deny) gets zero MCP effect —
+/// the tool does not exist, the run still succeeds.
+#[test]
+fn untrusted_project_mcp_ignored() {
+    let (work, agent) = fixture("wp1103b");
+    project_mcp_fixture(&work);
+    let scenario = json!({
+        "user_messages": ["use the mcp tools"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__echo", "input": { "text": "x" } } },
+            { "text": "done" }
+        ]]
+    });
+    let (code, stdout, stderr) = run_events(&work, &agent, &scenario, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let lines = event_log(&stdout);
+    let echo = lines
+        .iter()
+        .find(|l| l.get("name").and_then(serde_json::Value::as_str) == Some("mcp__fixture__echo"))
+        .expect("the scripted call must be attempted\n{stdout}");
+    // The server is not loaded: the tool does not exist.
+    assert_eq!(
+        echo["result_summary"], "Unknown extension tool: mcp__fixture__echo",
+        "untrusted project mcp server must not load\n{echo}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// S4: an invalid trusted project settings file is rejected without
+/// breaking the session (exit 0, a message naming the file on stderr).
+#[test]
+fn trusted_project_settings_invalid_nonfatal() {
+    let (work, agent) = fixture("wp1103c");
+    std::fs::write(work.join(".pi/settings.json"), "{not json").unwrap();
+    let scenario = json!({"user_messages": ["hi"], "model_scripts": [[{ "text": "ok" }]]});
+    let (code, _stdout, stderr) = run_events(&work, &agent, &scenario, &["--approve"]);
+    assert_eq!(
+        code, 0,
+        "invalid project settings must not break the session\n{stderr}"
+    );
+    assert!(stderr.contains("project settings rejected"), "{stderr}");
+    assert!(stderr.contains("settings.json"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&work);
+}

@@ -503,10 +503,10 @@ pub async fn run() -> Result<i32> {
     // discovery stays deterministic. Upstream semantics: ctx.cwd is the
     // project directory (the child inherits the core's cwd); the agent dir
     // is discovery-only.
-    // M3/WP-301: agent settings from the agent dir (global file only — the
-    // project `cwd/.pi/settings.json` merge is WP-1103, gated by the WP-1102
-    // trust model; the gate itself landed in WP-1102). Flags beat settings;
-    // settings beat the fake-driver default.
+    // M3/WP-301: agent settings from the agent dir; the project
+    // `cwd/.pi/settings.json` merge (WP-1103) is applied below, gated by
+    // the WP-1102 trust resolution above (it reads `defaultProjectTrust`,
+    // D4). Flags beat settings; settings beat the fake-driver default.
     if list_sessions {
         list_sessions_json(&agent_dir)?;
         return Ok(0);
@@ -515,6 +515,24 @@ pub async fn run() -> Result<i32> {
     // WP-702/702c: agent-dir MCP server config (absent file = no servers).
     let mcp_config =
         crate::config::load_mcp_config(&agent_dir).with_context(|| "loading agent mcp config")?;
+    // WP-1103: project `.pi/` config under the trust gate — settings
+    // merged over the agent-dir settings, project MCP merged into the
+    // host-fed config (both no-ops for untrusted projects). Invalid
+    // project files are rejected without breaking the session (upstream:
+    // load errors are collected, never fatal); the messages are logged.
+    let agent_config =
+        match crate::config::merge_project_settings(agent_config.clone(), &cwd, project_trusted) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                crate::corelog::line(&format!("[core] project settings rejected: {e}"));
+                agent_config
+            }
+        };
+    let (mcp_config, mcp_warnings) =
+        crate::config::merge_project_mcp(mcp_config.clone(), &cwd, project_trusted);
+    for w in mcp_warnings {
+        crate::corelog::line(&format!("[core] {w}"));
+    }
     let (provider_name, model_id) = crate::config::resolve_provider_flags(
         provider_flag.as_deref(),
         model_id.as_deref(),
