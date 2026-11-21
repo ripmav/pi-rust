@@ -4,7 +4,7 @@ Date: 2026-11-21
 
 ## Status
 
-Accepted
+Superseded by [ADR 0006](./0006-core-extensions-load-in-process-as-so.md) for the core-extension loading model (its "no `dlopen`, ever" clause); the user-extension subprocess decision is reaffirmed by ADR 0006.
 
 ## Context
 

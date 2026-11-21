@@ -41,12 +41,7 @@ built-in MCP extension, WP-702). This ADR settles D5.
   `claude-rules`, `prompt-customizer`, `with-deps`, `plan-mode`.
 - Each port must pass the **same e2e scenarios** as the unmodified original
   (same fixtures; the scenarios are already green for the original).
-- The six ports are **core extensions**: bundled with the pi-rust release
-  (installed alongside the binary, per the `install.sh` / `find_sidecar`
-  pattern), **loaded by default in every session**, and in **core scope** —
-  trusted by definition (the trust gate of [ADR 0004](./0004-rust-extensions-share-discovery-and-trust.md)
-  covers the user/placement locations; core extensions come from the install
-  location).
+- The six ports are **core extensions**: **packed into the pi-rust release alongside the binary** (a single install payload), **loaded in-process as `.so` files by default in every session** ([ADR 0006](./0006-core-extensions-load-in-process-as-so.md)), and in **core scope** — trusted by definition (the trust gate of [ADR 0004](./0004-rust-extensions-share-discovery-and-trust.md) covers the user/placement locations; core extensions come from the install location).
 - `with-deps` carries its own external dependency (npm `ms` → a Cargo crate)
   and proves the dependency story end to end.
 - The on-disk layout of core extensions, their build/install steps, and any
@@ -60,8 +55,9 @@ built-in MCP extension, WP-702). This ADR settles D5.
   mapping).
 - Discovery gains a source besides [ADR 0004](./0004-rust-extensions-share-discovery-and-trust.md)'s
   three user locations: the **core install location** (always trusted, loaded
-  by default). E1S3's runtime routes three sources: core install (Rust,
-  default), sidecar TS user locations, Rust user locations.
-- Release artifacts grow by the core-extension binaries (per target; shape
-  defined by the architecture doc); `install.sh` and CI packaging must cover
-  them.
+  by default). E1S3's runtime routes three sources: core install (in-process
+  `.so`, default, ADR 0006), sidecar TS user locations, Rust user locations
+  (subprocesses, ADR 0001).
+- Release artifacts grow by six per-platform core-extension libraries
+  (`.so`/`.dll`/`.dylib`); `install.sh` and CI packaging must pack, unpack and
+  verify them ([ADR 0006](./0006-core-extensions-load-in-process-as-so.md)).
