@@ -1,6 +1,6 @@
 # WP-1202 — `pi-ext`: bridge wire types
 
-**Milestone:** M12 · **Story:** E1S2 · **Size:** S · **Status:** in progress (branch `feat/wp-1202-pi-ext-wire-types`) · **Depends on:** WP-1201
+**Milestone:** M12 · **Story:** E1S2 · **Size:** S · **Status:** done — merged as `661680e` (2026-11-21), CI 7/7 · **Depends on:** WP-1201
 
 ## Goal
 One source of truth for the bridge v6 wire types in `pi-ext`

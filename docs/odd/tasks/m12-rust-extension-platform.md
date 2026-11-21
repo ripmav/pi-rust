@@ -32,7 +32,7 @@ one PR.
 ### Phase 1 — `pi-ext` framework crate (E1S2)
 
 - T1 / [WP-1201](../../roadmap/m12-rust-extension-platform/wp-1201-workspace-pi-ext-skeleton.md) — workspace + `pi-ext` skeleton — **merged into main as `bb92239` (2026-11-21), CI 7/7 green (run 44948477220)**
-- T2 / [WP-1202](../../roadmap/m12-rust-extension-platform/wp-1202-pi-ext-wire-types.md) — `pi-ext`: bridge wire types — **in progress** (branch `feat/wp-1202-pi-ext-wire-types`)
+- T2 / [WP-1202](../../roadmap/m12-rust-extension-platform/wp-1202-pi-ext-wire-types.md) — `pi-ext`: bridge wire types — **merged into main as `661680e` (2026-11-21), CI 7/7 green (run 44954140387)**
 - T3 / [WP-1203](../../roadmap/m12-rust-extension-platform/wp-1203-pi-ext-api-core.md) — `pi-ext`: API surface — core — **open**
 - T4 / [WP-1204](../../roadmap/m12-rust-extension-platform/wp-1204-pi-ext-api-parity.md) — `pi-ext`: API surface — rest + parity — **open**
 - T5 / [WP-1205](../../roadmap/m12-rust-extension-platform/wp-1205-pi-ext-user-target.md) — `pi-ext`: user target (v6 process) — **open**
@@ -70,3 +70,5 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
 - **L3** (2026-11-21): WP-1201 delivered — PR #151 (stack #152, stacked on
   the E1 docs PR #150) merged into main as `bb92239`, CI 7/7 green
   (run 44948477220); E1S2 at 1/6, next: WP-1202.
+- **L4** (2026-11-21): WP-1202 delivered — PR #153 merged into main as
+  `661680e`, CI 7/7 green (run 44954140387); E1S2 at 2/6, next: WP-1203.
