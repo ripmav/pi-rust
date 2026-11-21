@@ -1,6 +1,6 @@
 # WP-1203 — `pi-ext`: API surface — core
 
-**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** in progress (branch `feat/wp-1203-pi-ext-api-core`) · **Depends on:** WP-1201, WP-1202
+**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** done — merged as `387d713` (2026-11-21), CI 7/7 · **Depends on:** WP-1201, WP-1202
 
 ## Goal
 The core of the upstream `pi` + `ctx` mirror
