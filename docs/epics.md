@@ -1,0 +1,65 @@
+# Epics & Stories — pi-rust
+
+pi-rust is a Rust port of earendil-works/pi: a native agent core (model runtime,
+tools, session storage) with a TUI, plus a [Node sidecar](https://github.com/ripmav/pi-rust/tree/main/sidecar)
+that runs the original, unmodified TypeScript extensions over the NDJSON
+[bridge protocol](bridge-protocol.md) ([stability contract](stability-contract.md)).
+From M12 on, the plan lives in this file; M1–M11 history stays in
+[roadmap/01-milestones.md](https://github.com/ripmav/pi-rust/blob/main/roadmap/01-milestones.md)
+and [odd/tasks/](https://github.com/ripmav/pi-rust/tree/main/odd/tasks).
+
+---
+
+## Milestones
+
+- **M11 — v1: project trust & sealing** → delivered 2026-11-21 (v1.0.0 released); history in the milestone/feature docs linked above
+- **M12 — native Rust extension platform** → E1
+
+---
+
+## Milestone 12 — native Rust extension platform
+
+### Epic E1 — Native Rust extension interface & framework
+
+**Why:** Every extension today is TypeScript running in the Node sidecar — each
+extension run needs a Node runtime, and the authoring language is fixed to
+JS/TS. A native interface lets extensions be written in pure Rust (a Rust-only
+install needs no Node at all), lets existing extensions be ported to Rust, and a
+framework (public API crate + scaffolding + docs) makes creating new extensions
+easy. The sidecar is **not** replaced: the Rust interface runs beside it, so TS
+and Rust extensions coexist.
+
+> Requirement (user, 2026-11-21): "Beside the current the sidecare to run
+> extension of the origin pi, want to implement a extension interface so that
+> new extensions can be created in rust or old ones ported to rust. Also there
+> should be a framework for more easy creating extensions."
+
+| Story | I want | Acceptance | Status |
+|---|---|---|---|
+| **E1S1** Extension model design (ADRs) | A recorded decision on how Rust extensions are loaded, addressed, and wired into the core, before any code | ADRs recorded for the loading model (D1), v1 API surface (D2), crate layout & name (D3), discovery/trust/distribution (D4), porting set (D5); a `docs/architecture.md` created, describing the extension runtime (core ↔ native extensions ↔ sidecar, bridge protocol); story acceptance criteria E1S2–E1S5 refined to cite the ADRs | open |
+| **E1S2** Extension framework crate (public API) | A public crate extension authors code against, mirroring the upstream extension API (`pi` object + `ctx`), with stable types | The crate (workspace member per D3) builds and tests standalone; defines the v1 surface per the D2 ADR (event handlers, tool registration with JSON-schema parameters, commands, flags, `sendUserMessage`/`appendEntry`, provider registration, UI request types); doc examples compile (`cargo test --doc`); the [stability contract](stability-contract.md) gains a section covering the extension API surface | open |
+| **E1S3** Native extension runtime in the core | The core loads and runs Rust extensions directly, without Node | An example Rust extension registers a tool, a command and event handlers; e2e green headless and TUI (tool-call round-trip, command invocation, `before_agent_start` system-prompt injection, UI dialog round-trip with a UI attached); a Rust-only run spawns no Node process (test asserts no sidecar spawn); mixed session works — one session runs a TS extension (sidecar) and a Rust extension (native) simultaneously; project-scope Rust extensions are gated by the trust model (WP-1102); an extension crash never kills the core (semantics per the D1 ADR) | open |
+| **E1S4** Ported reference extensions | Existing TS extensions ported to Rust as reference implementations, with a porting guide | The D5 porting set (assumed: the six bridge-matrix examples `hello`, `with-deps`, `permission-gate`, `claude-rules`, `plan-mode`, `prompt-customizer`) is ported to Rust and passes the same e2e scenarios as the originals (same fixtures); a porting guide in `docs/` maps upstream API → framework API | open |
+| **E1S5** Authoring framework (scaffolding + docs) | Creating a new extension takes minutes, not an afternoon | Scaffolding per the D3 ADR (e.g. `pi-rust ext new <name>` or a cargo template) produces a working skeleton (tool + command + event handler); the scaffolded extension compiles and passes the extension test harness out of the box; authoring docs cover discovery paths, trust, UI and versioning | open |
+
+---
+
+## Cross-cutting
+
+- **Trust gate (WP-1102) applies to Rust extensions:** untrusted project-scope
+  content (`<cwd>/.pi/`) has zero behavioral effect; per-path trust unchanged.
+- **Upstream pin** `earendil-works/pi @ 64a15f4` defines the extension API the
+  framework mirrors; pin-cycle refreshes (M11 pattern) re-verify the mirror.
+- **No regression of the TS path:** the sidecar and bridge protocol (v6) remain
+  the TypeScript path; the existing extension e2e matrix stays green.
+
+## Out of scope (v1)
+
+- Replacing or removing the Node sidecar or the TS extension path.
+- Auto-transpiling TypeScript extensions to Rust.
+- Publishing the framework crate to crates.io (workspace/local distribution
+  first; revisit after E1S3).
+
+## Open questions
+
+See [decisions-open.md](decisions-open.md).
