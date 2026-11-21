@@ -19,6 +19,8 @@ From M12 on, the plan lives in this file; M1–M11 history stays in
 
 ## Milestone 12 — native Rust extension platform
 
+Implementation tasks: [odd/tasks/m12-rust-extension-platform.md](odd/tasks/m12-rust-extension-platform.md)
+
 ### Epic E1 — Native Rust extension interface & framework
 
 **Why:** Every extension today is TypeScript running in the Node sidecar — each
