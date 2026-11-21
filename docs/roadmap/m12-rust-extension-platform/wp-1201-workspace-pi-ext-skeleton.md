@@ -1,6 +1,6 @@
 # WP-1201 — Workspace + `pi-ext` skeleton
 
-**Milestone:** M12 · **Story:** E1S2 · **Size:** S · **Status:** in progress (branch `feat/wp-1201-pi-ext-skeleton`) · **Depends on:** —
+**Milestone:** M12 · **Story:** E1S2 · **Size:** S · **Status:** done — merged as `bb92239` (2026-11-21), CI 7/7 · **Depends on:** —
 
 ## Goal
 Make the repo a Cargo workspace and create the empty public `pi-ext` crate
