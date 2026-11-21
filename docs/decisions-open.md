@@ -7,4 +7,4 @@ answer is recorded (ADR, story, tenet or `AGENTS.md`), the row is deleted in tha
 
 | ID | Status | Decision | Options | Assumed until decided | Blocks |
 |---|---|---|---|---|---|
-| D5 | open | Which TS extensions get ported first (reference set)? | 1) The six bridge-matrix examples (`hello`, `with-deps`, `permission-gate`, `claude-rules`, `plan-mode`, `prompt-customizer`) — recommended: they already have e2e evidence to compare against; 2) A different set | 1) | E1S4 |
+| D5 | answered — in progress: "D5: Option 1 all 6 will be now core extensions" (user, 2026-11-21) | Which TS extensions get ported first (reference set)? | 1) The six bridge-matrix examples (`hello`, `with-deps`, `permission-gate`, `claude-rules`, `plan-mode`, `prompt-customizer`) — **chosen**: they already have e2e evidence to compare against; 2) A different set | option 1 — and the six ports become **core extensions** (bundled, default-loaded, per user) | E1S4 |
