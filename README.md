@@ -4,12 +4,13 @@ Rust port of [pi](https://github.com/earendil-works/pi) with a compatibility
 layer: original pi extensions (TypeScript, unmodified) run unchanged against
 the new Rust core.
 
-**Status (M9, 2026-11):** M1–M9 delivered — interactive TUI (ratatui), real
-model providers (native upstream wires), full built-in tool set, MCP
-(stdio + HTTP), extension `registerProvider` invocation, compaction,
-upstream session-file compat, skills, RPC mode, print/json output, perf
-baseline in CI, security audit, release pipeline (4 targets + install
-script). Upstream pin: `earendil-works/pi @ 64a15f4`.
+**Status (M11, 2026-11):** M1–M11 delivered — interactive TUI (ratatui),
+real model providers (native upstream wires), full built-in tool set,
+MCP (stdio + HTTP), extension `registerProvider` invocation, compaction,
+upstream session-file compat, skills, RPC mode, print/json output,
+project trust + project `.pi/` config under the gate, perf baseline in
+CI, security audit, release pipeline (5 targets + install script).
+Upstream pin: `earendil-works/pi @ 64a15f4`.
 
 ## Install
 
@@ -567,17 +568,19 @@ upstream/       earendil-works/pi @ 64a15f4 (gitignored reference clone)
 
 ## Roadmap status
 
-M1–M10 delivered and merged: bridge PoC, config/state, model ecosystem,
+M1–M11 delivered and merged: bridge PoC, config/state, model ecosystem,
 built-in tools, interactive TUI, extension completeness (providers, MCP,
 compaction, shortcuts), ecosystem (skills, RPC, print modes), hardening
 & release, v0.1 + ecosystem & platform (pin refresh, tool-search/codemode/
-llama, ui.custom pane, oauth, Windows, TUI parity, v0.2.0). M11 in
-progress: upstream pin refresh (WP-1101, merged) and the project trust
-model (WP-1102 — the trust gate above). Full
+llama, ui.custom pane, oauth, Windows, TUI parity, v0.2.1), v1 project
+trust & sealing (pin refresh, project trust model, project `.pi/`
+config under the gate, v1.0.0 sealing — what v1 freezes is documented in
+[`docs/stability-contract.md`](docs/stability-contract.md)). Full
 per-milestone WP lists: [`roadmap/README.md`](roadmap/README.md).
 
-Known v0 non-goals (v1): non-`api_key` credential kinds beyond the
-upstream oauth set (command refs — typed rejection), ARM64 Windows
+Not in v1.0 (next-milestone backlog): the full `ctx.ui.custom`
+component model (the descriptor subset shipped in v0.2.1), non-`api_key`/
+oauth credential kinds (command refs — typed rejection), ARM64 Windows
 (revisit with demand), upstream internal/experimental packages
 (`chord`, `codemode`, `durable`, `evals`, `telemetry`), pixel-perfect TUI
 parity (functional parity is the bar), multi-agent orchestration beyond
