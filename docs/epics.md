@@ -5,8 +5,8 @@ tools, session storage) with a TUI, plus a [Node sidecar](https://github.com/rip
 that runs the original, unmodified TypeScript extensions over the NDJSON
 [bridge protocol](bridge-protocol.md) ([stability contract](stability-contract.md)).
 From M12 on, the plan lives in this file; M1–M11 history stays in
-[roadmap/01-milestones.md](https://github.com/ripmav/pi-rust/blob/main/roadmap/01-milestones.md)
-and [odd/tasks/](https://github.com/ripmav/pi-rust/tree/main/odd/tasks).
+[roadmap/01-milestones.md](roadmap/01-milestones.md) and
+[odd/tasks/](odd/tasks/).
 
 ---
 
