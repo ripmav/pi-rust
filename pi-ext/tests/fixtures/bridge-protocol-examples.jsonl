@@ -1,0 +1,18 @@
+{"id":"h1","type":"init","protocolVersion":6,"capabilities":{"ui":[],"timeoutMs":30000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"exposure":"direct"}}}}
+{"id":"h1","type":"response","command":"init","success":true,"data":{"apiVersion":0}}
+{"type":"ready","apiVersion":0,"extensions":[{"path":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"errors":[],"tools":[{"name":"gate","label":"Gate","description":"Allow or deny a file path","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"commands":[{"name":"gates","description":"List active gates"}],"flags":[{"name":"gate-mode","type":"string","default":"warn","extensionPath":"/home/u/proj/.pi/extensions/permission-gate/index.ts"}],"providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"}]}],"events":["tool_call","tool_result","session_start"]}
+{"id":"p1","type":"provider_stream","streamId":"s-42","model":{"provider":"faketest","id":"faketest/echo-1","api":"faketest-api"},"messages":[{"role":"user","content":"hi"}],"options":{}}
+{"id":"p1","type":"response","command":"provider_stream","success":true,"data":{"ok":true,"streamId":"s-42"}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"start","partial":{"role":"assistant","content":[]}}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"text_delta","contentIndex":0,"delta":"Hello ","partial":{}}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"done","reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"stopReason":"stop","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0}}}}
+{"type":"ready","apiVersion":0,"extensions":[{"path":"builtin:mcp"}],"errors":[],"tools":[],"commands":[{"name":"/mcp"}],"flags":[],"providers":[],"events":["before_agent_start","mcp_servers_change","session_shutdown","session_start","tool_call","turn_start"]}
+{"id":"s0","type":"session_start","event":{"type":"session_start","reason":"startup"}}
+{"type":"tools_changed","tools":[{"name":"mcp__docs__search","label":"search","description":"Search the docs","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]}
+{"id":"c9","type":"tool_call","event":{"type":"tool_call","toolCallId":"tc_1","toolName":"write","input":{"path":"etc/passwd","content":"…"}}}
+{"id":"c9","type":"response","command":"tool_call","success":true,"data":{"result":{"block":true,"reason":"path is gated"},"input":{"path":"etc/passwd","content":"…"}}}
+{"id":"c10","type":"extension_tool_call","toolCallId":"tc_2","toolName":"gate","input":{"path":"src/main.ts"}}
+{"id":"c10","type":"response","command":"extension_tool_call","success":true,"data":{"content":[{"type":"text","text":"allowed"}],"details":{"ok":true}}}
+{"type":"extension_ui_request","id":"d7","method":"confirm","title":"Proceed?","message":"This rewrites 3 files","timeout":30000}
+{"type":"extension_ui_response","id":"d7","confirmed":true}
+{"type":"extension_error","extensionPath":"/home/u/proj/.pi/extensions/broken/index.ts","event":"tool_call","error":"Cannot read properties of undefined (reading 'input')"}

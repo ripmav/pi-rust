@@ -1,0 +1,54 @@
+{"id":"h3","type":"init","protocolVersion":6,"capabilities":{"ui":["select","confirm","input","editor","notify","custom"],"timeoutMs":10000},"mcpConfig":{"mcpServers":{"docs":{"command":"docs-server","args":[],"env":{"K":"$V"},"exposure":"direct"}}},"keybindings":{"editor.submit":["enter"]},"projectTrusted":true}
+{"id":"b1","type":"before_agent_start","event":{"type":"before_agent_start","messageType":"user","prompt":"hi"},"systemPrompt":"You are pi.","systemPromptOptions":{"cwd":"/home/u/proj","selectedTools":["read","write"],"sections":{}}}
+{"id":"b1","type":"response","command":"before_agent_start","success":true,"data":{"messages":[{"customType":"greet","content":"hello","display":true}],"systemPrompt":"You are pi (gated)."}}
+{"id":"c1","type":"context_with_system","event":{"type":"context_with_system","messages":[{"role":"system","content":"base","timestamp":1},{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":2},{"role":"assistant","content":[{"type":"text","text":"hello"}],"api":"openai-completions","provider":"openai","model":"gpt","usage":{"input":5,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":7,"cost":{"input":0.1,"output":0.2,"cacheRead":0,"cacheWrite":0,"total":0.3,"totalFromProvider":true}},"stopReason":"stop","timestamp":3},{"role":"toolResult","toolCallId":"tc9","toolName":"read","content":[{"type":"text","text":"file contents"}],"isError":false,"timestamp":4}]}}
+{"id":"c1","type":"response","command":"context_with_system","success":true,"data":[{"role":"system","content":"rewritten","timestamp":1}]}
+{"id":"i1","type":"input","event":{"type":"input","text":"do it","source":"rpc","streamingBehavior":"steer"}}
+{"id":"i1","type":"response","command":"input","success":true,"data":{"action":"transform","text":"do it (logged in as u)"}}
+{"id":"i2","type":"response","command":"input","success":true,"data":{"action":"handled"}}
+{"id":"u1","type":"user_bash","event":{"type":"user_bash","command":"ls","excludeFromContext":false,"cwd":"/home/u/proj"}}
+{"id":"u1","type":"response","command":"user_bash","success":true,"data":{"result":{"output":"a\nb\n","exitCode":0,"cancelled":false,"truncated":false}}}
+{"id":"t0","type":"turn_start","event":{"type":"turn_start","turnIndex":0,"timestamp":1}}
+{"id":"t1","type":"turn_end","event":{"type":"turn_end","turnIndex":0,"message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"a"}}],"stopReason":"toolUse","timestamp":2},"toolResults":[],"messageEntryId":"e1","toolResultEntryIds":[]}}
+{"id":"m1","type":"message_start","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}
+{"id":"m2","type":"message_update","event":{"type":"message_update","message":{"role":"assistant","content":[]},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"H","partial":{}}}}
+{"id":"m3","type":"message_end","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"stopReason":"stop","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0}}}}
+{"id":"a0","type":"agent_start","event":{"type":"agent_start"}}
+{"id":"a1","type":"agent_end","event":{"type":"agent_end","messages":[],"willRetry":false}}
+{"id":"s1","type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}
+{"id":"k1","type":"session_before_compact","event":{"type":"session_before_compact","preparation":{"reason":"threshold","willRetry":false},"branchEntries":[{"role":"user","content":"old","timestamp":1}]}}
+{"id":"k1","type":"response","command":"session_before_compact","success":true,"data":{"compaction":{"summary":"old stuff","firstKeptEntryId":"e5","tokensBefore":900,"usage":{"input":10,"output":20,"cacheRead":0,"cacheWrite":0}}}}
+{"id":"k1b","type":"response","command":"session_before_compact","success":true,"data":{"cancel":true}}
+{"id":"k2","type":"session_compact","event":{"type":"session_compact","compactionEntry":{"type":"compaction","id":"e9","parentId":"e8","timestamp":"2026-01-01T00:00:00Z","summary":"old stuff","firstKeptEntryId":"e5","tokensBefore":900,"fromHook":true},"fromExtension":true,"reason":"threshold","willRetry":false}}
+{"id":"k3","type":"session_compact_failed","event":{"type":"session_compact_failed","reason":"threshold","errorMessage":"boom","aborted":false,"willRetry":false,"fromExtension":false}}
+{"id":"cmd1","type":"command","name":"gates","args":"--all"}
+{"id":"cmd1","type":"response","command":"command","success":true,"data":{"count":2}}
+{"id":"sh1","type":"shortcut","key":"ctrl+g"}
+{"id":"sh1","type":"response","command":"shortcut","success":true,"data":null}
+{"id":"sm1","type":"set_model","event":{"type":"model_select","model":{"id":"faketest/echo-1","provider":"faketest","api":"faketest-api"},"previousModel":{"id":"other","provider":"other"},"source":"set"}}
+{"id":"tl1","type":"set_thinking_level","event":{"type":"thinking_level_select","level":"high","previousLevel":"medium"}}
+{"type":"session_info_changed","name":"My session"}
+{"type":"session_info_changed","name":null}
+{"type":"session_append_entry","entry":{"type":"custom","id":"e7","parentId":"e6","timestamp":"2026-01-01T00:00:01Z","customType":"pi-rust","data":{"k":1}}}
+{"type":"user_message","text":"follow-up","images":[{"type":"image","data":"aGk=","mimeType":"image/png"}]}
+{"type":"set_model_request","modelId":"faketest/echo-1","provider":"faketest"}
+{"type":"set_thinking_level_request","level":"low"}
+{"type":"tool_call_request","toolCallId":"tc5","toolName":"bash","input":{"command":"pwd"}}
+{"type":"tools_activated","active":["mcp__docs__search"]}
+{"type":"providers_changed","providers":[{"name":"faketest","models":[{"provider":"faketest","id":"faketest/echo-2"}]}]}
+{"type":"ready","apiVersion":0,"extensions":[],"errors":[],"tools":[],"commands":[],"shortcuts":[{"key":"ctrl+g","description":"Gates","extensionPath":"/x.ts"}],"shortcutDiagnostics":["'ctrl+g' conflicts with built-in shortcut. Skipping."],"flags":[],"providers":[],"events":[],"activeTools":[]}
+{"id":"h2","type":"response","command":"nope","success":false,"error":"Unknown command: nope"}
+{"id":null,"type":"response","command":"parse","success":false,"error":"Failed to parse command: expected value at line 1 column 1"}
+{"type":"extension_ui_request","id":"d1","method":"select","title":"Pick","options":["a","b"],"timeout":5000}
+{"type":"extension_ui_request","id":"d2","method":"input","title":"Name","placeholder":"type…"}
+{"type":"extension_ui_request","id":"d3","method":"editor","title":"Edit","prefill":"x"}
+{"type":"extension_ui_request","id":"d4","method":"notify","message":"done","notifyType":"info"}
+{"type":"extension_ui_request","id":"d5","method":"setStatus","statusKey":"gates","statusText":"2 active"}
+{"type":"extension_ui_request","id":"d6","method":"setTitle","title":"pi — gates"}
+{"type":"extension_ui_request","id":"d8","method":"set_editor_text","text":"hello"}
+{"type":"pane_open","id":"p1"}
+{"type":"pane_update","id":"p1","title":"List","lines":[{"text":"line 1"}],"list":{"items":["a","b"],"cursor":1},"input":{"label":"q","value":"","placeholder":"type…"}}
+{"type":"pane_update","id":"p1","blocked":{"kind":"timeout","message":"no input"}}
+{"type":"pane_close","id":"p1"}
+{"id":"p1","type":"pane_key","key":{"code":"down"}}
+{"type":"provider_stream_event","streamId":"s-42","event":{"type":"done","reason":"toolUse","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"a"}}],"api":"fake","provider":"fake","model":"fake/m","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":4},"stopReason":"toolUse","timestamp":9}}}
