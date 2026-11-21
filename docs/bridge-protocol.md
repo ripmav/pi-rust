@@ -4,6 +4,8 @@ Spec coverage: S2 (bridge PoC), S5 (NDJSON over stdio, upstream `modes/rpc` fram
 
 Upstream pin: earendil-works/pi @ `64a15f4` (shallow clone at `upstream/`). All upstream paths below are relative to `upstream/`. Types referenced by name are reused verbatim from the cited file; they are not re-specified here.
 
+Typed wire types: `pi-ext/src/wire/` (WP-1202, [ADR 0003](adr/0003-workspace-with-pi-ext-crate.md)) is the one source of truth for these line shapes; its tests round-trip the wire examples below.
+
 ## Overview & topology
 
 Two processes, one stdio pipe pair:
