@@ -1,4 +1,4 @@
-# Milestones M1–M11
+# Milestones M1–M12
 
 Ordering principle: make an existing pi user's setup keep working (M3) before
 adding surface (M4/M5), build the TUI on working sessions/models (M6), finish
@@ -18,6 +18,7 @@ M5 can start in parallel with M4 — it has no dependency on providers.
 | M9 | Hardening & release | CI, clippy/fmt, releases, error UX, perf, docs | 901–907 | ✅ delivered (2026-11-14, in main) |
 | M10 | v0.1 & ecosystem + platform | pin refresh, v0.1.0, tool-search/codemode/llama, ui.custom pane, oauth, Windows, TUI parity | 1001–1010 | delivered (2026-11-15) |
 | M11 | v1: project trust & sealing | pin cycle, project trust model, project `.pi/` config under the gate, v1.0 sealing & release | 1101–1104 | **delivered (2026-11-21, v1.0.0 released)** |
+| M12 | Rust extension platform | native Rust extension interface: user extensions as bridge-v6 subprocesses, six bridge-matrix ports as in-process core `.so` extensions, `pi-ext` framework crate, authoring scaffolding | 1201–1217 | **in progress (E1S1 done, PR #150)** |
 
 ## Milestone entry/exit
 
@@ -39,4 +40,7 @@ M9 ──► M10 (pin refresh → v0.1.0 → ecosystem WPs → platform → clos
             1003 ─► 1004; 1002 ─► 1008; all ─► 1010)
 M10 ──► M11 (pin cycle → project trust model ─► project .pi/ config →
               v1.0 sealing & release; 1102 ─► 1103; 1101–1103 ─► 1104)
+M11 ──► M12 (pi-ext crate → N-peer runtime + discovery/v7 → core-ext
+              loading → ports + guide → authoring; 1205 ─► 1207,
+              1206 ─► 1209 ─► 1210, 1210 ─► 1211 + 1212–1216)
 ```
