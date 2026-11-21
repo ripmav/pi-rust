@@ -1,6 +1,6 @@
 # WP-1104 — v1.0 sealing & release
 
-**Milestone:** M11 · **Size:** M · **Status:** planned · **Depends on:** 1101–1103
+**Milestone:** M11 · **Size:** M · **Status:** delivered — v1.0.0 released (2026-11-21) · **Depends on:** 1101–1103
 
 ## Goal
 Seal pi-rust as v1.0: a stability contract for the surface users rely on, a
@@ -29,3 +29,13 @@ complete CHANGELOG, and the v1.0.0 release on all five targets.
 ## Out of scope
 - New features (backlog: full ui.custom component model, ARM64 Windows,
   v1 credential kinds — next milestone).
+
+## Delivery record (2026-11-21)
+- Sealing docs by gentle-ai-worker (CHANGELOG, stability contract,
+  README, RELEASE_NOTES); parent: version bump 0.2.1 → 1.0.0.
+- PR #149 merged as `9c7681f` (CI 7/7 on PR + main runs
+  44885683585 / 44886403530); tag `v1.0.0` → release run 44886436938
+  green (5 targets + install.sh, published 2026-11-21).
+- Acceptance: published `pi-rust-1.0.0-aarch64-unknown-linux-musl.tar.gz`
+  (native architecture) in an isolated temp dir → `pi-rust --version`
+  → `pi-rust 1.0.0`. S5 met; M11 delivered.

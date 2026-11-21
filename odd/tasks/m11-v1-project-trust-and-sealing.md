@@ -28,7 +28,7 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
 - T2 / WP-1101 — Upstream pin refresh (17d6ca7 → 64a15f4) — S2 — branch `feat/wp-1101-upstream-pin-refresh` — PR #146 — **merged into main as `c3c5a91` (2026-11-16), CI 7/7 green (run 44158531958)** — commits `a4cc8ee` (pin) + `ec9057c` (M11 setup); native review APPROVED (`review-119f0170c6991780`, risk+reliability, authority burned)
 - T3 / WP-1102 — Project trust model (design + implementation) — S3 — branch `feat/wp-1102-project-trust` — PR #147 — **merged into main as `7992629` (2026-11-18), CI 7/7 green (run 44396426386)** — commits `907eea8` (impl) + `686e614` (docs) + `c5272f2`/`8d78fd4`/`85c273d` (platform test fixes); native review attempted (`review-2c3d53db76ef3311`), provider size wall at 2152 lines, abandoned via `operator_disposition` (see L7); S3 met on CI + 374-test + identity-e2e evidence
 - T4 / WP-1103 — Project `.pi/` config under the gate — S4 — branch `feat/wp-1103-project-pi-config` — PR #148 — **merged into main as `cb4b47c` (2026-11-18), CI 7/7 green first try (run 44612758644)** — commit `1f37087`; S4 met on CI + 394-test + MCP-roundtrip-e2e evidence
-- T5 / WP-1104 — v1.0 sealing & release — S5 — branch: — PR: — commit:
+- T5 / WP-1104 — v1.0 sealing & release — S5 — branch `feat/wp-1104-v10-sealing` — PR #149 — **merged into main as `9c7681f` (2026-11-21), CI 7/7 (runs 44885683585 + 44886403530), tag `v1.0.0` → release run 44886436938 green, v1.0.0 published (5 targets + install.sh), acceptance: published aarch64-musl artifact in isolated temp → `pi-rust 1.0.0`** — commit `f097c92`; S5 met
 
 ## Log
 - **L1** (2026-11-16): M10 endgültig geschlossen (v0.2.1 released, WP-1007
@@ -145,3 +145,19 @@ Upstream pin: `earendil-works/pi @ 64a15f4bee63d761d5398bf4126ea63abef0dc98`
   expectations, parsed-JSON key checks, serde_json fixtures) paid off
   immediately: no platform round. M11 is at 3/4 WPs; next: WP-1104
   v1.0 sealing & release.
+- **L11** (2026-11-21): T5/WP-1104 — v1.0 sealing & release. Sealing
+  docs by gentle-ai-worker (CHANGELOG.md full history v0.0.0-staging.1
+  .. v0.2.1 incl. the v0.2.0 retraction note + v1.0.0; docs/
+  stability-contract.md — frozen surfaces: CLI (cli-reference diff-
+  test), bridge protocol v6 additive-only, session JSONL v3, ~/.pi
+  layout, auth.json; deprecation policy; README M1–M11 + next-
+  milestone backlog re-base; RELEASE_NOTES v1.0.0), parent added the
+  version bump 0.2.1 → 1.0.0 (Cargo.lock synced, `pi-rust --version`
+  → `pi-rust 1.0.0` verified locally). PR #149 merged as `9c7681f`
+  (CI 7/7 both runs). Tag `v1.0.0` on the merge commit → release run
+  44886436938 green (3 build jobs, 5 targets + install.sh, publish
+  2026-11-21). Acceptance (S5): the published
+  `pi-rust-1.0.0-aarch64-unknown-linux-musl.tar.gz` (native
+  architecture, 71M) extracted to an isolated temp dir →
+  `pi-rust --version` → `pi-rust 1.0.0`, layout pi-rust + sidecar +
+  upstream. **M11 complete: v1.0.0 released.**

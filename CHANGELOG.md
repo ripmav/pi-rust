@@ -3,7 +3,7 @@
 User-facing release history for pi-rust, newest first. Every release tag
 since the first staging release is listed. Dates are tag dates.
 
-## v1.0.0 (unreleased)
+## v1.0.0 (2026-11-21)
 
 Milestone M11 — project trust & v1.0 sealing.
 
