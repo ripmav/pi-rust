@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["pi-ext"]
+
 [package]
 name = "pi-rust"
 version = "1.0.0"
