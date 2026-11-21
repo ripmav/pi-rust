@@ -528,6 +528,7 @@ above) — pi-rust sessions open in pi and vice versa.
 
 ```
 src/            Rust core (transport, client, model, provider, tools, session, agent, cli, tui)
+pi-ext/         public Rust extension framework crate (M12, ADR 0003)
 sidecar/        Node sidecar (protocol server, API shim, dialogs, session view, smoke)
 tests/          e2e integration tests (spawn core + sidecar + unmodified extensions)
 tests/fixtures/ test-only fixture extensions (clearly marked; not upstream code)
