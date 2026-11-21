@@ -33,7 +33,7 @@ one PR.
 
 - T1 / [WP-1201](../../roadmap/m12-rust-extension-platform/wp-1201-workspace-pi-ext-skeleton.md) — workspace + `pi-ext` skeleton — **merged into main as `bb92239` (2026-11-21), CI 7/7 green (run 44948477220)**
 - T2 / [WP-1202](../../roadmap/m12-rust-extension-platform/wp-1202-pi-ext-wire-types.md) — `pi-ext`: bridge wire types — **merged into main as `661680e` (2026-11-21), CI 7/7 green (run 44954140387)**
-- T3 / [WP-1203](../../roadmap/m12-rust-extension-platform/wp-1203-pi-ext-api-core.md) — `pi-ext`: API surface — core — **open**
+- T3 / [WP-1203](../../roadmap/m12-rust-extension-platform/wp-1203-pi-ext-api-core.md) — `pi-ext`: API surface — core — **in progress** (branch `feat/wp-1203-pi-ext-api-core`)
 - T4 / [WP-1204](../../roadmap/m12-rust-extension-platform/wp-1204-pi-ext-api-parity.md) — `pi-ext`: API surface — rest + parity — **open**
 - T5 / [WP-1205](../../roadmap/m12-rust-extension-platform/wp-1205-pi-ext-user-target.md) — `pi-ext`: user target (v6 process) — **open**
 - T6 / [WP-1206](../../roadmap/m12-rust-extension-platform/wp-1206-pi-ext-core-target.md) — `pi-ext`: core target (C ABI + dlopen) — **open**
