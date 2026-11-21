@@ -203,7 +203,7 @@ fn catalog_lines_carry_the_right_types() {
             let msgs = &event.messages;
             assert_eq!(msgs.len(), 4);
             assert!(matches!(&msgs[0], AgentMessage::System(_)));
-            assert!(matches!(&msgs[3], AgentMessage::ToolResult(m) if m.is_error == false));
+            assert!(matches!(&msgs[3], AgentMessage::ToolResult(m) if !m.is_error));
             if let AgentMessage::Assistant(a) = &msgs[2] {
                 assert_eq!(
                     a.usage.as_ref().unwrap().cost.as_ref().unwrap().total,
