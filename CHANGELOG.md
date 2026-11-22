@@ -2,6 +2,8 @@
 
 User-facing release history for pi-rust, newest first. Every release tag
 since the first staging release is listed. Dates are tag dates.
+Entries from the first release-please release onward are generated from
+conventional commits (see `README.md` → Releases).
 
 ## v1.0.0 (2026-11-21)
 

@@ -1,0 +1,25 @@
+name: release-please
+
+# Release automation (release-please 17, config in
+# .github/release-please-config.json): every push to main with unreleased
+# conventional commits opens/updates a release PR — bumps the root
+# Cargo.toml version and rewrites the CHANGELOG.md section. Merging that
+# PR cuts the `vX.Y.Z` tag and the GitHub release. The release PR gets
+# the same manual review as every other PR.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: google-github-actions/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-please-version: 17
