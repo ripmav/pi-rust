@@ -22,4 +22,6 @@ jobs:
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          release-please-version: 17
+          # The googleapis action defaults to the repo root; this repo keeps
+          # the config in .github/ (the former google-github-actions place).
+          config-file: .github/release-please-config.json
