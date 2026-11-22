@@ -1,74 +1,45 @@
-# pi-rust v1.0.0
+# pi-rust v1.1.0
 
-The trust + sealing release: project-local config is trust-gated like
-upstream (untrusted projects have zero behavioral effect), trusted
-projects can carry their own `.pi/` settings and MCP servers, and
-pi-rust v1.0 freezes its surface with a stability contract.
+The Rust extension platform groundwork: the `pi-ext` framework crate —
+the public API Rust extensions code against — lands in three work
+packages, mirroring the upstream extension API (`pi` + `ctx`, ADR 0002).
+No changes to core behavior, the CLI, the TUI or the bridge protocol
+for existing users.
 
-## What's new since v0.2.1
+## What's new since v1.0.0
 
-**Project trust (upstream parity):**
-- Untrusted `<cwd>/.pi/` content has **zero behavioral effect** — trust
-  is an explicit, persistent, user-visible decision, stored per path in
-  `<agentDir>/trust.json` (nearest-ancestor lookup: a decision for a
-  parent dir covers everything below it)
-- New flags: `--approve`/`-a` (trust project-local files for this run)
-  and `--no-approve`/`-na` (ignore them for this run)
-- New `defaultProjectTrust` setting (`"ask"` default, `"always"`,
-  `"never"`)
-- Interactive startup prompt when no decision is stored (5 options in
-  upstream order/labels), re-openable with `/trust`; an untrusted run
-  with trust-requiring resources shows a warning line; headless runs
-  without an explicit decision are not trusted (default-deny)
-- Behavior change: project skills, prompts and extensions under
-  `<cwd>/.pi/` load **only when trusted** (agent-dir and
-  `--extension-dir` resources are unaffected)
+**`pi-ext` — the public Rust extension framework crate** (new workspace
+member, ADR 0003):
 
-**Project `.pi/` config under the gate (trusted projects only):**
-- `<cwd>/.pi/settings.json` merges over the agent-dir settings — project
-  values win per field; an invalid file is rejected with a logged message
-  and the session continues with the global settings
-- `<cwd>/.pi/mcp.json` — project MCP servers merged into the agent-dir
-  `mcp.json` with upstream `loadMcpConfig` semantics (full entries
-  replace; override entries limited to `enabled`/`exposure`/
-  `toolExposure`)
+- **WP-1201** — Cargo workspace + `pi-ext` skeleton.
+- **WP-1202** — `pi-ext::wire`: one source of truth for the bridge
+  protocol v6 line shapes — all 28 core→sidecar commands, 16
+  sidecar→core events, `init`/`ready` payloads, every catalog event
+  payload + decision result, LLM message/content types, dialogs and v6
+  pane descriptors.
+- **WP-1203** — `pi-ext::pi`: the core of the `pi` + `ctx` mirror — the
+  `Extension` trait (init entry + 22 catalog event handlers), the `Pi`
+  object (`send_user_message`, `append_entry`, session name/label,
+  `exec`, `get_settings`, `set_model`, thinking level), `Tool`
+  registration with JSON-schema helpers, and the `ExtensionTransport`
+  hook the upcoming transports (v6 user process, WP-1205; core cdylib,
+  WP-1206) implement. Doc examples compile verbatim
+  (`cargo test --doc`).
 
-**Upstream pin refreshed** to `earendil-works/pi @ 64a15f4`
-(consumed export matrix re-verified; no behavior change for pi-rust,
-zero code migration).
+**Docs** — Epic E1 (M12): ADRs 0001–0006, `docs/architecture.md`,
+per-WP task index + status files.
 
-**v1.0 sealing:**
-- Stability contract —
-  [`docs/stability-contract.md`](docs/stability-contract.md) freezes the
-  CLI surface, bridge protocol v6, session file format, `~/.pi` layout
-  and auth.json format, plus the deprecation policy
-- `CHANGELOG.md` — full user-facing history since v0.0.0-staging.1
+**Release tooling** — release-please: conventional commits on `main`
+open a release PR (version bump + changelog section); merging that PR
+cuts the tag and the GitHub release (the release PR gets the same
+manual review as every other PR). This v1.1.0 is cut manually as the
+last hand-cut release.
 
-## Install
+Next (M12): the rest of the API surface — UI/commands/shortcuts/flags/
+providers/MCP — and the catalog↔API parity test (WP-1204), then the two
+transports (WP-1205/1206) and the six bridge-matrix ports as Rust core
+extensions (WP-1210+).
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | bash
-# pinned version:
-curl -fsSL https://raw.githubusercontent.com/ripmav/pi-rust/main/install.sh | PI_RUST_VERSION=v1.0.0 bash
-```
+## Upgrading from v1.0.0
 
-Targets (5): Linux x86_64 (`x86_64-unknown-linux-gnu`), Linux arm64
-(`aarch64-unknown-linux-musl`), macOS arm64 (`aarch64-apple-darwin`),
-macOS x86_64 (`x86_64-apple-darwin`), Windows x86_64
-(`x86_64-pc-windows-msvc`, `pi-rust.exe`) + `install.sh`.
-Requires bash, curl, tar and **node ≥ 22.19** (Windows: Git for Windows
-for the bash tool; the TUI PTY test matrix is POSIX-only by design).
-
-Verify: `pi-rust --version` → `pi-rust 1.0.0`.
-
-From source: see the README ("From source (fresh clone)") — the CI
-`fresh-clone` job follows that recipe in a clean container on every push.
-
-## Known limitations (v1)
-
-Not in v1.0 (next-milestone backlog): the full `ctx.ui.custom` component
-model (the descriptor subset ships), non-`api_key`/oauth credential
-kinds (command refs — typed rejection), ARM64 Windows, upstream
-internal/experimental packages (`chord`, `codemode`, `durable`,
-`evals`, `telemetry`), pixel-perfect TUI parity (functional parity is
-the bar).
+Nothing to do: no flag, config, session-format or CLI changes.

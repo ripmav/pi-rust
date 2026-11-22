@@ -5,6 +5,29 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## v1.1.0 (2026-11-21)
+
+Milestone M12 (E1S2, 3/6) — Rust extension platform groundwork. No
+user-facing core behavior changes.
+
+- **`pi-ext` framework crate** (new workspace member, ADR 0003):
+  - WP-1201 — Cargo workspace + crate skeleton.
+  - WP-1202 — `pi-ext::wire`: bridge protocol v6 wire types (single
+    source of truth; all catalog commands/events, init/ready payloads,
+    LLM message/content types, dialogs, panes).
+  - WP-1203 — `pi-ext::pi`: `Extension` trait (init + 22 catalog event
+    handlers), `Pi` object (messages, session name/label, exec,
+    settings, setModel, thinking level), `Tool` registration +
+    JSON-schema helpers, `ExtensionTransport` hook for the upcoming
+    transports. Doc examples compile verbatim.
+  - Note: `pi-ext` is version-locked with the core (both `1.1.0`) while
+    it is unpublished; independent versioning is a follow-up.
+- Docs — Epic E1 ADRs (0001–0006), `docs/architecture.md`, per-WP task
+  index + status files.
+- Release tooling — release-please (PR #155, #156): conventional
+  commits on main open a release PR; merging it cuts the tag + GitHub
+  release. This v1.1.0 is the last hand-cut release.
+
 ## v1.0.0 (2026-11-21)
 
 Milestone M11 — project trust & v1.0 sealing.
