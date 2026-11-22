@@ -1,11 +1,14 @@
 name: release-please
 
-# Release automation (release-please 17, config in
-# .github/release-please-config.json): every push to main with unreleased
-# conventional commits opens/updates a release PR — bumps the root
-# Cargo.toml version and rewrites the CHANGELOG.md section. Merging that
-# PR cuts the `vX.Y.Z` tag and the GitHub release. The release PR gets
-# the same manual review as every other PR.
+# Release automation (config in .github/release-please-config.json,
+# versions in .release-please-manifest.json): a push to main with new
+# commits beyond the latest tag opens/updates a release PR — bumps the
+# root Cargo.toml version and rewrites the CHANGELOG.md section.
+# Merging that PR cuts the `vX.Y.Z` tag and the GitHub release. The
+# release PR gets the same manual review as every other PR.
+#
+# Run gate: the action only runs when main has commits beyond the latest
+# release tag — a push that lands nothing new since the tag skips it.
 on:
   push:
     branches: [main]
@@ -15,7 +18,31 @@ permissions:
   pull-requests: write
 
 jobs:
+  # Cheap pre-flight: is there anything new to release?
+  check-new-commits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - id: gate
+        run: |
+          last_tag="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+          if [ -n "$last_tag" ] && [ "$(git describe --tags --exact-match HEAD 2>/dev/null || true)" = "$last_tag" ]; then
+            echo "HEAD is on the latest tag ($last_tag) — nothing new to release, skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "commits beyond ${last_tag:-<no tag>}"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release-please:
+    needs: check-new-commits
+    if: needs.check-new-commits.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
