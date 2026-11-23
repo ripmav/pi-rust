@@ -127,8 +127,8 @@ milestone (all milestone stacks are merged into `main`):
 | real human dialog answers (select/confirm/input/editor) | ✅ M6 (TUI) |
 | TUI: themes, keybindings, pickers, slash commands, print/json modes | ✅ M6 |
 | `registerProvider` (custom providers invoked) | ✅ M7 |
-| custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints, upstream `ModelRuntime` — no extension shim required) | ✅ M13 |
-| core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; the sidecar `ModelRuntime` path coexists until E3S2) | ✅ M14 (E3S1) |
+| custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints — no extension shim required) | ✅ M13/M14 (core-native since E3S1; the M13 sidecar route was removed in E3S2) |
+| core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; since E3S2 the sidecar no longer advertises or routes models.json providers) | ✅ M14 (E3S1/E3S2) |
 | `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |

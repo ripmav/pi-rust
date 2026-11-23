@@ -42,8 +42,11 @@ flowchart LR
   The core never streams models of *extension*-registered providers itself.
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
-  override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner;
-  never talks to a model.
+  override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
+  the js/ts-extension compatibility layer (E3: its built-in extension
+  hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
+  E3S2 it no longer reads or routes the agent dir's `models.json` — model
+  providers are the core's (E3S1).
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog

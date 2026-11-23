@@ -6,7 +6,6 @@
  */
 import path from "node:path";
 import crypto from "node:crypto";
-import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createSessionView } from "./session.mjs";
 import { createDialogManager, createPaneHost, createBridgeActions, modelRegistryStub, log } from "./api.mjs";
@@ -221,24 +220,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name && m.name !== m.id ? { name: m.name } : {}),
 				})),
 			}));
-		// WP-1301: the agent dir's models.json custom providers — composed by
-		// the upstream ModelRuntime (models, defaults, credentials); extension-
-		// registered providers keep priority. The core's bundled catalog wins
-		// for core-builtin ids (documented v0 limit).
-		const custom = (modelRuntime?.getProviders?.() ?? [])
-			.filter((p) => modelsJsonIds.has(p.id) && !state.nativeProviders.has(p.id) && !state.providers.has(p.id))
-			.map((p) => ({
-				name: p.id,
-				models: (p.getModels?.() ?? [])
-					.filter((m) => m?.id)
-					.map((m) => ({
-						provider: p.id,
-						id: m.id,
-						api: m.api,
-						...(m.name && m.name !== m.id ? { name: m.name } : {}),
-					})),
-			}));
-		return [...legacy, ...native, ...builtinOauth, ...custom];
+		// WP-1402/E3S2: the agent dir's models.json providers are NO LONGER
+		// advertised here — the core owns them (E3S1: parsed natively, its
+		// openai-completions models served by the built-in driver, D11).
+		return [...legacy, ...native, ...builtinOauth];
 	};
 
 	// WP-1005: capture the native Provider OBJECT form (upstream
@@ -376,29 +361,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			forwardStream(streamId, stream, builtin);
 			return;
 		}
-		// WP-1301: the agent dir's models.json custom providers — stream in
-		// the upstream runtime (same path as the oauth builtins): credential
-		// resolution ($ENV_VAR interpolation, auth.json) and the per-api
-		// streamers are upstream's.
-		if (modelRuntime && modelsJsonIds.has(model.provider)) {
-			const providerDef = modelRuntime.getProviders().find((p) => p.id === model.provider);
-			const customModel = (providerDef?.getModels?.() ?? []).find((m) => m?.id === model.id);
-			if (!customModel) {
-				return output(response(id, "provider_stream", false, undefined, `models.json provider ${model.provider} has no model ${model.id}`));
-			}
-			const streamId = command.streamId ?? crypto.randomUUID();
-			output(response(id, "provider_stream", true, { ok: true, streamId }));
-			let stream;
-			try {
-				stream = modelRuntime.streamSimple(customModel, { messages: command.messages ?? [] }, { ...(command.options ?? {}) });
-			} catch (err) {
-				stream = (async function* () {
-					yield providerErrorEvent(customModel, err instanceof Error ? err : new Error(String(err)));
-				})();
-			}
-			forwardStream(streamId, stream, customModel);
-			return;
-		}
+		// WP-1402/E3S2: models.json providers are not routed here any more —
+		// the core serves its own models.json models (E3S1, D11). A
+		// provider_stream for one of them is a core routing error; the
+		// unknown-provider rejection below is the observable.
 		const config = state.providers.get(model.provider);
 		if (!config) return output(response(id, "provider_stream", false, undefined, `unknown extension provider: ${model.provider}`));
 		if (typeof config.streamSimple !== "function") {
@@ -578,7 +544,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 	}
 
 	let modelRuntime = null; // WP-1007: upstream runtime for the builtin oauth providers
-	let modelsJsonIds = new Set(); // WP-1301: provider ids from <agentDir>/models.json
 
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
@@ -620,24 +585,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// until the first authenticated refresh after login).
 		modelRuntime = await ca.ModelRuntime.create({ allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
 
-		// WP-1301: custom providers from the agent dir's models.json — the
-		// ModelRuntime above already loaded it (ModelRuntime.create resolves
-		// <agentDir>/models.json via getAgentDir); the bridge needs only the
-		// provider ids to advertise and route. Ids only: the runtime owns the
-		// semantics (schema, defaults, credentials). Missing file: no-op;
-		// malformed: nothing advertised, no new failure mode (ModelConfig.load
-		// keeps its own error state runtime-side).
-		const loadModelsJsonProviderIds = () => {
-			try {
-				const raw = readFileSync(path.join(ca.getAgentDir(), "models.json"), "utf8").replace(/^\uFEFF/, "");
-				const json = JSON.parse(raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/[^\n]*$/gm, ""));
-				return new Set(Object.keys(json?.providers ?? {}));
-			} catch (err) {
-				if (err?.code !== "ENOENT") log(`models.json: provider ids not read (${err instanceof Error ? err.message : String(err)})`);
-				return new Set();
-			}
-		};
-		modelsJsonIds = loadModelsJsonProviderIds();
+		// WP-1402/E3S2: the agent dir's models.json is the CORE's config now
+		// (E3S1) — the bridge no longer reads it. (The upstream ModelRuntime
+		// above still loads it internally, unmodified; the bridge never uses
+		// those providers.)
 
 		// WP-702: the built-in mcp extension (after the runner, before ready):
 		// its handlers subscribe to session_start / mcp_servers_change and it

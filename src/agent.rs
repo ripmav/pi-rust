@@ -436,9 +436,11 @@ pub async fn event_task(
                     match (provider, model_id) {
                         (Some(p), Some(m)) => {
                             // WP-1401: core-native models.json model — the
-                            // core serves it itself (built-in OpenAI driver)
-                            // even when the sidecar also advertises it in
-                            // `ready.providers` (E2S1 interim coexistence).
+                            // core serves it itself (built-in OpenAI driver,
+                            // D11). E3S2: the sidecar no longer advertises
+                            // models.json providers; the guard also covers
+                            // an extension registering the same provider
+                            // name.
                             if let Some(owner) = ctx.models_json.owner(&p, &m) {
                                 match crate::models_json::build_driver(owner, &m, &ctx.agent_dir) {
                                     Ok(drv) => {
@@ -1515,9 +1517,10 @@ async fn model_call<'a>(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    // WP-1401: a core-native models.json model is served by the core driver
-    // even when the sidecar also advertises it in `ready.providers` (the
-    // E2S1 sidecar path stays for extension-registered providers only).
+    // WP-1401: a core-native models.json model is always served by the
+    // core driver (D11) — E3S2: the sidecar no longer advertises or routes
+    // models.json providers, this guard also covers the name-collision case
+    // (an extension registers the same provider name).
     let ext_model = if ctx.models_json.owner(&p, &mid).is_some() {
         None
     } else {

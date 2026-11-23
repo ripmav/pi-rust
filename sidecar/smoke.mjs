@@ -249,7 +249,6 @@ async function main() {
 	let child3 = null;
 	let child4 = null;
 	let child5 = null;
-	let child6 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
@@ -701,45 +700,12 @@ async function main() {
 		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("shortcut sidecar clean exit 0", code5 === 0, code5);
 
-		// (o) WP-1301: the agent dir's models.json custom providers — the
-		// sidecar's upstream ModelRuntime loads them; the bridge advertises
-		// them in ready (no extensions, no network: getProviders is the local
-		// snapshot; credential resolution happens at stream time).
-		const agentDir6 = path.join(tmp, "agent6");
-		mkdirSync(agentDir6, { recursive: true });
-		// models.json is JSONC upstream — include a comment to exercise the
-		// id-reader's comment stripping.
-		writeFileSync(
-			path.join(agentDir6, "models.json"),
-			`{
-  // smoke custom provider (WP-1301)
-  "providers": {
-    "smokecustom": {
-      "name": "Smoke Custom",
-      "baseUrl": "http://127.0.0.1:1/v1",
-      "api": "openai-completions",
-      "apiKey": "$SMOKE_UNSET_ENV",
-      "models": [{ "id": "smoke-model-1", "name": "Smoke Model", "input": ["text"], "contextWindow": 4096, "maxTokens": 512 }]
-    }
-  }
-}`,
-		);
-		child6 = spawn(process.execPath, [ENTRY, "--agent-dir", agentDir6], { cwd: tmp, stdio: ["pipe", "pipe", "pipe"] });
-		child6.stderr.on("data", (d) => process.stderr.write(d));
-		const core6 = new FakeCore(child6);
-		const init6 = await core6.request({ type: "init", protocolVersion: 6, capabilities: { ui: [], timeoutMs: 5000 } });
-		check("models.json sidecar init", init6.success === true, init6);
-		const ready6 = await core6.nextEvent((e) => e.type === "ready", "ready (models.json)");
-		const smokeCustom = ready6.providers?.find((p) => p?.name === "smokecustom");
-		check("models.json provider advertised in ready", smokeCustom && smokeCustom.models.length === 1, ready6.providers);
-		check(
-			"models.json model entry shape (provider/id/api)",
-			smokeCustom?.models?.[0]?.provider === "smokecustom" && smokeCustom.models[0].id === "smoke-model-1" && smokeCustom.models[0].api === "openai-completions",
-			smokeCustom?.models?.[0],
-		);
-		core6.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
-		const code6 = await Promise.race([core6.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
-		check("models.json sidecar clean exit 0", code6 === 0, code6);
+		// WP-1402/E3S2: the WP-1301 phase (o) — models.json advertise +
+		// stream through the sidecar's upstream ModelRuntime — is removed
+		// with the bridge branches: models.json is the core's config now
+		// (E3S1). The e2e `models_json_custom_provider_end_to_end`
+		// (tests/extension_bridge.rs) re-points the user scenario at the
+		// core-native path.
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
@@ -749,7 +715,6 @@ async function main() {
 			child3?.kill("SIGKILL");
 			child4?.kill("SIGKILL");
 			child5?.kill("SIGKILL");
-			child6?.kill("SIGKILL");
 		} catch {}
 	}
 

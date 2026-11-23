@@ -3807,65 +3807,27 @@ fn project_extensions_gated_on_trust() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// WP-1301 / E2S1: a custom provider defined in the agent dir's
-/// `models.json` (upstream format — the solheim field case) streams through
-/// the sidecar's upstream ModelRuntime with NO extension registered. The
-/// core never learns the provider itself: it is advertised in `ready` and
-/// routed over `provider_stream` (credential + endpoint resolution are
-/// upstream's). A one-shot mock OpenAI SSE endpoint stands in for the
-/// real OpenAI-compatible server.
+/// WP-1301/E2S1, re-pointed by WP-1402/E3S2: a custom provider defined in
+/// the agent dir's `models.json` (upstream format — the solheim field case:
+/// JSONC comment, `$ENV` apiKey) works end-to-end with NO extension shim —
+/// and the model is owned by the CORE (E3S1, D11): the core parses
+/// models.json natively and streams it through the built-in OpenAI driver
+/// even with the sidecar alive; the sidecar no longer advertises or routes
+/// models.json providers (E3S2). The mock's final chunk carries NO
+/// `finish_reason` (pi-ai's openai-completions streamer — the old sidecar
+/// path — requires it, the core's lenient driver does not), so a transcript
+/// carrying the mock's text proves the core's driver served the call.
 #[test]
 fn models_json_custom_provider_end_to_end() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-wp1301-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
 
-    // One-shot SSE mock (same pattern as provider_e2e_prompt_via_mock_openai;
-    // the final chunk carries finish_reason — pi-ai's openai-completions
-    // streamer requires it, unlike the core's own lenient driver).
-    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}).to_string();
-    let c2 = json!({"choices":[{"delta":{"content":" from models.json"},"finish_reason":"stop"}]})
-        .to_string();
-    let sse = format!("data: {c1}\ndata: {c2}\ndata: [DONE]\n");
-    let mut body = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
-    for line in sse.split_inclusive('\n') {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let b = line.as_bytes();
-        body.push_str(&format!("{:x}\r\n", b.len()));
-        body.push_str(line);
-        body.push_str("\r\n");
-    }
-    body.push_str("0\r\n\r\n");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        use std::io::Read;
-        let Ok((mut s, _)) = listener.accept() else {
-            return;
-        };
-        // Read until the header terminator appears anywhere in what we have
-        // (reqwest delivers headers+body in one segment).
-        let mut buf = vec![0u8; 65536];
-        let mut n = 0usize;
-        loop {
-            match s.read(&mut buf[n..]) {
-                Ok(0) | Err(_) => break,
-                Ok(k) => {
-                    n += k;
-                    if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-            }
-        }
-        use std::io::Write;
-        let _ = s.write_all(body.as_bytes());
-    });
+    // Mock OpenAI SSE endpoint (no finish_reason — see the doc comment).
+    let (base, _server) = sse_no_finish_mock("Hello from models.json");
 
     // The agent dir with a models.json custom provider (JSONC, $ENV apiKey
-    // — both supported upstream; the env var is set below).
+    // — the solheim field case).
     let agent_dir = tmp.join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
@@ -3908,7 +3870,6 @@ fn models_json_custom_provider_end_to_end() {
         Some(0),
         "pi-rust exited non-zero\n{stderr}"
     );
-    let _ = server.join();
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let lines: Vec<Value> = stdout
@@ -3923,7 +3884,7 @@ fn models_json_custom_provider_end_to_end() {
     let dump = final_line["session"].to_string();
     assert!(
         dump.contains("Hello from models.json"),
-        "mockcustom/models.json response missing from transcript\n{dump}"
+        "mockcustom/models.json response missing from transcript (no-finish mock: only the core's native driver can serve it)\n{dump}"
     );
     assert!(
         !dump.contains("not a built-in provider"),
@@ -3937,11 +3898,11 @@ fn models_json_custom_provider_end_to_end() {
 
 /// A mock OpenAI SSE endpoint (same response per connection) whose final
 /// chunk carries NO `finish_reason` — the core's OpenAI driver is lenient
-/// about it, but pi-ai's openai-completions streamer (the sidecar path)
-/// requires it and fails the stream. So a transcript carrying the mock's
-/// text PROVES the core's native driver served the call — even when the
-/// sidecar is alive and advertises the same provider (E2S1 interim
-/// coexistence).
+/// about it, but pi-ai's openai-completions streamer (the old sidecar path,
+/// removed in E3S2) requires it and fails the stream. So a transcript
+/// carrying the mock's text PROVES the core's native driver served the call
+/// — even when the sidecar is alive (E3S2: it no longer advertises the
+/// provider at all, so no bridge route exists).
 fn sse_no_finish_mock(text: &str) -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -4112,12 +4073,13 @@ fn models_json_core_native_sidecar_degraded() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// WP-1401 / E3S1: with the sidecar ALIVE (it still advertises the
-/// models.json provider in `ready.providers` — the E2S1 interim), the core
-/// routes its own models.json models to the NATIVE driver: the mock's
+/// WP-1401/E3S1: with the sidecar ALIVE (and, since WP-1402/E3S2, no
+/// longer advertising the models.json provider in `ready.providers`), the
+/// core routes its own models.json models to the NATIVE driver: the mock's
 /// final chunk has no `finish_reason`, which the sidecar's upstream
 /// streamer would reject — so the transcript carrying it proves the call
-/// never crossed the bridge.
+/// never crossed the bridge (E3S2: the sidecar now has no models.json
+/// route at all — an off-route `provider_stream` is rejected).
 #[test]
 fn models_json_core_native_sidecar_healthy_still_native() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-wp1401h-{}", std::process::id()));
