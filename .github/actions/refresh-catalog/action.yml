@@ -16,7 +16,20 @@ runs:
     - name: Re-bundle upstream catalog if stale
       shell: bash
       run: |
+        # Diagnostics (WP-1403 incident): show exactly what the build will
+        # bake in, so a truncated catalog is visible in the job log.
+        echo "upstream data files: $(find upstream/packages/ai/src/providers/data -name '*.json' | wc -l)"
+        if [ -f upstream/packages/ai/src/providers/data/openai.json ]; then
+          grep -q '"gpt-4"' upstream/packages/ai/src/providers/data/openai.json \
+            && echo "openai.json: present, gpt-4 present" \
+            || echo "openai.json: present, GPT-4 MISSING"
+        else
+          echo "openai.json: MISSING"
+        fi
         baked=$( { ls -t target/debug/build/pi-rust-*/out/models.json target/release/build/pi-rust-*/out/models.json 2>/dev/null || true; } | head -1)
+        if [ -n "$baked" ]; then
+          echo "baked catalog ($(basename "$(dirname "$(dirname "$baked")")")): $(node -p "Object.keys(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))).length" "$baked" 2>/dev/null || echo unreadable) entries"
+        fi
         if [ -z "$baked" ]; then
           echo "no cached bundled catalog — nothing to do"
         elif [ -n "$(find upstream/packages/ai/src/providers/data -name '*.json' -newer "$baked" 2>/dev/null | head -1)" ]; then
