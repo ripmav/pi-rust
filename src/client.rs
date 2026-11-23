@@ -120,6 +120,32 @@ impl BridgeClient {
         )
     }
 
+    /// WP-1401: a client with no sidecar (spawn failed). Permanently
+    /// `Stopped` (protocol: a spawn failure leaves the core stopped — no
+    /// extensions, built-ins only); every command drops to its protocol
+    /// default and `wait_exited` resolves `None` at once (no child).
+    pub fn dead() -> (Self, mpsc::UnboundedReceiver<Value>) {
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        drop(rx); // every send fails: writes drop
+        let (events, events_rx) = mpsc::unbounded_channel::<Value>();
+        drop(events);
+        let (state_tx, state_rx) = watch::channel(State::Stopped);
+        let (exit_tx, exit_rx) = watch::channel(None::<i32>);
+        drop(exit_tx); // no child: wait_exited resolves None immediately
+        (
+            Self {
+                tx,
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                state_tx,
+                state_rx,
+                exit_rx,
+                degraded_seen: Arc::new(AtomicBool::new(false)),
+                streams: Arc::new(Mutex::new(HashMap::new())),
+            },
+            events_rx,
+        )
+    }
+
     fn degrade(st: &watch::Sender<State>, seen: &AtomicBool) {
         if *st.borrow() == State::Running {
             seen.store(true, Ordering::SeqCst);

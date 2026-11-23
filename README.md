@@ -128,6 +128,7 @@ milestone (all milestone stacks are merged into `main`):
 | TUI: themes, keybindings, pickers, slash commands, print/json modes | ✅ M6 |
 | `registerProvider` (custom providers invoked) | ✅ M7 |
 | custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints, upstream `ModelRuntime` — no extension shim required) | ✅ M13 |
+| core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; the sidecar `ModelRuntime` path coexists until E3S2) | ✅ M14 (E3S1) |
 | `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |
@@ -150,7 +151,8 @@ sidecar-routed models of those providers work), `AWS_PROFILE`
 The core's **agent dir** resolves like upstream `getAgentDir`:
 `--agent-dir` > env `PI_CODING_AGENT_DIR` > `~/.pi/agent`. **By default the
 core reads your real `~/.pi/agent`** (M3): `settings.json` (defaults),
-`auth.json` (credentials, see below), `sessions/` (session files) and
+`auth.json` (credentials, see below), `models.json` (custom providers —
+parsed natively by the core since M14/E3S1), `sessions/` (session files) and
 `prompts/` (templates) — and the sidecar's extension discovery follows the
 upstream three-stage order: (1) `<project>/.pi/extensions/`, (2)
 `<agent-dir>/extensions/`, (3) explicit `--extension-dir` paths (deduped by

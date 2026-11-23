@@ -79,6 +79,9 @@ pub struct TuiApp {
     pub templates: Vec<crate::templates::Template>,
     /// WP-801: discovered skills (slash-command expansion for `/skill:<name>`).
     pub skills: Vec<crate::skills::Skill>,
+    /// WP-1401/E3S1: core-native models.json models (merged into the model
+    /// picker next to the bundled catalog).
+    pub extra_models: Vec<crate::registry::Model>,
     /// WP-608: the open slash menu (matched commands + selection).
     pub slash: Option<(Vec<commands::Command>, usize)>,
     /// WP-609: the open picker (session resume / model switch).
@@ -185,6 +188,12 @@ impl TuiApp {
         self
     }
 
+    /// WP-1401/E3S1: the core-native models.json models for the model picker.
+    pub fn with_extra_models(mut self, models: Vec<crate::registry::Model>) -> Self {
+        self.extra_models = models;
+        self
+    }
+
     /// WP-608: recompute the slash menu for the current input. Called on
     /// key events (never in the render path, per the house rules).
     fn refresh_slash(&mut self) {
@@ -196,8 +205,8 @@ impl TuiApp {
         self.slash = commands::menu_items(&all, &self.input).map(|items| (items, 0));
     }
 
-    /// WP-609: open the model picker (bundled registry, `provider/model`
-    /// labels, sorted).
+    /// WP-609: open the model picker (bundled registry + core-native
+    /// models.json models, `provider/model` labels, sorted).
     pub fn open_model_picker(&mut self) {
         let reg = crate::registry::ModelRegistry::bundled();
         let mut items: Vec<picker::PickerItem> = Vec::new();
@@ -209,6 +218,15 @@ impl TuiApp {
                     value: label,
                 });
             }
+        }
+        // WP-1401: core-native models.json models (the registry merge
+        // already skipped bundled ids — no duplicates).
+        for m in &self.extra_models {
+            let label = format!("{}/{}", m.provider, m.id);
+            items.push(picker::PickerItem {
+                display: label.clone(),
+                value: label,
+            });
         }
         items.sort_by(|a, b| a.display.cmp(&b.display));
         self.picker_kind = PickerKind::Model;
@@ -470,6 +488,7 @@ impl TuiApp {
             ext_shortcuts: Vec::new(),
             templates: Vec::new(),
             skills: Vec::new(),
+            extra_models: Vec::new(),
             slash: None,
             picker: None,
             pane: None,

@@ -7,6 +7,7 @@ mod config;
 mod corelog;
 mod edit_diff;
 mod model;
+mod models_json;
 mod provider;
 mod registry;
 mod session;

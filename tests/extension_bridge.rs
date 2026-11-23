@@ -3932,3 +3932,329 @@ fn models_json_custom_provider_end_to_end() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// --- WP-1401 / E3S1: core-native models.json + OpenAI-compatible streaming ---
+
+/// A mock OpenAI SSE endpoint (same response per connection) whose final
+/// chunk carries NO `finish_reason` — the core's OpenAI driver is lenient
+/// about it, but pi-ai's openai-completions streamer (the sidecar path)
+/// requires it and fails the stream. So a transcript carrying the mock's
+/// text PROVES the core's native driver served the call — even when the
+/// sidecar is alive and advertises the same provider (E2S1 interim
+/// coexistence).
+fn sse_no_finish_mock(text: &str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let text = text.to_string();
+    // Detached: the thread parks on accept() and dies with the test process;
+    // every connection gets the same response (a run may call the provider
+    // once per selection variant).
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        loop {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            // Read until the header terminator appears anywhere in what we
+            // have (reqwest delivers headers+body in one segment).
+            let mut buf = vec![0u8; 65536];
+            let mut n = 0usize;
+            loop {
+                match s.read(&mut buf[n..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => {
+                        n += k;
+                        if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let c1 = json!({"choices":[{"delta":{"role":"assistant","content":text}}]}).to_string();
+            let sse = format!("data: {c1}\ndata: [DONE]\n");
+            let mut body =
+                String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+            for line in sse.split_inclusive('\n') {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let b = line.as_bytes();
+                body.push_str(&format!("{:x}\r\n", b.len()));
+                body.push_str(line);
+                body.push_str("\r\n");
+            }
+            body.push_str("0\r\n\r\n");
+            use std::io::Write;
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    (base, server)
+}
+
+/// WP-1401 / E3S1 (HARD acceptance): the solheim case — a models.json
+/// provider against a mock OpenAI SSE endpoint — works with the sidecar
+/// DEGRADED (spawn failure): the provider call is served by the core's
+/// built-in OpenAI driver and never crosses the bridge (there is no
+/// bridge — the sidecar never spawned).
+#[test]
+fn models_json_core_native_sidecar_degraded() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1401-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (base, _server) = sse_no_finish_mock("Hello from models.json");
+
+    // The agent dir with a models.json custom provider (JSONC, $ENV apiKey —
+    // the solheim field case).
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{
+  // e2e core-native provider (WP-1401)
+  "providers": {
+    "mockcustom": {
+      "name": "Mock Custom",
+      "baseUrl": "__BASE__",
+      "api": "openai-completions",
+      "apiKey": "$E3S1_MODELS_JSON_KEY",
+      "models": [{ "id": "mock-model", "name": "Mock Model", "input": ["text"], "contextWindow": 4096, "maxTokens": 512 }]
+    }
+  }
+}
+"#
+        .replace("__BASE__", &base),
+    )
+    .unwrap();
+
+    let run = |extra: &[&std::ffi::OsStr]| -> (String, String) {
+        let session_file = tmp.join(format!("session-{}.jsonl", uuid::Uuid::new_v4().simple()));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi-rust"));
+        // Sidecar degraded: a spawn failure (the node binary does not
+        // exist). The run must continue with the core-native driver.
+        cmd.env("PI_RUST_NODE", "/nonexistent/pi-rust-e3s1-node")
+            .env("E3S1_MODELS_JSON_KEY", "e3s1-key")
+            .arg("--provider")
+            .arg("mockcustom")
+            .arg("--model")
+            .arg("mock-model")
+            .arg("--prompt")
+            .arg("hi")
+            .arg("--agent-dir")
+            .arg(&agent_dir)
+            .arg("--session-file")
+            .arg(&session_file);
+        for a in extra {
+            cmd.arg(a);
+        }
+        let out = cmd.output().expect("running pi-rust");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "pi-rust exited non-zero\n{stderr}"
+        );
+        (String::from_utf8_lossy(&out.stdout).to_string(), stderr)
+    };
+
+    // (1) Flag selection — the E2S1 e2e's same selection, sidecar degraded.
+    let (stdout, stderr) = run(&[]);
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "the run must go through the degraded-sidecar path\n{stderr}"
+    );
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert_eq!(lines.last().unwrap()["kind"], "transcript");
+    assert!(
+        dump.contains("Hello from models.json"),
+        "the core's native driver must have served the call (no bridge — no sidecar)\n{dump}"
+    );
+    assert!(
+        !dump.contains("not a built-in provider"),
+        "provider resolution must not fall back to the typed fatal\n{dump}"
+    );
+
+    // (2) settings.json selection — same behavior via
+    // defaultProvider/defaultModel (the E2S1 parity entry point).
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"defaultProvider":"mockcustom","defaultModel":"mock-model"}"#,
+    )
+    .unwrap();
+    let session_file = tmp.join(format!(
+        "session-set-{}.jsonl",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-e3s1-node")
+        .env("E3S1_MODELS_JSON_KEY", "e3s1-key")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust (settings selection)");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "\n{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Hello from models.json"),
+        "settings defaultProvider/defaultModel selection must work degraded\n{dump}"
+    );
+
+    // The mock thread is detached (it parks on accept() until the test
+    // process exits); the child served everything before the assertions.
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1401 / E3S1: with the sidecar ALIVE (it still advertises the
+/// models.json provider in `ready.providers` — the E2S1 interim), the core
+/// routes its own models.json models to the NATIVE driver: the mock's
+/// final chunk has no `finish_reason`, which the sidecar's upstream
+/// streamer would reject — so the transcript carrying it proves the call
+/// never crossed the bridge.
+#[test]
+fn models_json_core_native_sidecar_healthy_still_native() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1401h-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (base, _server) = sse_no_finish_mock("Hello from models.json");
+
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{"providers":{"mockcustom":{"name":"Mock Custom","baseUrl":"__BASE__","api":"openai-completions","apiKey":"$E3S1_MODELS_JSON_KEY","models":[{"id":"mock-model","name":"Mock Model","contextWindow":4096,"maxTokens":512}]}}}
+"#
+        .replace("__BASE__", &base),
+    )
+    .unwrap();
+
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("E3S1_MODELS_JSON_KEY", "e3s1-key")
+        .arg("--provider")
+        .arg("mockcustom")
+        .arg("--model")
+        .arg("mock-model")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Hello from models.json"),
+        "a live sidecar must not pull the core's own models.json models over the bridge\n\n{dump}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1401 / E3S1: other api types on models.json providers are a typed
+/// "not core-native yet" error — no crash, no provider call.
+#[test]
+fn models_json_non_native_api_is_typed_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1401a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{"providers":{"anthro":{"name":"Anthro","baseUrl":"http://127.0.0.1:1","api":"anthropic-messages","apiKey":"k","models":[{"id":"m1"}]}}}
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        // The error fires at driver build, before the sidecar matters;
+        // keep the run fast and hermetic with a dead node binary.
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-e3s1-node")
+        .arg("--provider")
+        .arg("anthro")
+        .arg("--model")
+        .arg("m1")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a typed startup error is exit 1\n{stderr}"
+    );
+    assert!(
+        stderr.contains("not core-native yet"),
+        "typed api rejection missing\n{stderr}"
+    );
+    assert!(
+        !stderr.to_lowercase().contains("panic"),
+        "no crash: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1401 / E3S1: a malformed models.json is a typed error and the run
+/// continues with the bundled catalog (here: the scripted fake driver).
+#[test]
+fn models_json_malformed_run_continues_with_bundled() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1401m-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let scenario = json!({ "user_messages": ["hi"], "model_scripts": [[{ "text": "ok" }]] });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("models.json"), "{not json").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(tmp.join("session.jsonl"))
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "malformed models.json must not kill the run\n{stderr}"
+    );
+    assert!(
+        stderr.contains("models.json") && stderr.contains("invalid JSON"),
+        "the typed error must be logged\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(dump.contains("ok"), "transcript: {dump}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

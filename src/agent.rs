@@ -144,6 +144,14 @@ pub struct Core {
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
+    /// WP-1401/E3S1: the agent dir's models.json (core-native providers);
+    /// empty when the file is missing or malformed (the run continues with
+    /// the bundled catalog).
+    pub models_json: Arc<crate::models_json::ModelsJson>,
+    /// WP-1401/E3S1: the effective model registry — the bundled catalog
+    /// merged with the core-native models.json models (cost, contextWindow,
+    /// input modality, set_model validation, picker listing).
+    pub registry: Arc<crate::registry::ModelRegistry>,
     /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
     pub skills: Arc<Vec<crate::skills::Skill>>,
     pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
@@ -405,10 +413,33 @@ pub async fn event_task(
                     };
                     match (provider, model_id) {
                         (Some(p), Some(m)) => {
-                            // WP-701: extension-registered model — routable via
-                            // the bridge stream; no bundled driver is built.
-                            let key = format!("{p}/{m}");
-                            if ctx.ext_models.lock().unwrap().contains_key(&key) {
+                            // WP-1401: core-native models.json model — the
+                            // core serves it itself (built-in OpenAI driver)
+                            // even when the sidecar also advertises it in
+                            // `ready.providers` (E2S1 interim coexistence).
+                            if let Some(owner) = ctx.models_json.owner(&p, &m) {
+                                match crate::models_json::build_driver(owner, &m, &ctx.agent_dir) {
+                                    Ok(drv) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
+                            } else if ctx
+                                .ext_models
+                                .lock()
+                                .unwrap()
+                                .contains_key(&format!("{p}/{m}"))
+                            {
+                                // WP-701: extension-registered model — routable via
+                                // the bridge stream; no bundled driver is built.
                                 let prev = ctx.model.lock().unwrap().0.clone();
                                 let model = json!({"id":m,"provider":p});
                                 ctx.model.lock().unwrap().0 = model.clone();
@@ -417,7 +448,7 @@ pub async fn event_task(
                                 if subscribed(&ctx, "model_select") {
                                     ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
                                 }
-                            } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                            } else if ctx.registry.resolve(&p, &m).is_none() {
                                 reply(false, json!(format!("unknown model {p}/{m}")));
                             } else {
                                 match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
@@ -654,7 +685,7 @@ async fn execute_tool_call(
     let image_warning = read_image_warning(
         name,
         &mut details,
-        model_supports_image_value(&active),
+        model_supports_image_value(&active, &ctx.registry),
         active
             .get("id")
             .and_then(Value::as_str)
@@ -1243,11 +1274,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 .and_then(Value::as_str)
                 .unwrap_or("fake")
                 .to_string();
-            let cost = turn.usage.cost_usd(
-                crate::registry::ModelRegistry::bundled()
-                    .resolve(&p, &m)
-                    .map(|x| &x.cost),
-            );
+            let cost = turn
+                .usage
+                .cost_usd(ctx.registry.resolve(&p, &m).map(|x| &x.cost));
             ctx.session.set_usage(&turn.usage, cost);
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
@@ -1464,12 +1493,18 @@ async fn model_call<'a>(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let ext_model = ctx
-        .ext_models
-        .lock()
-        .unwrap()
-        .get(&format!("{p}/{mid}"))
-        .cloned();
+    // WP-1401: a core-native models.json model is served by the core driver
+    // even when the sidecar also advertises it in `ready.providers` (the
+    // E2S1 sidecar path stays for extension-registered providers only).
+    let ext_model = if ctx.models_json.owner(&p, &mid).is_some() {
+        None
+    } else {
+        ctx.ext_models
+            .lock()
+            .unwrap()
+            .get(&format!("{p}/{mid}"))
+            .cloned()
+    };
     match ext_model {
         Some(model) => {
             let stream_id = uuid::Uuid::new_v4().to_string();
@@ -1579,9 +1614,7 @@ fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let window = crate::registry::ModelRegistry::bundled()
-        .resolve(&p, &mid)?
-        .context_window?;
+    let window = ctx.registry.resolve(&p, &mid)?.context_window?;
     Some((
         window,
         crate::session::DEFAULT_RESERVE_TOKENS,
@@ -1811,7 +1844,10 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     // WP-1009 (upstream 4be4cb4): per-request image swap — a model without
     // image input never sees an image block; the session keeps it for a
     // later vision model.
-    swap_images_for_model(&mut v, model_supports_image_value(&active_model(ctx)));
+    swap_images_for_model(
+        &mut v,
+        model_supports_image_value(&active_model(ctx), &ctx.registry),
+    );
     v
 }
 
@@ -1857,13 +1893,13 @@ fn active_model(ctx: &Core) -> Value {
 /// WP-1009: does the active model accept image input? The model object's own
 /// `input` array wins (extension catalogs), the bundled registry is the
 /// fallback; an unknown model keeps the v0 behavior (send the image).
-fn model_supports_image_value(active: &Value) -> bool {
+fn model_supports_image_value(active: &Value, registry: &crate::registry::ModelRegistry) -> bool {
     if let Some(input) = active.get("input").and_then(Value::as_array) {
         return input.iter().any(|m| m.as_str() == Some("image"));
     }
     let provider = active.get("provider").and_then(Value::as_str).unwrap_or("");
     let id = active.get("id").and_then(Value::as_str).unwrap_or("");
-    match crate::registry::ModelRegistry::bundled().resolve(provider, id) {
+    match registry.resolve(provider, id) {
         Some(m) => m.input.iter().any(|i| i == "image"),
         None => true,
     }
@@ -2251,22 +2287,28 @@ mod wp1009_image_tests {
 
     #[test]
     fn model_capability_from_input_array_then_bundled_registry() {
+        let reg = crate::registry::ModelRegistry::bundled();
         assert!(model_supports_image_value(
-            &json!({"id":"x","input":["text","image"]})
+            &json!({"id":"x","input":["text","image"]}),
+            reg
         ));
         assert!(!model_supports_image_value(
-            &json!({"id":"x","input":["text"]})
+            &json!({"id":"x","input":["text"]}),
+            reg
         ));
         // Fallback: bundled catalog (bedrock vision vs text-only).
         assert!(model_supports_image_value(
-            &json!({"provider":"amazon-bedrock","id":"amazon.nova-2-lite-v1:0"})
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-2-lite-v1:0"}),
+            reg
         ));
         assert!(!model_supports_image_value(
-            &json!({"provider":"amazon-bedrock","id":"amazon.nova-micro-v1:0"})
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-micro-v1:0"}),
+            reg
         ));
         // Unknown model: v0 behavior (send the image).
         assert!(model_supports_image_value(
-            &json!({"provider":"nope","id":"nothing"})
+            &json!({"provider":"nope","id":"nothing"}),
+            reg
         ));
     }
 }

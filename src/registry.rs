@@ -90,6 +90,19 @@ impl ModelRegistry {
             .filter(|m| m.provider == provider)
             .collect()
     }
+
+    /// The catalog with extra models merged in (WP-1401/E3S1: models.json
+    /// core-native models). An extra never replaces a bundled entry — the
+    /// bundled catalog wins per model id (documented v0 limit, E2S1).
+    pub fn merged_with(&self, extra: &[Model]) -> ModelRegistry {
+        let mut by_key = self.by_key.clone();
+        for m in extra {
+            by_key
+                .entry(format!("{}/{}", m.provider, m.id))
+                .or_insert(m.clone());
+        }
+        ModelRegistry { by_key }
+    }
 }
 
 #[cfg(test)]

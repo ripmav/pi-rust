@@ -37,6 +37,9 @@ flowchart LR
   built-in tools ([src/tools.rs](https://github.com/ripmav/pi-rust/blob/main/src/tools.rs)),
   sessions ([src/session.rs](https://github.com/ripmav/pi-rust/blob/main/src/session.rs)),
   trust ([src/trust.rs](https://github.com/ripmav/pi-rust/blob/main/src/trust.rs)), TUI ([src/tui/](https://github.com/ripmav/pi-rust/tree/main/src/tui)).
+  Loads `<agentDir>/models.json` natively (E3S1, JSONC) and serves its
+  OpenAI-compatible providers through the built-in driver — a Node-free run.
+  The core never streams models of *extension*-registered providers itself.
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner;
@@ -60,7 +63,9 @@ flowchart LR
   `init`.
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
-  respawn); clean shutdown or failed handshake → `Stopped`.
+  respawn); clean shutdown or failed handshake → `Stopped`. E3S1: a
+  **spawn failure is also `Stopped` and not fatal** — the run continues
+  Node-free (built-ins + core-native models.json providers).
 
 ## Extension runtime — target state (E1S2–E1S5, not yet implemented)
 
