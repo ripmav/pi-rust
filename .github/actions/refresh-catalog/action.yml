@@ -16,7 +16,7 @@ runs:
     - name: Re-bundle upstream catalog if stale
       shell: bash
       run: |
-        baked=$(ls -t target/debug/build/pi-rust-*/out/models.json target/release/build/pi-rust-*/out/models.json 2>/dev/null | head -1)
+        baked=$( { ls -t target/debug/build/pi-rust-*/out/models.json target/release/build/pi-rust-*/out/models.json 2>/dev/null || true; } | head -1)
         if [ -z "$baked" ]; then
           echo "no cached bundled catalog — nothing to do"
         elif [ -n "$(find upstream/packages/ai/src/providers/data -name '*.json' -newer "$baked" 2>/dev/null | head -1)" ]; then
