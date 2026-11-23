@@ -41,7 +41,6 @@ use std::sync::Arc;
 pub struct Provider {
     /// Provider id (the `providers` map key; the registry provider name).
     pub id: String,
-    pub name: Option<String>,
     pub base_url: Option<String>,
     pub api: Option<String>,
     pub api_key: Option<String>,
@@ -84,7 +83,6 @@ impl std::error::Error for ModelsJsonError {}
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ProviderRaw {
-    name: Option<String>,
     base_url: Option<String>,
     api: Option<String>,
     api_key: Option<String>,
@@ -158,8 +156,11 @@ pub fn load(agent_dir: &Path) -> std::result::Result<ModelsJson, ModelsJsonError
                 reasoning: m.reasoning.unwrap_or(false),
                 input: m.input.unwrap_or_else(|| vec!["text".to_string()]),
                 cost: m.cost.unwrap_or_default(),
-                context_window: m.context_window,
-                max_tokens: m.max_tokens,
+                // Upstream `model-config` defaults: a model without the
+                // fields still gets them (compaction settings rely on a
+                // Some contextWindow).
+                context_window: m.context_window.or(Some(128_000)),
+                max_tokens: m.max_tokens.or(Some(16_384)),
                 thinking_level_map: None,
             })
             .collect();
@@ -167,7 +168,6 @@ pub fn load(agent_dir: &Path) -> std::result::Result<ModelsJson, ModelsJsonError
             id.clone(),
             Provider {
                 id: id.clone(),
-                name: raw.name,
                 base_url: raw.base_url,
                 api,
                 api_key: raw.api_key,
@@ -197,24 +197,7 @@ fn strip_comments(input: &str) -> String {
     let mut i = 0;
     while i < n {
         match c[i] {
-            '"' => {
-                out.push('"');
-                i += 1;
-                while i < n {
-                    if c[i] == '\\' && i + 1 < n {
-                        out.push(c[i]);
-                        out.push(c[i + 1]);
-                        i += 2;
-                        continue;
-                    }
-                    out.push(c[i]);
-                    let done = c[i] == '"';
-                    i += 1;
-                    if done {
-                        break;
-                    }
-                }
-            }
+            '"' => copy_string(&c, &mut i, &mut out),
             '/' if i + 1 < n && c[i + 1] == '/' => {
                 while i < n && c[i] != '\n' {
                     i += 1;
@@ -236,6 +219,28 @@ fn strip_comments(input: &str) -> String {
     out
 }
 
+/// Copies the string literal whose opening quote is at `c[*i]` verbatim
+/// into `out` and advances `*i` past the closing quote (string interiors
+/// are never inspected — shared by both JSONC passes).
+fn copy_string(c: &[char], i: &mut usize, out: &mut String) {
+    let n = c.len();
+    out.push('"');
+    *i += 1;
+    while *i < n {
+        if c[*i] == '\\' && *i + 1 < n {
+            out.push(c[*i]);
+            out.push(c[*i + 1]);
+            *i += 2;
+            continue;
+        }
+        out.push(c[*i]);
+        *i += 1;
+        if c[*i - 1] == '"' {
+            break;
+        }
+    }
+}
+
 /// Trailing commas (upstream tolerance): a `,` whose only following
 /// non-whitespace char is `}` or `]`, string literals untouched.
 fn strip_trailing_commas(input: &str) -> String {
@@ -245,24 +250,7 @@ fn strip_trailing_commas(input: &str) -> String {
     let mut i = 0;
     while i < n {
         match c[i] {
-            '"' => {
-                out.push('"');
-                i += 1;
-                while i < n {
-                    if c[i] == '\\' && i + 1 < n {
-                        out.push(c[i]);
-                        out.push(c[i + 1]);
-                        i += 2;
-                        continue;
-                    }
-                    out.push(c[i]);
-                    let done = c[i] == '"';
-                    i += 1;
-                    if done {
-                        break;
-                    }
-                }
-            }
+            '"' => copy_string(&c, &mut i, &mut out),
             ',' => {
                 let mut k = i + 1;
                 while k < n && c[k].is_whitespace() {
@@ -517,7 +505,6 @@ mod tests {
         std::fs::write(d.join("models.json"), SOLHEIM).unwrap();
         let mj = load(&d).unwrap();
         let p = mj.provider("solheim").expect("solheim provider");
-        assert_eq!(p.name.as_deref(), Some("Solheim"));
         assert_eq!(p.base_url.as_deref(), Some("https://api.solheim.ai/v1"));
         assert_eq!(p.api.as_deref(), Some("openai-completions"));
         assert_eq!(p.api_key.as_deref(), Some("$SOLHEIM_API_KEY"));
@@ -532,6 +519,24 @@ mod tests {
         assert!(!m.reasoning);
         // Defaults applied (upstream): absent cost fields are 0.
         assert_eq!(m.cost.cache_read, 0.0);
+    }
+
+    #[test]
+    fn missing_window_and_tokens_get_upstream_defaults() {
+        // Upstream `model-config` defaults (contextWindow 128000, maxTokens
+        // 16384): a model WITHOUT the fields must still get them, else
+        // `compaction_settings` (src/agent.rs) returns None and
+        // auto-compaction is silently off.
+        let d = tmpdir();
+        std::fs::write(
+            d.join("models.json"),
+            r#"{"providers": {"p": {"api": "openai-completions", "models": [{"id": "m1"}]}}}"#,
+        )
+        .unwrap();
+        let mj = load(&d).unwrap();
+        let m = mj.model("p", "m1").expect("model m1");
+        assert_eq!(m.context_window, Some(128_000));
+        assert_eq!(m.max_tokens, Some(16_384));
     }
 
     #[test]
@@ -616,7 +621,6 @@ mod tests {
         let d = tmpdir();
         let prov = Provider {
             id: "p".into(),
-            name: None,
             base_url: None,
             api: Some("openai-completions".into()),
             api_key: Some("k".into()),
@@ -626,7 +630,6 @@ mod tests {
         assert!(e.contains("baseUrl"), "{e}");
         let anthro = Provider {
             id: "p".into(),
-            name: None,
             base_url: Some("http://x".into()),
             api: Some("anthropic-messages".into()),
             api_key: Some("k".into()),
@@ -669,7 +672,6 @@ mod tests {
             crate::provider::mock::start_mock(crate::provider::mock::sse_response(sse), tx).await;
         let prov = Provider {
             id: "mj".into(),
-            name: None,
             base_url: Some(base),
             api: Some("openai-completions".into()),
             api_key: Some("$E3S1_MJ_KEY".into()),

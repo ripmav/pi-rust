@@ -226,6 +226,22 @@ async function main() {
 	writeFileSync(path.join(tmp, ".claude/rules/testing.md"), "# testing rules\n");
 	const agentDir = path.join(tmp, "agent");
 	mkdirSync(agentDir, { recursive: true }); // isolate discovery from the user's global extensions
+	// WP-1402/E3S2 negative fixture: a models.json present in the smoke's
+	// agent dir (throwaway provider id). The core owns this file (E3S1) —
+	// the bridge must NOT advertise its provider in ready.providers.
+	writeFileSync(
+		path.join(agentDir, "models.json"),
+		JSON.stringify({
+			providers: {
+				smokemj: {
+					baseUrl: "http://127.0.0.1:1/v1",
+					api: "openai-completions",
+					apiKey: "smoke-mj-key",
+					models: [{ id: "smoke/mj-1", contextWindow: 1024, maxTokens: 64 }],
+				},
+			},
+		}),
+	);
 
 	const child = spawn(
 		process.execPath,
@@ -319,6 +335,14 @@ async function main() {
 			"ready provider model entry carries provider/id/api",
 			Boolean(smokeProv?.models?.some((m) => m.provider === "smokeprovider" && m.id === "smoke/echo-1" && m.api === "smoke-api" && m.name === "Smoke Echo")),
 			smokeProv,
+		);
+		// WP-1402/E3S2: the agent dir's models.json is the CORE's config now
+		// (E3S1) — the bridge no longer reads or advertises it (pinning the
+		// E3S2 deletion: a re-added models.json branch would make this fail).
+		check(
+			"models.json provider NOT advertised in ready (E3S2)",
+			!ready.providers?.some((p) => p?.name === "smokemj"),
+			ready.providers?.map((p) => p?.name),
 		);
 
 		// (c) session_start: pi.events round-trip + claude-rules scan
