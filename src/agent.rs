@@ -148,10 +148,11 @@ pub struct Core {
     /// empty when the file is missing or malformed (the run continues with
     /// the bundled catalog).
     pub models_json: Arc<crate::models_json::ModelsJson>,
-    /// WP-1401/E3S1: the effective model registry — the bundled catalog
-    /// merged with the core-native models.json models (cost, contextWindow,
-    /// input modality, set_model validation, picker listing).
-    pub registry: Arc<crate::registry::ModelRegistry>,
+    /// WP-1401/E3S1: the effective model registry, LAZILY built on first
+    /// use (see [`Core::registry`] — the bundled catalog is ~1.1 MB JSON / a
+    /// few MB of heap; parsing it at startup would inflate idle RSS past
+    /// the WP-905 bench baseline).
+    pub registry_slot: Arc<std::sync::OnceLock<Arc<crate::registry::ModelRegistry>>>,
     /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
     pub skills: Arc<Vec<crate::skills::Skill>>,
     pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
@@ -255,6 +256,27 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// Sidecar→core event processor. Runs on its own task so a nested
 /// `tool_call_request` can be answered while the agent loop awaits a decision
 /// (bidirectional liveness, no head-of-line blocking).
+impl Core {
+    /// WP-1401/E3S1: the effective model registry — the bundled catalog
+    /// merged with the core-native models.json models (cost, contextWindow,
+    /// input modality, set_model validation). Lazily built on first use:
+    /// without extras the shared bundled `Arc` is kept (no clone); the
+    /// merged copy exists only when the user's models.json has
+    /// core-native models.
+    pub fn registry(&self) -> &crate::registry::ModelRegistry {
+        self.registry_slot
+            .get_or_init(|| {
+                let extra = self.models_json.core_models();
+                if extra.is_empty() {
+                    crate::registry::ModelRegistry::bundled_arc()
+                } else {
+                    Arc::new(crate::registry::ModelRegistry::bundled().merged_with(&extra))
+                }
+            })
+            .as_ref()
+    }
+}
+
 pub async fn event_task(
     mut events: mpsc::UnboundedReceiver<Value>,
     mut tools_sync: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
@@ -448,7 +470,7 @@ pub async fn event_task(
                                 if subscribed(&ctx, "model_select") {
                                     ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
                                 }
-                            } else if ctx.registry.resolve(&p, &m).is_none() {
+                            } else if ctx.registry().resolve(&p, &m).is_none() {
                                 reply(false, json!(format!("unknown model {p}/{m}")));
                             } else {
                                 match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
@@ -685,7 +707,7 @@ async fn execute_tool_call(
     let image_warning = read_image_warning(
         name,
         &mut details,
-        model_supports_image_value(&active, &ctx.registry),
+        model_supports_image_value(&active, ctx.registry()),
         active
             .get("id")
             .and_then(Value::as_str)
@@ -1276,7 +1298,7 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 .to_string();
             let cost = turn
                 .usage
-                .cost_usd(ctx.registry.resolve(&p, &m).map(|x| &x.cost));
+                .cost_usd(ctx.registry().resolve(&p, &m).map(|x| &x.cost));
             ctx.session.set_usage(&turn.usage, cost);
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
@@ -1614,7 +1636,7 @@ fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let window = ctx.registry.resolve(&p, &mid)?.context_window?;
+    let window = ctx.registry().resolve(&p, &mid)?.context_window?;
     Some((
         window,
         crate::session::DEFAULT_RESERVE_TOKENS,
@@ -1846,7 +1868,7 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     // later vision model.
     swap_images_for_model(
         &mut v,
-        model_supports_image_value(&active_model(ctx), &ctx.registry),
+        model_supports_image_value(&active_model(ctx), ctx.registry()),
     );
     v
 }

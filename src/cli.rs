@@ -825,12 +825,11 @@ pub async fn run() -> Result<i32> {
         ),
     }
 
-    // WP-1401/E3S1: the effective registry — the bundled catalog merged
-    // with the core-native models.json models (the bundled catalog wins
-    // per model id — the documented v0 limit). Also feeds the TUI model
-    // picker (extra_models).
+    // WP-1401/E3S1: the core-native models.json models for the TUI model
+    // picker (the effective registry itself is built lazily — see
+    // `Core::registry`; the bundled catalog must not parse at startup,
+    // WP-905 idle-RSS baseline).
     let extra_models = models_json.core_models();
-    let registry = Arc::new(crate::registry::ModelRegistry::bundled().merged_with(&extra_models));
     let ctx = Arc::new(Core {
         client: client.clone(),
         session: session.clone(),
@@ -839,7 +838,7 @@ pub async fn run() -> Result<i32> {
         ext_active_tools: Arc::default(),
         ext_models: Arc::default(),
         models_json: models_json.clone(),
-        registry,
+        registry_slot: Arc::default(),
         skills: Arc::new(skills.clone()),
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
