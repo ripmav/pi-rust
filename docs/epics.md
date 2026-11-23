@@ -14,6 +14,7 @@ From M12 on, the plan lives in this file; M1–M11 history stays in
 
 - **M11 — v1: project trust & sealing** → delivered 2026-11-21 (v1.0.0 released); history in the milestone/feature docs linked above
 - **M12 — native Rust extension platform** → E1
+- **M13 — custom model providers** → E2
 
 ---
 
@@ -43,6 +44,22 @@ and Rust extensions coexist.
 | **E1S3** Native extension runtime in the core | The core loads and runs Rust extensions directly, without Node | An example Rust extension registers a tool, a command and event handlers; e2e green headless and TUI (tool-call round-trip, command invocation, `before_agent_start` system-prompt injection, UI dialog round-trip with a UI attached); a Rust-only run spawns no Node process (test asserts no sidecar spawn); mixed session works — one session runs a TS extension (sidecar) and a Rust extension (native) simultaneously; project-scope Rust extensions are gated by the trust model (WP-1102, [ADR 0004](adr/0004-rust-extensions-share-discovery-and-trust.md)); a **user**-extension crash never kills the core (subprocess semantics per [ADR 0001](adr/0001-rust-extensions-as-bridge-subprocesses.md)); **core** extensions ([ADR 0005](adr/0005-bridge-matrix-ports-as-core-extensions.md), [ADR 0006](adr/0006-core-extensions-load-in-process-as-so.md)) load in-process as packed `.so` files by default; the `--bench` loop re-run against a Rust extension peer records a measured `bridge_events_per_sec` in [benches/baseline.json](https://github.com/ripmav/pi-rust/blob/main/benches/baseline.json) | open |
 | **E1S4** Ported core extensions | The six bridge-matrix TS extensions ported to Rust as first-party core extensions, with a porting guide | The six (`hello`, `permission-gate`, `claude-rules`, `prompt-customizer`, `with-deps`, `plan-mode`) are ported to Rust and pass the same e2e scenarios as the unmodified originals (same fixtures); they ship as core extensions — packed into the release, loaded in-process as `.so` files by default, core scope (trusted by definition, [ADR 0005](adr/0005-bridge-matrix-ports-as-core-extensions.md) + [ADR 0006](adr/0006-core-extensions-load-in-process-as-so.md)); `with-deps` carries its own external dependency (npm `ms` → Cargo crate); a porting guide in `docs/` maps upstream API → framework API per extension | open |
 | **E1S5** Authoring framework (scaffolding + docs) | Creating a new extension takes minutes, not an afternoon | Scaffolding per [ADR 0003](adr/0003-workspace-with-pi-ext-crate.md) (e.g. `pi-rust ext new <name>` or a cargo template) produces a working skeleton (tool + command + event handler); the scaffolded extension compiles and passes the extension test harness out of the box; authoring docs cover discovery paths ([ADR 0004](adr/0004-rust-extensions-share-discovery-and-trust.md)), trust, UI and versioning | open |
+
+---
+
+## Milestone 13 — custom model providers
+
+Implementation tasks: [odd/tasks/m13-custom-model-providers.md](odd/tasks/m13-custom-model-providers.md)
+
+### Epic E2 — Custom providers with OpenAI-compatible endpoints
+
+**Why:** pi-rust only knew the bundled upstream catalog plus providers registered by extensions; a user-configured provider (upstream `models.json` format — e.g. an OpenAI-compatible endpoint) failed at startup with `fatal: provider X is not a built-in provider and was not registered by an extension`, forcing a hand-written extension shim per provider. Upstream pi reads `<agentDir>/models.json` natively; pi-rust mirrors that. (M8's protocol-diff acceptance test already pinned `models.json` for the upstream half of the comparison.)
+
+> Requirement (user/PO, 2026-11-23): "pi-rust MUST support custom providers with OpenAPI-compatible endpoints" (read as OpenAI-compatible — [D7](decisions-open.md)).
+
+| Story | I want | Acceptance | Status |
+|---|---|---|---|
+| **E2S1** Custom providers from `models.json` (OpenAI-compatible) | A user adds a provider to `~/.pi/agent/models.json` (`api: "openai-completions"`, `baseUrl`, `apiKey` with `$ENV_VAR`) and uses it with pi-rust — no extension shim required | The sidecar's upstream `ModelRuntime` already loads `<agentDir>/models.json` (upstream `model-runtime.ts` `providerIds()` includes the config provider ids); WP-1301: the sidecar advertises models.json providers in `ready.providers` and routes their `provider_stream` through the upstream runtime (credential resolution is upstream's, incl. `$ENV_VAR` interpolation) — no core changes; the user's solheim case works end-to-end without a shim (e2e: models.json provider against a local mock OpenAI SSE endpoint, transcript carries the mock's response); missing `models.json` is a no-op, a malformed one does not start the run differently than before WP-1301 (sidecar runtime creation unchanged); models.json providers are selectable via `--provider`/`--model` and via `settings.json` `defaultProvider`/`defaultModel`; documented v0 limit: when models.json **overlays a core built-in** provider id, the core's bundled catalog wins for that id | done |
 
 ---
 

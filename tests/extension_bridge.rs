@@ -3806,3 +3806,129 @@ fn project_extensions_gated_on_trust() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// WP-1301 / E2S1: a custom provider defined in the agent dir's
+/// `models.json` (upstream format — the solheim field case) streams through
+/// the sidecar's upstream ModelRuntime with NO extension registered. The
+/// core never learns the provider itself: it is advertised in `ready` and
+/// routed over `provider_stream` (credential + endpoint resolution are
+/// upstream's). A one-shot mock OpenAI SSE endpoint stands in for the
+/// real OpenAI-compatible server.
+#[test]
+fn models_json_custom_provider_end_to_end() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1301-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // One-shot SSE mock (same pattern as provider_e2e_prompt_via_mock_openai;
+    // the final chunk carries finish_reason — pi-ai's openai-completions
+    // streamer requires it, unlike the core's own lenient driver).
+    let c1 = json!({"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}).to_string();
+    let c2 = json!({"choices":[{"delta":{"content":" from models.json"},"finish_reason":"stop"}]})
+        .to_string();
+    let sse = format!("data: {c1}\ndata: {c2}\ndata: [DONE]\n");
+    let mut body = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+    for line in sse.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let b = line.as_bytes();
+        body.push_str(&format!("{:x}\r\n", b.len()));
+        body.push_str(line);
+        body.push_str("\r\n");
+    }
+    body.push_str("0\r\n\r\n");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        let Ok((mut s, _)) = listener.accept() else {
+            return;
+        };
+        // Read until the header terminator appears anywhere in what we have
+        // (reqwest delivers headers+body in one segment).
+        let mut buf = vec![0u8; 65536];
+        let mut n = 0usize;
+        loop {
+            match s.read(&mut buf[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => {
+                    n += k;
+                    if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        use std::io::Write;
+        let _ = s.write_all(body.as_bytes());
+    });
+
+    // The agent dir with a models.json custom provider (JSONC, $ENV apiKey
+    // — both supported upstream; the env var is set below).
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{
+  // e2e custom provider (WP-1301)
+  "providers": {
+    "mockcustom": {
+      "name": "Mock Custom",
+      "baseUrl": "__BASE__",
+      "api": "openai-completions",
+      "apiKey": "$E2E_MODELS_JSON_KEY",
+      "models": [{ "id": "mock-model", "name": "Mock Model", "input": ["text"], "contextWindow": 4096, "maxTokens": 512 }]
+    }
+  }
+}
+"#
+        .replace("__BASE__", &base),
+    )
+    .unwrap();
+
+    let session_file = tmp.join("session.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("E2E_MODELS_JSON_KEY", "e2e-key")
+        .arg("--provider")
+        .arg("mockcustom")
+        .arg("--model")
+        .arg("mock-model")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+    let _ = server.join();
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("stdout line not JSON: {l}: {e}"))
+        })
+        .collect();
+    let final_line = lines.last().expect("no events");
+    assert_eq!(final_line["kind"], "transcript");
+    let dump = final_line["session"].to_string();
+    assert!(
+        dump.contains("Hello from models.json"),
+        "mockcustom/models.json response missing from transcript\n{dump}"
+    );
+    assert!(
+        !dump.contains("not a built-in provider"),
+        "provider resolution must not fall back to the typed fatal\n{dump}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

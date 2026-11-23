@@ -82,7 +82,7 @@ Sidecar→core events:
 
 | direction | type | payload ref | mode | upstream precedent |
 |---|---|---|---|---|
-| ←sidecar | `ready` | registry per Handshake §4 — `providers` is v1: `[{ name: string, models: [{ provider, id, api?, name? }] }]` (empty list = none; legacy name-only entries are not emitted) | event | new in v0, providers extended in v1 |
+| ←sidecar | `ready` | registry per Handshake §4 — `providers` is v1: `[{ name: string, models: [{ provider, id, api?, name? }] }]` (empty list = none; legacy name-only entries are not emitted). Sources: extension `registerProvider` (legacy config + native object form), the upstream builtin oauth providers (WP-1007), and the agent dir's `models.json` custom providers (WP-1301 — resolved by the sidecar's upstream `ModelRuntime`, which loads `<agentDir>/models.json`; streaming for those models runs in the upstream runtime, credential resolution included) | event | new in v0, providers extended in v1 |
 | ←sidecar | `extension_error` | `ExtensionError` (`types.ts:2348`) | event | `rpc-mode.ts:356` |
 | ←sidecar | `extension_ui_request` | `RpcExtensionUIRequest` (`modes/rpc/rpc-types.ts:252-287`) — dialog subset `select`/`confirm`/`input`/`editor` are req/resp; `notify`, `setStatus`, `setTitle`, `set_editor_text` are F&F (the `notify` variant carries extension user-facing messages) | event | `rpc-mode.ts:95-137, 140-315` |
 | ←sidecar | `session_info_changed` | `SessionInfoChangedEvent` (`types.ts:785`) — session name (no label field exists upstream) | event | `emit()` |

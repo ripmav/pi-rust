@@ -127,6 +127,7 @@ milestone (all milestone stacks are merged into `main`):
 | real human dialog answers (select/confirm/input/editor) | ✅ M6 (TUI) |
 | TUI: themes, keybindings, pickers, slash commands, print/json modes | ✅ M6 |
 | `registerProvider` (custom providers invoked) | ✅ M7 |
+| custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints, upstream `ModelRuntime` — no extension shim required) | ✅ M13 |
 | `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |
