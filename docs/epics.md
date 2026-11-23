@@ -55,7 +55,7 @@ Implementation tasks: [odd/tasks/m13-custom-model-providers.md](odd/tasks/m13-cu
 
 **Why:** pi-rust only knew the bundled upstream catalog plus providers registered by extensions; a user-configured provider (upstream `models.json` format — e.g. an OpenAI-compatible endpoint) failed at startup with `fatal: provider X is not a built-in provider and was not registered by an extension`, forcing a hand-written extension shim per provider. Upstream pi reads `<agentDir>/models.json` natively; pi-rust mirrors that. (M8's protocol-diff acceptance test already pinned `models.json` for the upstream half of the comparison.)
 
-> Requirement (user/PO, 2026-11-23): "pi-rust MUST support custom providers with OpenAPI-compatible endpoints" (read as OpenAI-compatible — [D7](decisions-open.md)).
+> Requirement (user/PO, 2026-11-23): "pi-rust MUST support custom providers with OpenAPI-compatible endpoints" — originally typed "OpenAPI-compatible"; confirmed 2026-11-23 that **OpenAI-compatible** was intended (D7 answered; a user type).
 
 | Story | I want | Acceptance | Status |
 |---|---|---|---|
