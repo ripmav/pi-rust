@@ -15,6 +15,7 @@ From M12 on, the plan lives in this file; M1–M11 history stays in
 - **M11 — v1: project trust & sealing** → delivered 2026-11-21 (v1.0.0 released); history in the milestone/feature docs linked above
 - **M12 — native Rust extension platform** → E1
 - **M13 — custom model providers** → E2
+- **M14 — core-native model providers** → E3
 
 ---
 
@@ -60,6 +61,25 @@ Implementation tasks: [odd/tasks/m13-custom-model-providers.md](odd/tasks/m13-cu
 | Story | I want | Acceptance | Status |
 |---|---|---|---|
 | **E2S1** Custom providers from `models.json` (OpenAI-compatible) | A user adds a provider to `~/.pi/agent/models.json` (`api: "openai-completions"`, `baseUrl`, `apiKey` with `$ENV_VAR`) and uses it with pi-rust — no extension shim required | The sidecar's upstream `ModelRuntime` already loads `<agentDir>/models.json` (upstream `model-runtime.ts` `providerIds()` includes the config provider ids); WP-1301: the sidecar advertises models.json providers in `ready.providers` and routes their `provider_stream` through the upstream runtime (credential resolution is upstream's, incl. `$ENV_VAR` interpolation) — no core changes; the user's solheim case works end-to-end without a shim (e2e: models.json provider against a local mock OpenAI SSE endpoint, transcript carries the mock's response); missing `models.json` is a no-op, a malformed one does not start the run differently than before WP-1301 (sidecar runtime creation unchanged); models.json providers are selectable via `--provider`/`--model` and via `settings.json` `defaultProvider`/`defaultModel`; documented v0 limit: when models.json **overlays a core built-in** provider id, the core's bundled catalog wins for that id | done |
+
+---
+
+## Milestone 14 — core-native model providers
+
+Implementation tasks: [odd/tasks/m14-core-native-model-providers.md](odd/tasks/m14-core-native-model-providers.md)
+
+### Epic E3 — Core-native model providers (sidecar = js/ts extensions only)
+
+**Why:** the sidecar's purpose is to load and run the original js/ts extensions (the README's "compatibility layer"). WP-1301 (E2S1) put models.json / model-runtime work there as a stopgap, because the sidecar's upstream `ModelRuntime` already had it — but the design principle (user, 2026-11-23) is that the sidecar is **only** for js/ts extensions. The core must own model providers natively: parse `<agentDir>/models.json` in Rust and stream OpenAI-compatible providers through its built-in drivers, so provider support does not depend on the sidecar. Together with E1S3 (native Rust extension runtime), this is the path to a truly Node-free run.
+
+> Direction (user/PO, 2026-11-23): "the sidecar only is to load and execute the js/ts extension. So we have to create an epic to change this!" — answered [D8](decisions-open.md) (core-native, tracked here); the E2S1 sidecar path is the interim until E3S2 removes it.
+
+| Story | I want | Acceptance | Status |
+|---|---|---|---|
+| **E3S1** Core-native `models.json` + OpenAI-compatible streaming | The core loads models.json itself and streams OpenAI-compatible providers without the sidecar | The Rust core parses `<agentDir>/models.json` (upstream schema subset: `providers{name, baseUrl, api, apiKey, models[{id, name, reasoning, input, cost, contextWindow, maxTokens}]}`; JSONC like upstream: BOM + `//`/`/* */` comments; missing file = no-op; malformed = typed error, run continues with the bundled catalog); parsed providers merge into the core's model registry — `--provider`/`--model`, `settings.json` `defaultProvider`/`defaultModel` and model listing behave exactly as on the E2S1 sidecar path (same selection e2e, provider call over the core driver); `api: "openai-completions"` streams through the core's built-in OpenAI driver with the provider's `baseUrl` + resolved `apiKey` (literal + `$ENV_VAR`; auth.json via the existing core credential store); e2e: the solheim case (mock OpenAI SSE endpoint) works with the **sidecar degraded** (spawn failure) — the provider call never crosses the bridge; other api types (e.g. `anthropic-messages`) on models.json providers: typed "not core-native yet" error, no crash | open |
+| **E3S2** The sidecar is js/ts-extensions-only again | After E3S1, models.json stops living in the sidecar | The WP-1301 models.json advertise + stream branches in the sidecar are removed (incl. their smoke phase + the E2S1 e2e is re-pointed at the core-native path); the sidecar's documented role is "js/ts extensions" (+ its built-in extension hosting — mcp/tool-search/llama/codemode); README, `docs/bridge-protocol.md` (ready providers sources) and E2S1's status note updated (delivered sidecar-side as interim, superseded by E3); the user's solheim scenario still works e2e with no shim via the core-native path | open |
+
+**Explicitly out of scope (separate decision/epic if wanted):** the sidecar's other non-js/ts-extension duties — MCP server hosting (the built-in mcp extension connects the servers sidecar-side) and the oauth builtins (WP-1007: token refresh + rotated write-back run sidecar-side by design, no token crosses the wire) — stay as-is in E3; see [D9](decisions-open.md).
 
 ---
 
