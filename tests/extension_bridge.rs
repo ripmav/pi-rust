@@ -1736,6 +1736,13 @@ fn provider_e2e_image_attachment_openai() {
 
 /// WP-408: --image against a text-only registry model is a clear, typed
 /// startup error (no model call).
+/// WP-408: --image on a text-only model is a typed error.
+///
+/// WP-1403 (D14): the bundled catalog is generated from the live models.dev
+/// API on every upstream build — `openai/gpt-4`, which this test used, was
+/// dropped from the live catalog (and no text-only openai model remains), so
+/// the test now uses a deterministic core-native models.json model instead
+/// of a bundled one (same capability gate, no external drift).
 #[test]
 fn provider_e2e_image_model_not_capable() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-m4-imagecap-{}", std::process::id()));
@@ -1748,18 +1755,38 @@ fn provider_e2e_image_model_not_capable() {
     )
     .unwrap();
 
+    // Text-only model in a core-native models.json provider (the capability
+    // gate fires before any API call, so baseUrl/apiKey are never used).
+    let agent_dir = tmp.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{
+  "providers": {
+    "mocknotimage": {
+      "name": "Mock Not Image",
+      "baseUrl": "http://127.0.0.1:1/v1",
+      "api": "openai-completions",
+      "apiKey": "e2e-key",
+      "models": [{ "id": "texty-1", "name": "Texty One", "input": ["text"], "contextWindow": 4096, "maxTokens": 512 }]
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+
     let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
-        .env("OPENAI_API_KEY", "e2e-key")
         .arg("--provider")
-        .arg("openai")
+        .arg("mocknotimage")
         .arg("--model")
-        .arg("gpt-4")
+        .arg("texty-1")
         .arg("--prompt")
         .arg("hi")
         .arg("--image")
         .arg(&image_path)
         .arg("--agent-dir")
-        .arg(tmp.join("agent"))
+        .arg(&agent_dir)
         .output()
         .expect("running pi-rust");
     assert_ne!(
@@ -1769,7 +1796,7 @@ fn provider_e2e_image_model_not_capable() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(stderr.contains("does not accept image input"), "{stderr}");
-    assert!(stderr.contains("gpt-4"), "{stderr}");
+    assert!(stderr.contains("texty-1"), "{stderr}");
 }
 
 /// WP-408: --image file errors are typed (missing file, not-an-image).
