@@ -45,6 +45,17 @@ fn main() {
             }
         }
     }
+    // Sanity guard (WP-1403 CI incident, 2026-11-23): a damaged upstream
+    // tree (known actions/cache round-trip corruption, WP-1009 class) or a
+    // stale cached target/ can silently produce a truncated catalog, which
+    // later surfaces as confusing "model not in the registry" test
+    // failures. The pinned catalog has ~1.8k entries; any file loss of
+    // significance drops it well below this.
+    if merged.len() < 1000 {
+        panic!(
+            "bundled model catalog has only {} entries (expected ~1800) — the upstream data dir looks incomplete; check the upstream clone/cache and clear the stale rust-cache", merged.len()
+        );
+    }
     let out = Path::new(&std::env::var("OUT_DIR").unwrap()).join("models.json");
     std::fs::write(&out, serde_json::to_string(&Value::Object(merged)).unwrap()).unwrap();
 }
