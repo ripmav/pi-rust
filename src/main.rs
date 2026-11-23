@@ -6,6 +6,7 @@ mod client;
 mod config;
 mod corelog;
 mod edit_diff;
+mod mcp;
 mod model;
 mod models_json;
 mod provider;

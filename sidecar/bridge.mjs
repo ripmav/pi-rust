@@ -31,8 +31,13 @@ const tui = await import(mod(path.join(path.dirname(DIST), "..", "..", "tui", "d
 const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 
 const F_AND_FORGET = new Set(
-	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed".split(" "),
+	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed mcp_servers_change".split(" "),
 );
+// mcp_servers_change (E3S3/WP-1403, D13): the core forwards its OWN configured
+// MCP servers (mcp.json + trusted project .pi/mcp.json) after session_start,
+// so an extension subscribing to mcp_servers_change still observes them. The
+// built-in mcp extension ignores the payload for connecting (it connects only
+// servers from the runtime registry, i.e. pi.registerMcpServer).
 const message = (err) => (err instanceof Error ? err.message : String(err));
 const MAX_LINE = 1024 * 1024; // v0: a single NDJSON command line never exceeds 1 MB
 const response = (id, command, success, data, error) =>
@@ -762,13 +767,18 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		loaded.runtime.getActiveTools = () => [...state.activeTools];
 		loaded.runtime.setActiveTools = (names) => applyActiveTools(names);
 
-		// ---- WP-702 (702c): config-declared MCP servers ---- The core reads
-		// <agent-dir>/mcp.json (upstream shape) and passes it as `mcpConfig`;
-		// each entry goes through the same registerMcpServer path extensions
-		// use (validation + registry + mcp_servers_change listener). The mcp
-		// extension reads the registry on session_start. Upstream rule: an
-		// mcp.json entry takes precedence over a same-name extension
-		// registration (the registry is last-write-wins per name).
+		// ---- WP-702 (702c): config-declared MCP servers ---- Since E3S3/WP-1403
+		// (D13) the CORE hosts the configured servers itself: the core sends
+		// `{ mcpServers: {} }` here, except servers with `oauth`/`auth` fields
+		// (the core cannot authenticate them yet — E3S4), which stay in the
+		// sidecar so they keep working while it is alive (no double-connect:
+		// the core skips exactly those). The registration path below STAYS (its
+		// removal is E3S5; smoke phase (m) pins it): an init that carries servers
+		// still registers them the upstream way (validation
+		// + registry + mcp_servers_change listener; the mcp extension reads the
+		// registry on session_start). Upstream rule: an mcp.json entry takes
+		// precedence over a same-name extension registration (the registry is
+		// last-write-wins per name).
 		if (command.mcpConfig !== undefined) {
 			const mcpServers = command.mcpConfig.mcpServers;
 			if (mcpServers !== undefined && (typeof mcpServers !== "object" || mcpServers === null || Array.isArray(mcpServers))) {

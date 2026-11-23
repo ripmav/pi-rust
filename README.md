@@ -129,7 +129,8 @@ milestone (all milestone stacks are merged into `main`):
 | `registerProvider` (custom providers invoked) | ✅ M7 |
 | custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints — no extension shim required) | ✅ M13/M14 (core-native since E3S1; the M13 sidecar route was removed in E3S2) |
 | core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; since E3S2 the sidecar no longer advertises or routes models.json providers) | ✅ M14 (E3S1/E3S2) |
-| `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 |
+| core-native MCP hosting (the core connects + drives the configured `mcpServers` itself — stdio + streamable HTTP, upstream naming/schemas/exposure, native tool execution, works with the sidecar degraded; `oauth`/`auth` servers stay sidecar-hosted until E3S4 — D13) | ✅ M14 (E3S3) |
+| `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 (sidecar-side for extension-registered servers; the core hosts the config servers since E3S3) |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |
 | skills (`SKILL.md` discovery, `/skill:<name>`) | ✅ M8 |
@@ -213,7 +214,9 @@ projects only, pi-rust now also reads the two config files:
   credentials, is kept); `auth` on a project `url` server and
   `-`/`_`-conflicting namespaces are rejected; top-level
   `autoEnableCodemode` overrides the global. Rejected entries are
-  logged and skipped; the session keeps the valid servers.
+  logged and skipped; the session keeps the valid servers. Since E3S3 the
+  merged config is **hosted by the core** (the sidecar receives only the
+  `oauth`/`auth` servers it can still authenticate — D13).
 
 For **untrusted** projects neither file is read at all (zero effect —
 the earlier documented non-goals for project `.pi/` config are now

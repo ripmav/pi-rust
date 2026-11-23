@@ -179,6 +179,13 @@ pub struct Core {
     /// WP-1103 reads it; allow until then (dead-code gate).
     #[allow(dead_code)]
     pub project_trusted: bool,
+    /// E3S3/WP-1403: the core's MCP host — the configured servers (agent-dir
+    /// `mcp.json` + the trusted project `.pi/mcp.json`, `config::merge_project_mcp`)
+    /// are connected and driven by the core itself (D13): upstream naming and
+    /// schemas, `direct`-exposure tools declared to the model, calls executed
+    /// natively (no `extension_tool_call` hop). Except `oauth`/`auth` servers
+    /// (E3S4), which the sidecar still hosts while alive.
+    pub mcp: Arc<crate::mcp::McpHost>,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
     /// WP-702: drain barrier for event_task — `sync_tool_set` sends a ping
@@ -743,11 +750,25 @@ async fn run_tool(
             .unwrap()
             .iter()
             .any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+    // E3S3: a tool of a CORE-OWNED configured MCP server executes natively —
+    // no `extension_tool_call` hop (the sidecar does not hold the server).
+    // The ext_hit check above wins on a name collision (upstream override
+    // semantics: the sidecar-registered tool shadows the core's).
+    if !ext_hit {
+        if let Some((server, tool)) = ctx
+            .mcp
+            .owner_of(name)
+            .or_else(|| ctx.mcp.server_prefix_of(name))
+        {
+            return Ok(core_mcp_call(ctx, &server, &tool, input).await);
+        }
+    }
     // WP-702: MCP tool names (upstream `mcp__<server>__<tool>` scheme and the
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
-    // model-script error.
+    // model-script error (this now covers NON-configured servers — e.g. ones
+    // an extension registers — which stay sidecar-side until E3S5).
     let mcp_name = name.starts_with("mcp__")
         || matches!(
             name,
@@ -796,6 +817,27 @@ async fn run_tool(
         Decision::Unavailable => Err(ToolFailure::Other(
             "extension_tool_call unanswered: bridge degraded".into(),
         )),
+    }
+}
+
+/// E3S3: one native MCP tool call (core-owned configured server). The
+/// mapped `CallToolResult` flows through the normal tool_result pipeline
+/// (content/details/isError; `terminate` is never set — as built-ins).
+/// A failed call is an error tool result, never a model-script abort.
+async fn core_mcp_call(ctx: &Core, server: &str, tool: &str, input: &Value) -> tools::ExecResult {
+    match ctx.mcp.call(server, tool, input).await {
+        Ok((content, is_error)) => tools::ExecResult {
+            content,
+            details: json!({ "server": server, "tool": tool }),
+            is_error,
+            terminate: false,
+        },
+        Err(e) => tools::ExecResult {
+            content: json!([{ "type": "text", "text": e }]),
+            details: json!({ "server": server, "tool": tool }),
+            is_error: true,
+            terminate: false,
+        },
     }
 }
 
@@ -1136,6 +1178,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     // systemPrompt (present only when a handler changed it) replaces the prompt
     // for this run.
     let mut custom: Vec<Value> = Vec::new();
+    // E3S3: the first prompt waits for the core's servers whose configured
+    // exposure includes `direct` (upstream `waitForDirectServers`, 10 s cap,
+    // once per session) so their tools are declared in the first turn — the
+    // sidecar used to do this in its mcp extension's before_agent_start.
+    ctx.mcp.await_direct().await;
     // WP-801: the skills section is part of the base prompt (upstream builds
     // it before before_agent_start); a handler-returned systemPrompt replaces
     // the whole prompt including the section.
@@ -1839,6 +1886,11 @@ async fn run_compaction(
 /// precedence (extension tools shadow built-ins by name). Degraded: extension
 /// tools are dropped from the set.
 fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
+    // E3S3: the core's `direct`-exposure MCP tools join the model's set
+    // (upstream naming/schemas); sidecar extension tools still shadow on a
+    // name collision (upstream override semantics).
+    let mcp = ctx.mcp.declared_tools();
+    let defs = tools::merge_with_extensions(tools::schemas(), mcp);
     let ext = if ctx.client.state() == State::Running {
         // WP-1003: only ACTIVE extension tools are declared to the model
         // (upstream: the active set is the set declared to the model).
@@ -1857,7 +1909,7 @@ fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
     } else {
         Vec::new()
     };
-    tools::merge_with_extensions(tools::schemas(), ext)
+    tools::merge_with_extensions(defs, ext)
 }
 fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<Value> {
     let tool_defs = merged_tool_defs(ctx);

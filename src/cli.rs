@@ -533,6 +533,29 @@ pub async fn run() -> Result<i32> {
     for w in mcp_warnings {
         crate::corelog::line(&format!("[core] {w}"));
     }
+    // E3S3/WP-1403: the core hosts the configured MCP servers itself (D13):
+    // parse + validate here (an invalid entry is skipped with a logged
+    // warning, never fatal — upstream load-error semantics); the sidecar
+    // receives only the `oauth`/`auth` subset at init (below).
+    let (mcp_host, mcp_parse_warnings) = crate::mcp::McpHost::new(mcp_config.as_ref(), &cwd);
+    for w in mcp_parse_warnings {
+        crate::corelog::line(&format!("[core] {w}"));
+    }
+    let mcp_host = Arc::new(mcp_host);
+    // The configured servers as the `mcp_servers_change` payload for the
+    // sidecar (D13: subscribing extensions still observe the core's set;
+    // the sidecar's built-in mcp extension ignores it — it connects only
+    // servers extensions register).
+    let mcp_server_entries: Vec<Value> = mcp_config
+        .as_ref()
+        .and_then(|c| c.get("mcpServers"))
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(n, e)| json!({ "name": n, "config": e.clone() }))
+                .collect()
+        })
+        .unwrap_or_default();
     // WP-1401/E3S1: the agent dir's models.json — core-native custom
     // providers (the solheim case). Missing file = no-op; malformed = typed
     // error, the run continues with the bundled catalog (logged, not fatal).
@@ -796,10 +819,27 @@ pub async fn run() -> Result<i32> {
     };
     let mut init =
         json!({"protocolVersion":6,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
-    // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
-    if let Some(cfg) = &mcp_config {
-        init["mcpConfig"] = cfg.clone();
-    }
+    // E3S3 (D13): the core OWNS the configured MCP servers — they connect
+    // through the core host (below), so the sidecar's registry stays empty
+    // and its built-in mcp extension only connects servers extensions
+    // register with `pi.registerMcpServer` (no double-connect). The one
+    // exception: servers carrying `oauth`/`auth` fields — the core cannot
+    // authenticate them yet (E3S4) — stay in the sidecar's mcpConfig so
+    // they keep working while the sidecar is alive (no mid-epic
+    // regression). The sidecar still accepts a non-empty `mcpConfig` — its
+    // path stays until E3S5.
+    let sidecar_mcp_servers: serde_json::Map<String, Value> = mcp_config
+        .as_ref()
+        .and_then(|c| c.get("mcpServers"))
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(_, e)| e.get("oauth").is_some() || e.get("auth").is_some())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    init["mcpConfig"] = json!({ "mcpServers": sidecar_mcp_servers });
     // WP-1102 (D2): the trust gate for project-scoped resources (the sidecar
     // excludes project extensions when untrusted).
     init["projectTrusted"] = json!(project_trusted);
@@ -856,6 +896,7 @@ pub async fn run() -> Result<i32> {
         cost_total: Arc::default(),
         tui: tui_mode,
         project_trusted,
+        mcp: mcp_host.clone(),
         ui_tx,
         tools_sync_tx,
         compact_override,
@@ -972,7 +1013,20 @@ pub async fn run() -> Result<i32> {
                 json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
             );
         }
+        // E3S3 (D13): forward the core-owned configured servers as
+        // mcp_servers_change, so an extension subscribing to it still sees
+        // the change (the sidecar used to emit it on registration at init).
+        if !mcp_host.is_empty() {
+            client.fire(
+                json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":mcp_server_entries}}),
+            );
+        }
     }
+    // E3S3: the core's session-start connect for its configured servers
+    // (upstream: the mcp extension connects on session_start) — with or
+    // without the sidecar; connections run in the background and their
+    // tools appear as they land (declared on the next turn build).
+    mcp_host.start();
 
     // WP-905: --bench — measure at idle (no model I/O), print one JSON line,
     // then fall through: no runs are seeded, so the normal shutdown path
@@ -1330,6 +1384,10 @@ pub async fn run() -> Result<i32> {
     // shut down: skip the handshake; a degraded bridge exits 3 below, a
     // spawn failure exits 0 (the run used built-ins only, never touched
     // the bridge).
+    // E3S3: the core's MCP connections close first (the actors end their
+    // transports: stdio stdin close + kill-on-drop, HTTP best-effort
+    // DELETE) — independent of the bridge state.
+    ctx.mcp.close().await;
     if client.state() == State::Running {
         client.fire(
             json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}),

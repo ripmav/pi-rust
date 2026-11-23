@@ -2204,7 +2204,7 @@ fn wp702_mcp_config_stdio_round_trip() {
         "mcpServers": {
             "fixture": {
                 "command": "node",
-                "args": [fixture.to_string_lossy()],
+                "args": [fixture.to_string_lossy(), "--spawn-log", tmp.join("spawns.log").to_string_lossy()],
                 "exposure": "direct"
             }
         }
@@ -2309,6 +2309,15 @@ fn wp702_mcp_config_stdio_round_trip() {
         assert_eq!(r["message"]["isError"], json!(false));
     }
 
+    // E3S3: the core owns the connection — exactly ONE fixture process was
+    // spawned, so a live sidecar did not double-connect the config server.
+    let spawns = std::fs::read_to_string(tmp.join("spawns.log")).expect("spawn log missing");
+    assert_eq!(
+        spawns.lines().count(),
+        1,
+        "the configured server must be connected exactly once (no double-connect): {spawns}"
+    );
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2385,7 +2394,7 @@ fn wp702_mcp_crash_lazy_reconnect() {
         "mcpServers": {
             "fixture": {
                 "command": "node",
-                "args": [fixture.to_string_lossy(), "--die-after-first-call"],
+                "args": [fixture.to_string_lossy(), "--die-after-first-call", "--spawn-log", tmp.join("spawns.log").to_string_lossy()],
                 "exposure": "direct"
             }
         }
@@ -2471,6 +2480,14 @@ fn wp702_mcp_crash_lazy_reconnect() {
         entries.last().unwrap()["message"]["content"][0]["text"],
         "reconnect ok"
     );
+    // E3S3: the reconnect is lazy + a FRESH process — exactly two spawns total
+    // (initial connect + the one after the crash; no auto-restart, no double).
+    let spawns = std::fs::read_to_string(tmp.join("spawns.log")).expect("spawn log missing");
+    assert_eq!(
+        spawns.lines().count(),
+        2,
+        "lazy reconnect must spawn one fresh process: {spawns}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2521,7 +2538,9 @@ fn wp702_mcp_dead_server_tool_error_not_crash() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let lines = event_log(&stdout);
 
-    // The call executed as an error result with the sidecar's typed message.
+    // The call executed as an error result with the core's typed message
+    // (E3S3: the core owns the configured server, so the connect failure is
+    // the core's, not the sidecar's "Unknown extension tool").
     let exec = lines
         .iter()
         .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__bad__echo")
@@ -2531,8 +2550,8 @@ fn wp702_mcp_dead_server_tool_error_not_crash() {
         exec["result_summary"]
             .as_str()
             .unwrap_or("")
-            .contains("Unknown extension tool"),
-        "error result must carry the sidecar's typed message: {exec}",
+            .contains("failed to connect"),
+        "error result must carry the core's typed connect message: {exec}",
     );
 
     // The recorded toolResult is isError, and the run reached its final text.
@@ -2688,6 +2707,361 @@ fn wp703_mcp_http_round_trip() {
         count_summary, "count:1",
         "server-side counter state: {count_summary}"
     );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ============================================================================
+// E3S3/WP-1403: core-native MCP hosting — the core connects and drives the
+// configured MCP servers itself; the sidecar (when alive) only hosts the
+// extension-registered servers (D13). The sidecar-degraded runs below are
+// the HARD acceptance: the existing MCP fixture scenarios (stdio + HTTP,
+// exposure rules) pass with no sidecar at all.
+// ============================================================================
+
+/// HARD: the WP-702 stdio scenario with the **sidecar degraded** (spawn
+/// failure) — the core connects the fixture itself, declares the
+/// `direct`-exposure tools, executes both calls natively (no bridge hop),
+/// and the results land in the transcript. Exit 0.
+#[test]
+fn wp1403_mcp_stdio_sidecar_degraded() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1403a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    let mcp = json!({
+        "mcpServers": {
+            "fixture": {
+                "command": "node",
+                "args": [fixture.to_string_lossy()],
+                "exposure": "direct"
+            }
+        }
+    });
+    std::fs::write(agent_dir.join("mcp.json"), mcp.to_string()).unwrap();
+    let scenario = json!({
+        "user_messages": ["use the mcp tools"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__echo", "input": { "text": "core-mcp" } } },
+            { "tool_call": { "name": "mcp__fixture__counter", "input": {} } },
+            { "text": "mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1403-node")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+    // The run must be the degraded one (no sidecar at all).
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "the run must go through the degraded-sidecar path\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    // Both MCP tools executed natively with the fixture's results.
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution")
+        .collect();
+    assert_eq!(execs.len(), 2, "expected 2 tool executions\n{stdout}");
+    let echo = execs
+        .iter()
+        .find(|t| t["name"] == "mcp__fixture__echo")
+        .expect("echo call missing\n{stdout}");
+    assert_eq!(echo["blocked"], json!(false));
+    assert_eq!(
+        echo["result_summary"], "echo:core-mcp",
+        "core-native echo round-trip: {echo}"
+    );
+    let counter = execs
+        .iter()
+        .find(|t| t["name"] == "mcp__fixture__counter")
+        .expect("counter call missing\n{stdout}");
+    assert_eq!(
+        counter["result_summary"], "count:1",
+        "core-native counter round-trip: {counter}"
+    );
+
+    // Transcript: user + assistant(tool calls) + 2 toolResults + assistant.
+    let last = lines.last().expect("no stdout lines");
+    assert_eq!(last["kind"], "transcript");
+    let entries: Vec<&Value> = last["session"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    let roles: Vec<&str> = entries
+        .iter()
+        .map(|e| e["message"]["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["user", "assistant", "toolResult", "toolResult", "assistant"]
+    );
+    for r in entries
+        .iter()
+        .filter(|e| e["message"]["role"] == "toolResult")
+    {
+        assert_eq!(r["message"]["isError"], json!(false));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// HARD: the WP-703 HTTP scenario with the **sidecar degraded** — the core
+/// speaks streamable HTTP (JSON + SSE response assembly) to the local mock
+/// itself; the env-expanded auth header reaches the server. Exit 0.
+#[test]
+fn wp1403_mcp_http_sidecar_degraded() {
+    let secret = "wp1403-secret-token-456";
+    let mut child = Command::new("node")
+        .arg(repo().join("tests/fixtures/mcp-http-fixture.mjs"))
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning mock MCP HTTP server");
+    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock server stdout"));
+    let mut port_line = String::new();
+    port_reader
+        .read_line(&mut port_line)
+        .expect("mock server port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock server port");
+
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1403b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"httptest":{{"url":"http://127.0.0.1:{port}/m","exposure":"direct","headers":{{"Authorization":"${{WP1403_SECRET}}"}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["call the http server"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "ping" } } },
+            { "tool_call": { "name": "mcp__httptest__echo", "input": { "text": "sse" } } },
+            { "tool_call": { "name": "mcp__httptest__counter", "input": {} } },
+            { "text": "http mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1403-node")
+        .env("WP1403_SECRET", secret)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}\n{stdout}"
+    );
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "the run must go through the degraded-sidecar path\n{stderr}"
+    );
+
+    let lines = event_log(&stdout);
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__echo")
+        .collect();
+    assert_eq!(execs.len(), 2, "both echo calls executed\n{stdout}");
+    let first = execs[0]["result_summary"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        first.contains("echo:ping auth:"),
+        "first echo failed: {first}"
+    );
+    assert!(
+        first.contains(secret),
+        "auth header must reach the server: {first}"
+    );
+    let second = execs[1]["result_summary"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        second.contains("echo:sse auth:"),
+        "SSE stream response must assemble: {second}"
+    );
+    let counters: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__httptest__counter")
+        .collect();
+    assert_eq!(counters.len(), 1, "counter call executed\n{stdout}");
+    assert_eq!(
+        counters[0]["result_summary"], "count:1",
+        "server-side counter state (one live core connection): {}",
+        counters[0]
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// E3S3 exposure rules (upstream `getMcpToolExposure`) with the sidecar
+/// alive: the probe extension records `before_agent_start.selectedTools`
+/// (what the model is declared) and the core's `mcp_servers_change`
+/// forward. Server default exposure `codemode` keeps tools out of the
+/// model's set; the `toolExposure` override puts `echo` in (`direct`).
+/// Both tools stay callable by explicit name (v0 core reachability), and
+/// they execute natively (no `extension_tool_call` hop for config servers).
+#[test]
+fn wp1403_mcp_exposure_rules_and_change_event() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1403c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    let mcp = json!({
+        "mcpServers": {
+            "cfg": {
+                "command": "node",
+                "args": [fixture.to_string_lossy()],
+                "toolExposure": { "echo": "direct" }
+            }
+        }
+    });
+    std::fs::write(agent_dir.join("mcp.json"), mcp.to_string()).unwrap();
+    let scenario = json!({
+        "user_messages": ["call both"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__cfg__echo", "input": { "text": "declared" } } },
+            { "tool_call": { "name": "mcp__cfg__counter", "input": {} } },
+            { "text": "done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(repo().join("tests/fixtures/mcp-tools-probe.ts"))
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+
+    // The probe recorded the events as custom session entries (the core
+    // persists pi.appendEntry calls).
+    let file = std::fs::read_to_string(&session_file).expect("session file missing");
+    let entries: Vec<Value> = file
+        .lines()
+        .map(|l| {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("session line not JSON: {l}: {e}"))
+        })
+        .collect();
+
+    // The declared tool set: echo in (direct override), counter out
+    // (server default codemode).
+    let selected = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp1403-selected-tools")
+        .expect("selectedTools probe entry missing\n{file}");
+    let tools: Vec<String> = selected["data"]["selectedTools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        tools.iter().any(|t| t == "mcp__cfg__echo"),
+        "direct override must be declared to the model: {tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|t| t == "mcp__cfg__counter"),
+        "codemode-default tool must NOT be declared: {tools:?}"
+    );
+
+    // The core forwarded its configured server as mcp_servers_change.
+    let change = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp1403-mcp-change")
+        .expect("mcp_servers_change probe entry missing\n{file}");
+    let servers: Vec<String> = change["data"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        servers.iter().any(|s| s == "cfg"),
+        "change carries the configured server: {servers:?}"
+    );
+
+    // Both tools executed natively (the sidecar never holds the config
+    // server, so a bridge hop would have failed).
+    let execs: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["kind"] == "tool_execution")
+        .collect();
+    let echo = execs
+        .iter()
+        .find(|t| t["name"] == "mcp__cfg__echo")
+        .expect("echo execution missing\n{stdout}");
+    assert_eq!(echo["result_summary"], "echo:declared", "{echo}");
+    let counter = execs
+        .iter()
+        .find(|t| t["name"] == "mcp__cfg__counter")
+        .expect("counter execution missing\n{stdout}");
+    assert_eq!(counter["result_summary"], "count:1", "{counter}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
