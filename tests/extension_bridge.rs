@@ -4202,6 +4202,62 @@ fn project_extensions_gated_on_trust() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Regression (v1.1.0 field report, solheim extension provider): a
+/// before_agent_start custom message (deja style: string content, no role
+/// in the handler result) must reach the provider as an LLM-safe user
+/// message. The old core ingested the raw result into the conversation —
+/// strict pi-ai streamers crashed on it ("Cannot read properties of
+/// undefined (reading 'length')") and the built-in drivers silently
+/// dropped it (and compaction summaries). A strict extension provider
+/// inspects every message shape and encodes the result in its reply.
+#[test]
+fn custom_injected_message_reaches_llm_as_user() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-customllm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let provider = repo().join("tests/fixtures/llm-sanity-provider.ts");
+    let injector = repo().join("tests/fixtures/inject-custom-message.ts");
+    let agent_dir = tmp.join("agent-dir");
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--extension-dir")
+        .arg(&provider)
+        .arg("--extension-dir")
+        .arg(&injector)
+        .arg("--provider")
+        .arg("llmsanity")
+        .arg("--model")
+        .arg("check-1")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .output()
+        .expect("running pi-rust");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pi-rust exited non-zero\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let mo = lines
+        .iter()
+        .find(|l| l["kind"] == "model_output")
+        .expect("model_output missing\n{stdout}");
+    assert_eq!(
+        mo["text"], "LLMSANITY badRoles=[] markerUserMessages=1",
+        "conversation must be LLM-safe with the custom note as a user message\n{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// WP-1301/E2S1, re-pointed by WP-1402/E3S2: a custom provider defined in
 /// the agent dir's `models.json` (upstream format — the solheim field case:
 /// JSONC comment, `$ENV` apiKey) works end-to-end with NO extension shim —
