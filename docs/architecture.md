@@ -39,6 +39,11 @@ flowchart LR
   trust ([src/trust.rs](https://github.com/ripmav/pi-rust/blob/main/src/trust.rs)), TUI ([src/tui/](https://github.com/ripmav/pi-rust/tree/main/src/tui)).
   Loads `<agentDir>/models.json` natively (E3S1, JSONC) and serves its
   OpenAI-compatible providers through the built-in driver — a Node-free run.
+  **No shell execution from config files (D12, answered by the PO
+  2026-11-24):** models.json `apiKey` supports literals and
+  `$ENV_VAR`/`${ENV_VAR}` templates (unset var = typed error naming the var,
+  never its value); `!command` is a typed rejection — the same rule the core
+  already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
   Hosts the configured MCP servers itself (E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
   JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
