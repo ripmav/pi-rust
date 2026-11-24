@@ -536,17 +536,19 @@ pub async fn run() -> Result<i32> {
     }
     // E3S3/WP-1403: the core hosts the configured MCP servers itself (D13):
     // parse + validate here (an invalid entry is skipped with a logged
-    // warning, never fatal — upstream load-error semantics); the sidecar
-    // receives only the `oauth`/`auth` subset at init (below).
+    // warning, never fatal — upstream load-error semantics). Since
+    // E3S5/WP-1405 the core is the ONLY connector — the sidecar hosts no
+    // MCP servers at all (its built-in mcp extension + mcpConfig path are
+    // removed).
     let (mcp_host, mcp_parse_warnings) = crate::mcp::McpHost::new(mcp_config.as_ref(), &cwd);
     for w in mcp_parse_warnings {
         crate::corelog::line(&format!("[core] {w}"));
     }
     let mcp_host = Arc::new(mcp_host);
     // The configured servers as the `mcp_servers_change` payload for the
-    // sidecar (D13: subscribing extensions still observe the core's set;
-    // the sidecar's built-in mcp extension ignores it — it connects only
-    // servers extensions register).
+    // sidecar (E3S3: a user extension subscribing to it still observes the
+    // core's set; since E3S5 the sidecar hosts no MCP servers — the event
+    // is a pure notification).
     let mcp_server_entries: Vec<Value> = mcp_config
         .as_ref()
         .and_then(|c| c.get("mcpServers"))
@@ -822,27 +824,10 @@ pub async fn run() -> Result<i32> {
     };
     let mut init =
         json!({"protocolVersion":6,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
-    // E3S3 (D13): the core OWNS the configured MCP servers — they connect
-    // through the core host (below), so the sidecar's registry stays empty
-    // and its built-in mcp extension only connects servers extensions
-    // register with `pi.registerMcpServer` (no double-connect). The one
-    // exception: servers carrying `oauth`/`auth` fields — the core cannot
-    // authenticate them yet (E3S4) — stay in the sidecar's mcpConfig so
-    // they keep working while the sidecar is alive (no mid-epic
-    // regression). The sidecar still accepts a non-empty `mcpConfig` — its
-    // path stays until E3S5.
-    let sidecar_mcp_servers: serde_json::Map<String, Value> = mcp_config
-        .as_ref()
-        .and_then(|c| c.get("mcpServers"))
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter(|(_, e)| e.get("oauth").is_some() || e.get("auth").is_some())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    init["mcpConfig"] = json!({ "mcpServers": sidecar_mcp_servers });
+    // E3S5/WP-1405 (D13 final form): no `mcpConfig` in init any more — the
+    // core hosts every configured server itself (including the
+    // `oauth`/`auth` ones it skips with a warning, D17) and the sidecar's
+    // registration path is gone.
     // WP-1102 (D2): the trust gate for project-scoped resources (the sidecar
     // excludes project extensions when untrusted).
     init["projectTrusted"] = json!(project_trusted);

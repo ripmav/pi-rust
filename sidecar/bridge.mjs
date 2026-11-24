@@ -21,9 +21,6 @@ const ca = await import(mod(DIST));
 // The prompt builder is not re-exported by dist/index.js; import the built
 // module directly (source of truth: src/core/system-prompt.ts).
 const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(mod(path.join(path.dirname(DIST), "core", "system-prompt.js")));
-// WP-702: upstream MCP server config validation (source of truth:
-// src/core/mcp-servers.ts) — not re-exported by dist/index.js either.
-const { validateMcpServerConfig } = await import(mod(path.join(path.dirname(DIST), "core", "mcp-servers.js")));
 // WP-1005: the llama extension factory is not re-exported by dist/index.js.
 const { default: llamaExtensionFactory } = await import(mod(path.join(path.dirname(DIST), "extensions", "llama", "index.js")));
 // WP-1006: pi-tui dist for the pane host (component tree walk + keybindings).
@@ -33,11 +30,11 @@ const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed mcp_servers_change".split(" "),
 );
-// mcp_servers_change (E3S3/WP-1403, D13): the core forwards its OWN configured
+// mcp_servers_change (E3S3/WP-1403): the core forwards its OWN configured
 // MCP servers (mcp.json + trusted project .pi/mcp.json) after session_start,
-// so an extension subscribing to mcp_servers_change still observes them. The
-// built-in mcp extension ignores the payload for connecting (it connects only
-// servers from the runtime registry, i.e. pi.registerMcpServer).
+// so a user extension subscribing to mcp_servers_change still observes
+// them. Since E3S5/WP-1405 the sidecar hosts no MCP servers at all (the
+// core is the only connector) — the event is a pure extension notification.
 const message = (err) => (err instanceof Error ? err.message : String(err));
 const MAX_LINE = 1024 * 1024; // v0: a single NDJSON command line never exceeds 1 MB
 const response = (id, command, success, data, error) =>
@@ -45,9 +42,9 @@ const response = (id, command, success, data, error) =>
 
 export async function runBridge({ extensionDirs, agentDir }) {
 	const cwd = process.cwd();
-	// WP-702: keep the sidecar's agent-dir-derived paths (mcp.log, the OAuth
-	// credential store) inside the core's agent dir; upstream getAgentDir()
-	// resolves PI_CODING_AGENT_DIR first.
+	// WP-702: keep the sidecar's agent-dir-derived paths (extension
+	// discovery, the llama router's settings) inside the core's agent dir;
+	// upstream getAgentDir() resolves PI_CODING_AGENT_DIR first.
 	if (agentDir) process.env.PI_CODING_AGENT_DIR = agentDir;
 	const output = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
@@ -142,8 +139,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		shuttingDown = true;
 		if (exitScheduled) return;
 		exitScheduled = true;
-		// WP-1007: let an in-flight credential write (rotated token) finish.
-		void modelRuntime?.settleCredentialWrites?.();
 		void (async () => {
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(0);
@@ -171,15 +166,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- WP-701: extension-registered providers (legacy config form) ----
 
-	// WP-1007: the upstream built-in oauth providers the SIDECAR serves.
-	// Since E3S4/WP-1404 (D15) the core owns `kimi-coding` end-to-end (login,
-	// credential storage, refresh, streaming through its built-in driver) —
-	// the sidecar no longer advertises or routes it (E3S2 pattern); an
-	// off-route `provider_stream` for it falls through to the unknown-
-	// extension-provider rejection below. The other four (their wire APIs —
-	// pi-messages, copilot multi-API, openai-responses — have no core driver
-	// yet) stay sidecar-side until their core-native stories.
-	const OAUTH_BUILTIN_PROVIDERS = ["radius", "github-copilot", "xai", "meta"];
+	// E3S5/WP-1405 (D15, PO descoped): the oauth builtin branches are GONE —
+	// the sidecar is js/ts-extensions-only. kimi-coding is core-owned since
+	// E3S4; the other four (radius, github-copilot, xai, meta — wire APIs
+	// the core has no driver for yet) are no longer advertised or routed
+	// here either: an off-route `provider_stream` for them falls through to
+	// the unknown-extension-provider rejection below, and `auth login` for
+	// them still runs through the node helper (sidecar/auth-login.mjs).
 
 	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
 	const providersPayload = () => {
@@ -209,29 +202,14 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name && m.name !== m.id ? { name: m.name } : {}),
 				})),
 		}));
-		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
-		// still serves (extension-registered providers keep priority — this
-		// only adds what the extension layer did not already claim).
-		// kimi-coding is absent: core-owned since E3S4 (D15).
-		const builtinOauth = (modelRuntime?.getProviders?.() ?? [])
-			.filter((p) => OAUTH_BUILTIN_PROVIDERS.includes(p.id) && !state.nativeProviders.has(p.id) && !state.providers.has(p.id))
-			.map((p) => ({
-				name: p.id,
-				// Runtime providers are the upstream Provider object form (no
-				// static `models` field) — same shape as the native branch.
-				models: (p.getModels?.() ?? [])
-				.filter((m) => m?.id)
-				.map((m) => ({
-					provider: p.id,
-					id: m.id,
-					api: m.api,
-					...(m.name && m.name !== m.id ? { name: m.name } : {}),
-				})),
-			}));
 		// WP-1402/E3S2: the agent dir's models.json providers are NO LONGER
 		// advertised here — the core owns them (E3S1: parsed natively, its
 		// openai-completions models served by the built-in driver, D11).
-		return [...legacy, ...native, ...builtinOauth];
+		// E3S5: the upstream builtin oauth providers are NOT advertised
+		// either — the sidecar hosts no model providers at all (the core owns
+		// what it can stream, kimi-coding, E3S4; the four wire-API-less
+		// builtins wait for their core drivers — D15/D16).
+		return [...legacy, ...native];
 	};
 
 	// WP-1005: capture the native Provider OBJECT form (upstream
@@ -345,32 +323,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			forwardStream(streamId, stream, full);
 			return;
 		}
-		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
-		// still serves (radius, github-copilot, xai, meta). The stream runs in
-		// the upstream runtime, whose auth resolution refreshes an expired
-		// stored credential (5-min validity margin, per-provider flow) and
-		// writes the rotated token back to auth.json — sidecar-side, unmodified
-		// upstream code. kimi-coding is core-owned (E3S4): it is not in the
-		// list, so its provider_stream falls through to the rejection below.
-		if (modelRuntime && OAUTH_BUILTIN_PROVIDERS.includes(model.provider)) {
-			const providerDef = modelRuntime.getProviders().find((p) => p.id === model.provider);
-			const builtin = (providerDef?.getModels?.() ?? []).find((m) => m?.id === model.id);
-			if (!builtin) {
-				return output(response(id, "provider_stream", false, undefined, `builtin provider ${model.provider} has no model ${model.id} (catalog may still be empty until the first authenticated refresh)`));
-			}
-			const streamId = command.streamId ?? crypto.randomUUID();
-			output(response(id, "provider_stream", true, { ok: true, streamId }));
-			let stream;
-			try {
-				stream = modelRuntime.streamSimple(builtin, { messages: command.messages ?? [] }, { ...(command.options ?? {}) });
-			} catch (err) {
-				stream = (async function* () {
-					yield providerErrorEvent(builtin, err instanceof Error ? err : new Error(String(err)));
-				})();
-			}
-			forwardStream(streamId, stream, builtin);
-			return;
-		}
+		// E3S5/WP-1405: the oauth builtin routing branch is REMOVED (the
+		// sidecar is js/ts-extensions-only; D15 answered, D16 open for the
+		// four wire-API-less builtins). A provider_stream for one of them
+		// falls through to the unknown-extension-provider rejection below,
+		// same as a models.json model (E3S2) or kimi-coding (E3S4).
 		// WP-1402/E3S2: models.json providers are not routed here any more —
 		// the core serves its own models.json models (E3S1, D11). A
 		// provider_stream for one of them is a core routing error; the
@@ -425,11 +382,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		}
 	}
 
-	// ---- WP-702: the built-in mcp extension's `pi` surface (upstream
+	// ---- WP-702: the built-in extensions' shared `pi` surface (upstream
 	// extensions/mcp/index.ts uses exactly: on, registerTool, registerCommand,
 	// registerToolRenderer, getMcpServers, getAllTools, getActiveTools,
-	// setActiveTools). Writes go into an Extension-shaped object; actions
-	// delegate to the shared runtime (the same one user extensions use).
+	// setActiveTools). E3S5: the mcp extension is gone — tool-search/llama/
+	// codemode still run on this surface. Writes go into an Extension-shaped
+	// object; actions delegate to the shared runtime (the same one user
+	// extensions use).
 	function createBuiltinMcpApi(extension, runtime) {
 		return {
 			on: (event, handler) => {
@@ -484,12 +443,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		};
 	}
 
-	// Host the BUILT-IN mcp extension on the shared runtime. Upstream main.ts
-	// injects createMcpExtension() via extensionFactories; the dist bundle
-	// does not export loadExtensionFromFactory, so the factory runs against
-	// the minimal API above. The original loader stays untouched for user
-	// extensions. `loadConfig` reads no files: the core owns mcp.json (702c)
-	// and every server arrives through the registerMcpServer path.
+	// Host a BUILT-IN extension on the shared runtime. Upstream main.ts
+	// injects the factories via extensionFactories; the dist bundle does not
+	// export loadExtensionFromFactory, so a factory runs against the minimal
+	// API above. The original loader stays untouched for user extensions.
+	// E3S5: the built-in MCP extension is REMOVED (the core is the only MCP
+	// connector, E3S3) — the remaining builtins (tool-search, llama,
+	// codemode) are js/ts and stay.
 	function createBuiltinExtension(name) {
 		return {
 			path: `builtin:${name}`,
@@ -504,15 +464,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
-	}
-
-	async function loadBuiltinMcpExtension(runtime) {
-		const extension = createBuiltinExtension("mcp");
-		const factory = ca.createMcpExtension({
-			loadConfig: () => ({ servers: [], errors: [], autoEnableCodemode: false }),
-		});
-		await factory(createBuiltinMcpApi(extension, runtime));
-		return extension;
 	}
 
 	// WP-1003: host the BUILT-IN tool-search extension the same way (upstream
@@ -553,8 +504,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return extension;
 	}
 
-	let modelRuntime = null; // WP-1007: upstream runtime for the builtin oauth providers
-
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
 		if (command.protocolVersion !== 6) {
@@ -590,20 +539,14 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		session = createSessionView(cwd);
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
 
-		// WP-1007: the upstream runtime for the built-in oauth providers. No
-		// network at creation (static catalogs stay, dynamic ones stay empty
-		// until the first authenticated refresh after login).
-		modelRuntime = await ca.ModelRuntime.create({ allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
+		// WP-1402/E3S2 + E3S5: the agent dir's models.json is the CORE's
+		// config (E3S1), and the sidecar hosts no model providers at all —
+		// no upstream ModelRuntime is created here any more (the oauth
+		// builtin branch is gone, D15 answered).
 
-		// WP-1402/E3S2: the agent dir's models.json is the CORE's config now
-		// (E3S1) — the bridge no longer reads it. (The upstream ModelRuntime
-		// above still loads it internally, unmodified; the bridge never uses
-		// those providers.)
-
-		// WP-702: the built-in mcp extension (after the runner, before ready):
-		// its handlers subscribe to session_start / mcp_servers_change and it
-		// connects the servers once the core fires session_start.
-		extensions.push(await loadBuiltinMcpExtension(loaded.runtime));
+		// E3S5: the built-in mcp extension is REMOVED — the sidecar hosts no
+		// MCP servers (the core is the only connector, E3S3). The remaining
+		// built-in extensions are js/ts and stay.
 		extensions.push(await loadBuiltinToolSearchExtension(loaded.runtime));
 		extensions.push(await loadBuiltinLlamaExtension(loaded.runtime));
 
@@ -772,39 +715,11 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		loaded.runtime.getActiveTools = () => [...state.activeTools];
 		loaded.runtime.setActiveTools = (names) => applyActiveTools(names);
 
-		// ---- WP-702 (702c): config-declared MCP servers ---- Since E3S3/WP-1403
-		// (D13) the CORE hosts the configured servers itself: the core sends
-		// `{ mcpServers: {} }` here, except servers with `oauth`/`auth` fields
-		// (the core cannot authenticate them yet — E3S4), which stay in the
-		// sidecar so they keep working while it is alive (no double-connect:
-		// the core skips exactly those). The registration path below STAYS (its
-		// removal is E3S5; smoke phase (m) pins it): an init that carries servers
-		// still registers them the upstream way (validation
-		// + registry + mcp_servers_change listener; the mcp extension reads the
-		// registry on session_start). Upstream rule: an mcp.json entry takes
-		// precedence over a same-name extension registration (the registry is
-		// last-write-wins per name).
-		if (command.mcpConfig !== undefined) {
-			const mcpServers = command.mcpConfig.mcpServers;
-			if (mcpServers !== undefined && (typeof mcpServers !== "object" || mcpServers === null || Array.isArray(mcpServers))) {
-				return output(response(command.id, "init", false, undefined, "mcpConfig.mcpServers must be an object"));
-			}
-			const namespaces = new Map();
-			for (const [name, config] of Object.entries(mcpServers ?? {})) {
-				const validated = validateMcpServerConfig(name, config);
-				if (typeof validated === "string") {
-					return output(response(command.id, "init", false, undefined, `mcpConfig server "${name}": ${validated}`));
-				}
-				// Upstream namespace rule: names that differ only in `-` and `_`
-				// share a namespace and must not coexist.
-				const ns = `mcp__${name.replace(/-/g, "_")}`;
-				if (namespaces.has(ns)) {
-					return output(response(command.id, "init", false, undefined, `mcpConfig server "${name}" conflicts with "${namespaces.get(ns)}"`));
-				}
-				namespaces.set(ns, name);
-				loaded.runtime.mcpServers.register({ name, config: structuredClone(validated), extensionPath: "mcp.json" });
-			}
-		}
+		// E3S5/WP-1405 (D13 final form): the sidecar's mcpConfig registration
+		// path is REMOVED — the core hosts every configured server itself
+		// (E3S3) and no longer sends mcpConfig at all. An init that still
+		// carries one is ignored (a dead field from older cores).
+
 		// WP-505: dialog wiring only for clients that advertise UI methods. Headless
 		// clients (no ui methods) keep the runner's noOp UI context, so hasUI() is
 		// false and extensions take their upstream no-UI defaults (e.g.

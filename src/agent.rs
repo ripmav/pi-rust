@@ -181,10 +181,11 @@ pub struct Core {
     pub project_trusted: bool,
     /// E3S3/WP-1403: the core's MCP host — the configured servers (agent-dir
     /// `mcp.json` + the trusted project `.pi/mcp.json`, `config::merge_project_mcp`)
-    /// are connected and driven by the core itself (D13): upstream naming and
-    /// schemas, `direct`-exposure tools declared to the model, calls executed
-    /// natively (no `extension_tool_call` hop). Except `oauth`/`auth` servers
-    /// (E3S4), which the sidecar still hosts while alive.
+    /// are connected and driven by the core itself (D13, final form E3S5 —
+    /// the sidecar hosts no MCP servers): upstream naming and schemas,
+    /// `direct`-exposure tools declared to the model, calls executed
+    /// natively (no `extension_tool_call` hop). `oauth`/`auth` servers are
+    /// skipped with a warning (D17).
     pub mcp: Arc<crate::mcp::McpHost>,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
@@ -787,8 +788,9 @@ async fn run_tool(
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
-    // model-script error (this now covers NON-configured servers — e.g. ones
-    // an extension registers — which stay sidecar-side until E3S5).
+    // model-script error. Since E3S5 this is the graceful path for
+    // `pi.registerMcpServer` servers (no host connects them — D13 final form)
+    // and for hallucinated/unknown `mcp__` names.
     let mcp_name = name.starts_with("mcp__")
         || matches!(
             name,

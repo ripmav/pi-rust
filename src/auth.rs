@@ -4,12 +4,13 @@
 //!
 //! v0 scope: `api_key` credentials with literal keys or `${ENV_VAR}`
 //! references (credential `env` overlay shadows ambient env). Command
-//! references are NOT executed (typed error). OAuth credentials: `kimi-coding`
-//! is core-native (E3S4 — the core refreshes it in its driver build,
-//! `src/oauth.rs`); the remaining upstream oauth providers (radius,
-//! github-copilot, xai, meta) are sidecar-routed — the sidecar's upstream
-//! runtime refreshes the token sidecar-side (WP-1007). Key material never
-//! appears in errors.
+//! references are NOT executed (typed error). OAuth credentials:
+//! `kimi-coding` is core-native (E3S4 — the core refreshes it in its driver
+//! build, `src/oauth.rs`). The remaining upstream oauth providers (radius,
+//! github-copilot, xai, meta) have no core driver for their wire APIs yet,
+//! and since E3S5 the sidecar no longer streams them either (D15 answered,
+//! D16 open) — the core driver path below rejects their oauth credentials
+//! with a typed error. Key material never appears in errors.
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -136,13 +137,14 @@ pub fn resolve_api_key(provider: &str, agent_dir: &Path) -> Result<String> {
                             "auth.json credential for {provider} is oauth — the core-native {provider} builtin resolves and refreshes it itself (select the bundled {provider} model); the models.json apiKey fallback does not consume oauth; run `pi-rust auth login {provider}` to (re)log in"
                         )
                     }
-                    // WP-1007: precise typed error. The remaining upstream
-                    // oauth providers are usable through the sidecar-routed
-                    // models (the sidecar's upstream runtime refreshes the
-                    // token); this core driver path cannot consume them in v0.
+                    // E3S5 (D15 answered): the four non-kimi oauth builtins
+                    // have no core driver for their wire APIs yet, and the
+                    // sidecar no longer streams them either (E3S5 removed the
+                    // sidecar oauth branches) — typed error, no consumer
+                    // (D16 tracks their fate).
                     if matches!(provider, "radius" | "github-copilot" | "xai" | "meta") {
                         bail!(
-                            "auth.json credential for {provider} is oauth; this built-in driver does not consume oauth in v0 — select the {provider} model provided by the extension sidecar (it refreshes the token itself) or run `pi-rust auth login {provider}`"
+                            "auth.json credential for {provider} is oauth; the core has no driver for its wire API in v0 and the sidecar no longer streams it (E3S5) — give the models.json provider an explicit apiKey, or run `pi-rust auth login {provider}`"
                         )
                     }
                     bail!("auth.json credential for {provider} is oauth — the pinned upstream has no oauth support for this provider")
@@ -248,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_on_upstream_oauth_provider_points_to_the_sidecar_route() {
+    fn oauth_on_non_kimi_builtin_is_typed_error() {
         let d = tmpdir();
         std::fs::write(
             d.join("auth.json"),

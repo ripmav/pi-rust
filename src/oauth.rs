@@ -3,8 +3,11 @@
 //!
 //! v0 owns exactly `kimi-coding` — the one oauth builtin whose wire API
 //! (`openai-completions`) a built-in driver speaks. The other four (radius,
-//! github-copilot, xai, meta) stay sidecar-side (login + stream) until the
-//! core has their wire APIs (D15).
+//! github-copilot, xai, meta) have no core driver for their wire APIs yet;
+//! since E3S5/WP-1405 the sidecar hosts no oauth branches either (D15
+//! answered — the PO descoped them from the sidecar's builtin set): login
+//! still runs through the node helper (`sidecar/auth-login.mjs`), and
+//! streaming waits for their core wire-API driver stories (D16).
 //!
 //! Upstream protocol/credential semantics (pinned 64a15f4), mirrored here:
 //! - `packages/ai/src/auth/oauth/kimi-coding.ts` — RFC 8628 device-code
@@ -29,7 +32,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The only oauth builtin the core serves natively in v0 (D15).
+/// The only oauth builtin the core serves natively in v0 (D15 answered
+/// with E3S5: the core owns what it can stream, the sidecar owns nothing).
 pub const KIMI_CODING: &str = "kimi-coding";
 
 /// Upstream `kimi-coding.ts` constants (pinned 64a15f4).

@@ -46,16 +46,20 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
 
 ## What the sidecar does
 
-- `init` (protocolVersion 5) → loads extensions with the original loader,
-  hosts the built-in mcp + tool-search + llama extensions (and, after
+- `init` (protocolVersion 6) → loads extensions with the original loader,
+  hosts the built-in tool-search + llama extensions (and, after
   `bindCore`, the built-in codemode extension with `models: false`) on the
   shared runtime, binds
-  `ExtensionRunner` (actions/context actions/provider actions), registers
-  `mcpConfig` servers (v2), responds `success`, emits `ready` (tools with
+  `ExtensionRunner` (actions/context actions/provider actions), responds
+  `success`, emits `ready` (tools with
   TypeBox schemas + `exposure?`/`defaultActive?` via the `extension.tools` → `wrapper.ts` →
   `tool-definition-wrapper.ts` path, commands, flags, providers, subscribed
-  event names). Post-ready tool-set changes (MCP connect/reconnect) are pushed
-  as `tools_changed` (v2).
+  event names). Post-ready tool-set changes are pushed
+  as `tools_changed` (v2). Since E3S5 the sidecar hosts **no MCP servers**
+  (its built-in mcp extension + the `mcpConfig` registration path are
+  removed — the core is the only connector, E3S3) and **no model providers**
+  (models.json is the core's, E3S1/E3S2; the oauth builtin branch is gone,
+  E3S4/E3S5) — its role is js/ts extensions only.
 - F&F events dispatch to `runner.emit`; decision events
   (`tool_call`, `tool_result`, `context*`, `input`, `before_agent_start`,
   `user_bash`) run the upstream emitters and return combined results per the
@@ -78,7 +82,9 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
   mutations toward the core.
 - `registerShortcut`, message/entry/tool renderers, markdown transformers:
   accepted by the loader, ignored by the bridge, logged once per extension on
-  stderr. `registerMcpServer` is accepted and reported in `ready` only.
+  stderr. `registerMcpServer` is accepted by the unmodified runner but never
+  connected (no host remains since E3S5 — the built-in mcp extension is gone
+  and the core is the only MCP connector, E3S3).
 - Handlers never fail a command: `extension_error` line + protocol default.
 - Liveness: line dispatch is fire-and-forget (upstream rpc-mode pattern) so a
   command blocked on a dialog still lets `extension_ui_response` and

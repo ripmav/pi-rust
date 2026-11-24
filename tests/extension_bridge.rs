@@ -2348,25 +2348,22 @@ fn wp702_mcp_config_stdio_round_trip() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// S4: registration through the normal `pi.registerMcpServer` path — a minimal
-/// fixture extension (no MCP logic; no unmodified upstream MCP-using example
-/// exists) points at the same fixture server. The tool name uses the upstream
-/// `mcp__<server>__<tool>` scheme with the server name sanitized.
+/// E3S5/WP-1405 (D13 final form): the sidecar's built-in mcp extension is
+/// gone, so an extension's `pi.registerMcpServer` call is still accepted by
+/// the unmodified upstream runner (the API is part of the mirror, ADR 0002)
+/// but the server is NEVER connected — no `mcp__fixture_reg__*` tool is ever
+/// declared and the fixture process is never spawned. Pinning the E3S5
+/// deletion (the WP-702 registration path "stayed until E3S5" — D13): with
+/// the old sidecar this test is RED (the tool is declared and the server is
+/// spawned on session_start).
 #[test]
-fn wp702_mcp_register_via_extension() {
-    let tmp = std::env::temp_dir().join(format!("pi-rust-wp702b-{}", std::process::id()));
+fn wp1405_register_mcp_server_not_hosted_pin() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1405r-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let scenario = json!({
-        "user_messages": ["echo via the registered server"],
-        "model_scripts": [[
-            { "tool_call": { "name": "mcp__fixture_reg__echo", "input": { "text": "via-register" } } },
-            { "text": "done" }
-        ]]
-    });
-    let scen = tmp.join("scenario.json");
-    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let spawn_log = tmp.join("spawns.log");
     let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
     let session_file = tmp.join("session.jsonl");
 
     let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
@@ -2374,10 +2371,11 @@ fn wp702_mcp_register_via_extension() {
         .arg(repo().join("tests/fixtures/mcp-register-fixture.ts"))
         .arg("--agent-dir")
         .arg(&agent_dir)
-        .arg("--scenario")
-        .arg(&scen)
+        .arg("--prompt")
+        .arg("hi")
         .arg("--session-file")
         .arg(&session_file)
+        .env("MCP_REGISTER_SPAWN_LOG", &spawn_log)
         .output()
         .expect("running pi-rust");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -2385,6 +2383,13 @@ fn wp702_mcp_register_via_extension() {
         out.status.code(),
         Some(0),
         "pi-rust exited non-zero\n{stderr}"
+    );
+    // The extension itself loads (the API call is accepted by the unmodified
+    // runner): 4 = fixture + tool-search + llama + codemode builtins (the
+    // built-in mcp extension is gone — E3S5).
+    assert!(
+        stderr.contains("ready: 4 extensions"),
+        "the register fixture must load (positive control)\n{stderr}"
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2395,13 +2400,36 @@ fn wp702_mcp_register_via_extension() {
             .any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
         "unexpected extension_error\n{stdout}",
     );
-    let exec = lines
+    // Pin 1: the registered server's tools are never declared to the model.
+    let selected: Vec<&str> = lines
         .iter()
-        .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__fixture_reg__echo")
-        .expect("mcp__fixture_reg__echo execution missing\n{stdout}");
-    assert_eq!(
-        exec["result_summary"], "echo:via-register",
-        "registerMcpServer round-trip: {exec}"
+        .filter(|l| {
+            l.get("kind").and_then(Value::as_str) == Some("decision")
+                && l.get("name").and_then(Value::as_str) == Some("before_agent_start")
+        })
+        .filter_map(|l| l["request"]["systemPromptOptions"]["selectedTools"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        !selected.iter().any(|t| t.starts_with("mcp__fixture_reg__")),
+        "the registered server's tools must never be declared (no host)\n{selected:?}"
+    );
+    // Pin 2: no execution of a registered-server tool.
+    assert!(
+        !lines.iter().any(
+            |l| l.get("kind").and_then(Value::as_str) == Some("tool_execution")
+                && l["name"]
+                    .as_str()
+                    .is_some_and(|n| n.starts_with("mcp__fixture_reg__"))
+        ),
+        "no mcp__fixture_reg__ tool may execute\n{stdout}"
+    );
+    // Pin 3: the server process was never spawned.
+    assert!(
+        !spawn_log.exists(),
+        "the registered server must never be spawned (no sidecar host)\n{}",
+        std::fs::read_to_string(&spawn_log).unwrap_or_default()
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2739,10 +2767,13 @@ fn wp703_mcp_http_round_trip() {
 
 // ============================================================================
 // E3S3/WP-1403: core-native MCP hosting — the core connects and drives the
-// configured MCP servers itself; the sidecar (when alive) only hosts the
-// extension-registered servers (D13). The sidecar-degraded runs below are
-// the HARD acceptance: the existing MCP fixture scenarios (stdio + HTTP,
-// exposure rules) pass with no sidecar at all.
+// configured MCP servers itself; since E3S5/WP-1405 the sidecar hosts NO MCP
+// servers at all (its built-in mcp extension + the mcpConfig registration
+// path are removed; `pi.registerMcpServer` is accepted by the unmodified
+// runner but never connected — the negative pin above, D13). The
+// sidecar-degraded runs below are the HARD acceptance: the existing MCP
+// fixture scenarios (stdio + HTTP, exposure rules) pass with no sidecar at
+// all.
 // ============================================================================
 
 /// HARD: the WP-702 stdio scenario with the **sidecar degraded** (spawn
@@ -4970,6 +5001,200 @@ fn wp1404_kimi_oauth_no_credential_typed_error() {
     assert!(
         headers.contains("bearer env-kimi-key"),
         "the env key used as bearer\n{headers}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ============================================================================
+// E3S5/WP-1405: the E3 end-state regression — a Node-free run (sidecar
+// spawn failing) carries all three core-native capabilities:
+// (1) a models.json model streams through the core's built-in OpenAI driver,
+// (2) an MCP tool is in the core's tool set (listed), callable, and its
+//     result lands in the transcript,
+// (3) an oauth builtin (kimi-coding, mocked stored token, refreshed by the
+//     core) streams through the built-in driver.
+// ============================================================================
+
+/// HARD: one test, three sub-runs — each with `PI_RUST_NODE` pointing at a
+/// nonexistent binary (spawn failure, the run goes through the degraded-
+/// sidecar path) — proving the Node-free run carries providers + MCP + oauth.
+#[test]
+fn wp1405_sidecar_degraded_full_regression() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1405-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // (1) providers: a models.json model streams. The mock's final chunk has
+    // no `finish_reason` (the sidecar's upstream streamer would require it —
+    // proof the call never crosses a bridge).
+    let (base, _chat) = sse_no_finish_mock("E3S5 providers ok");
+    let agent1 = tmp.join("agent-1");
+    std::fs::create_dir_all(&agent1).unwrap();
+    std::fs::write(
+        agent1.join("models.json"),
+        r#"{"providers":{"mockcustom":{"name":"Mock Custom","baseUrl":"__BASE__","api":"openai-completions","apiKey":"$E3S5_MODELS_JSON_KEY","models":[{"id":"mock-model","name":"Mock Model","contextWindow":4096,"maxTokens":512}]}}}"#
+            .replace("__BASE__", &base),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1405-node")
+        .env("E3S5_MODELS_JSON_KEY", "e3s5-key")
+        .arg("--provider")
+        .arg("mockcustom")
+        .arg("--model")
+        .arg("mock-model")
+        .arg("--prompt")
+        .arg("hi")
+        .arg("--agent-dir")
+        .arg(&agent1)
+        .arg("--session-file")
+        .arg(tmp.join("session-1.jsonl"))
+        .output()
+        .expect("running pi-rust (providers)");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "(1) exit\n{stderr}");
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "(1) the run must go through the degraded-sidecar path\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("E3S5 providers ok"),
+        "(1) the models.json model must stream through the core driver\n{dump}"
+    );
+
+    // (2) MCP: a stdio server from the agent dir's mcp.json — the
+    // direct-exposure tool is in the core's tool set (listed), callable,
+    // and its result lands in the transcript (executed natively, no bridge
+    // hop). In a degraded run the model declaration is not observable on
+    // the wire (no sidecar decision); a call for a tool outside the core's
+    // set would fail the run as a model-script error, so the native
+    // execution below is the listing proof. The declared set itself is
+    // pinned with the sidecar alive (wp1403_mcp_exposure_rules_and_change
+    // _event).
+    let agent2 = tmp.join("agent-2");
+    std::fs::create_dir_all(&agent2).unwrap();
+    let fixture = repo().join("tests/fixtures/mcp-server-fixture.mjs");
+    std::fs::write(
+        agent2.join("mcp.json"),
+        json!({
+            "mcpServers": {
+                "fixture": { "command": "node", "args": [fixture.to_string_lossy()], "exposure": "direct" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let scenario = json!({
+        "user_messages": ["use the mcp tools"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture__echo", "input": { "text": "e3s5" } } },
+            { "text": "mcp done" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1405-node")
+        .arg("--agent-dir")
+        .arg(&agent2)
+        .arg("--scenario")
+        .arg(&scen)
+        .arg("--session-file")
+        .arg(tmp.join("session-2.jsonl"))
+        .output()
+        .expect("running pi-rust (mcp)");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "(2) exit\n{stderr}");
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "(2) the run must go through the degraded-sidecar path\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines = event_log(&stdout);
+    // listed + callable: native execution with the fixture's result (an
+    // unknown tool would have failed the run before this point).
+    let exec = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__fixture__echo")
+        .expect("mcp__fixture__echo execution missing\n{stdout}");
+    assert_eq!(exec["blocked"], json!(false));
+    assert_eq!(
+        exec["result_summary"], "echo:e3s5",
+        "mcp round-trip: {exec}"
+    );
+    // result lands in the transcript.
+    let last = lines.last().expect("no stdout lines");
+    assert_eq!(last["kind"], "transcript");
+    let entries: Vec<&Value> = last["session"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+        .collect();
+    let roles: Vec<&str> = entries
+        .iter()
+        .map(|e| e["message"]["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["user", "assistant", "toolResult", "assistant"]);
+    for r in entries
+        .iter()
+        .filter(|e| e["message"]["role"] == "toolResult")
+    {
+        assert_eq!(r["message"]["isError"], json!(false));
+    }
+
+    // (3) oauth: kimi-coding with a mocked stored token (expired → the core
+    // refreshes it against the mock, upstream margin) streams through the
+    // built-in driver.
+    let (oauth_host, refresh_log, mut child) = start_kimi_oauth_mock(&tmp);
+    let (chat_base, _chat2) = sse_no_finish_mock("E3S5 oauth ok");
+    let agent3 = tmp.join("agent-3");
+    std::fs::create_dir_all(&agent3).unwrap();
+    std::fs::write(
+        agent3.join("auth.json"),
+        r#"{"kimi-coding":{"type":"oauth","access":"old-access","refresh":"old-refresh","expires":1}}"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("kimi-coding")
+        .arg("--model")
+        .arg("k3")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--agent-dir")
+        .arg(&agent3)
+        .arg("--session-file")
+        .arg(tmp.join("session-3.jsonl"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1405-node")
+        .env("KIMI_CODE_OAUTH_HOST", &oauth_host)
+        .env("KIMI_BASE_URL", &chat_base)
+        .output()
+        .expect("running pi-rust (oauth)");
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0), "(3) exit\n{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "(3) the run must go through the degraded-sidecar path\n{stderr}"
+    );
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("E3S5 oauth ok"),
+        "(3) the oauth builtin must stream through the core driver\n{dump}"
+    );
+    // the core refreshed the stored credential (no sidecar involved).
+    let log = std::fs::read_to_string(&refresh_log).unwrap_or_default();
+    assert!(
+        log.contains("old-refresh"),
+        "(3) core-side refresh with the stored token\n{log}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

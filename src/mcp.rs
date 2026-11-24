@@ -20,17 +20,17 @@
 //!   session start; NO auto-restart (a crashed server reconnects lazily
 //!   on the next call, fresh process); close on session shutdown.
 //!
-//! Coexistence with the sidecar (D13): the core OWNS the config servers,
-//! except servers carrying `oauth`/`auth` fields (the core cannot
-//! authenticate them yet — E3S4): those stay in the sidecar's `mcpConfig`
-//! so they keep working while the sidecar is alive. For every other server
-//! the core is the only connection (nothing is double-connected); the
-//! sidecar's built-in mcp extension additionally connects servers
-//! extensions register with `pi.registerMcpServer` (sidecar-only source,
-//! until E3S5).
+//! Ownership (D13, final form E3S5): the core is the ONLY connector of
+//! MCP servers — the sidecar hosts no MCP servers any more (its built-in
+//! mcp extension + the `mcpConfig` registration path were removed in
+//! E3S5), so nothing is double-connected. Servers carrying `oauth`/`auth`
+//! fields are skipped with a warning (the core cannot authenticate them
+//! yet — D17, and no host remains). `pi.registerMcpServer` registrations
+//! by user extensions are accepted by the unmodified upstream runner but
+//! never connected (no host remains).
 //!
-//! v0 core limits (the sidecar still serves these while alive; E3S4/E3S5
-//! revisit): OAuth/`auth` server fields (typed skip), resource tools,
+//! v0 core limits (the sidecar serves none of these any more — E3S5):
+//! OAuth/`auth` server fields (typed skip), resource tools,
 //! the `/mcp` manager, the `mcp_servers` prompt section, and
 //! codemode/deferred reachability (no core codemode/tool_search — such
 //! tools are registered but only reachable by explicit name).
@@ -373,7 +373,7 @@ fn parse_http(ctx: &str, obj: &serde_json::Map<String, Value>) -> Result<Kind, S
     Ok(Kind::Http { url, headers })
 }
 
-/// Parses + validates the merged mcp config (the `mcpConfig` value).
+/// Parses + validates the merged mcp config (the `mcpServers` value).
 /// Returns (servers, warnings): an invalid entry is skipped with a
 /// message naming it, never fatal (upstream: load errors are collected,
 /// the session continues).
@@ -394,7 +394,7 @@ pub fn parse_servers(cfg: Option<&Value>) -> (Vec<ServerConfig>, Vec<String>) {
         };
         if obj.get("oauth").is_some() || obj.get("auth").is_some() {
             warnings.push(format!(
-                "{ctx}: oauth/auth is not supported by the core yet (E3S4) — server skipped"
+                "{ctx}: oauth/auth is not supported by the core yet (D17) — server skipped (the sidecar no longer hosts MCP servers, E3S5)"
             ));
             continue;
         }
