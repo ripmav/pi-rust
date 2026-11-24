@@ -98,6 +98,10 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
 - Protocol: **bridge protocol v0** — NDJSON over stdio, framing and event
   shapes borrowed from upstream's own headless RPC mode. Full spec:
   [`docs/bridge-protocol.md`](docs/bridge-protocol.md).
+- **Provider plugins (M15, WP-1501):** provider implementations can also
+  ship as Rust cdylibs loaded in-process by the core — see
+  [Provider plugins](#provider-plugins-m15-wp-1501) below and the ABI
+  reference [`docs/provider-plugin-abi.md`](docs/provider-plugin-abi.md).
 - Upstream pin: `earendil-works/pi @ 64a15f4` (shallow clone in `upstream/`,
   gitignored). The sidecar imports the built `dist/`, so **upstream must be
   built** before running (below). Bumping the pin may require re-checking the
@@ -247,6 +251,32 @@ Key material never appears in logs or error text.
 Validated end-to-end (unmodified upstream examples, `tests/extension_bridge.rs`):
 `hello`, `with-deps` (npm deps), `permission-gate`, `claude-rules`,
 `plan-mode`, `prompt-customizer` + the degraded sidecar-crash path.
+
+### Provider plugins (M15, WP-1501)
+
+A provider can be a **plugin**: a Rust cdylib the core loads at startup and
+streams through in-process — no sidecar, no Node. Contract:
+[`docs/provider-plugin-abi.md`](docs/provider-plugin-abi.md) (ABI v1: entry
+symbol `pi_provider_plugin_init`, a 9-slot C vtable, JSON payloads,
+`{"error": "..."}` convention).
+
+- **Discovery:** `<exe dir>/providers/` (bundled) then `<agentDir>/providers/`
+  (default `~/.pi/agent/providers/`) — same provider name: the user dir
+  wins (logged). A failing plugin file is a typed log line; the run
+  continues.
+- **Usage:** plugin models are selectable exactly like built-ins
+  (`--provider sample-compat --model bundled-model`, TUI picker,
+  `settings.json`).
+- **Login:** `pi-rust auth login sample-compat --no-browser` — the core
+  drives the plugin's handshake (prints the sign-in URL, polls) and stores
+  the returned credential in `auth.json`; the plugin never touches the
+  credential store.
+- **Trust (v0):** plugins run in-process with the same trust level as
+  compiled-in builtins (your own dirs) — no sandbox.
+- **Reference plugin:** `plugin-samples/openai-compat/` (crate
+  `pi-sample-compat`, provider `sample-compat`) — a standalone crate (the
+  normal `cargo build` never compiles it); the e2e builds it on demand:
+  `cargo build --manifest-path plugin-samples/openai-compat/Cargo.toml`.
 
 ### CLI
 

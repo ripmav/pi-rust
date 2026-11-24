@@ -3,11 +3,11 @@
 //! Build time: `build.rs` merges `upstream/packages/ai/src/providers/data/*.json`
 //! into a single JSON blob in OUT_DIR (zero runtime deps on the upstream
 //! tree — the catalog is frozen at build time, matching the upstream pin).
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cost {
     #[serde(default)]
@@ -20,7 +20,7 @@ pub struct Cost {
     pub cache_write: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,

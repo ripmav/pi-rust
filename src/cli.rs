@@ -360,6 +360,12 @@ pub async fn run() -> Result<i32> {
     };
     crate::config::ensure_agent_dir(&agent_dir)?;
 
+    // E4S1/WP-1501: provider plugins — the cdylibs in the bundled dir
+    // (`<exe dir>/providers/`) + the user dir (`<agentDir>/providers/`,
+    // wins on name collision). A failing plugin is a typed log line; the
+    // run continues with the remaining providers (E4S1 acceptance).
+    let plugins = Arc::new(crate::provider::plugin::PluginSet::load(&agent_dir));
+
     // M3/WP-301: agent settings from the agent dir (global file only — the
     // project `cwd/.pi/settings.json` merge is WP-1103, gated on the trust
     // model below). Flags beat settings; settings beat the fake-driver
@@ -591,6 +597,11 @@ pub async fn run() -> Result<i32> {
                 model_id.as_deref().unwrap(),
                 &agent_dir,
             )?)
+        } else if let Some(pl) = plugins.provider(&provider_name).cloned() {
+            // E4S1: a provider plugin — the core serves it itself (the
+            // vtable stream, never the bridge; same ownership as
+            // models.json/kimi-coding).
+            Some(plugins.driver(&pl, model_id.as_deref(), &agent_dir)?)
         } else if builtin {
             build_provider(&provider_name, model_id.as_deref(), &agent_dir)?
         } else {
@@ -872,7 +883,11 @@ pub async fn run() -> Result<i32> {
     // picker (the effective registry itself is built lazily — see
     // `Core::registry`; the bundled catalog must not parse at startup,
     // WP-905 idle-RSS baseline).
-    let extra_models = models_json.core_models();
+    let extra_models = {
+        let mut extra = models_json.core_models();
+        extra.extend(plugins.all_models());
+        extra
+    };
     let ctx = Arc::new(Core {
         client: client.clone(),
         session: session.clone(),
@@ -881,6 +896,7 @@ pub async fn run() -> Result<i32> {
         ext_active_tools: Arc::default(),
         ext_models: Arc::default(),
         models_json: models_json.clone(),
+        plugins: plugins.clone(),
         registry_slot: Arc::default(),
         skills: Arc::new(skills.clone()),
         ready: Mutex::new(Some(ready_tx)),
@@ -976,13 +992,17 @@ pub async fn run() -> Result<i32> {
     if !ready.is_null() && ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
         bail!("sidecar apiVersion != 0");
     }
-    // WP-701: a startup --provider unknown to the bundled registry and to
-    // models.json must have been registered by an extension — typed error
-    // before the run starts (no silent fake-driver fallback). WP-1401:
-    // core-native models.json providers skip the check — the core serves
-    // them itself; with the sidecar unavailable the check is impossible
+    // WP-701: a startup --provider unknown to the bundled registry, to
+    // models.json and to the provider plugins must have been registered by
+    // an extension — typed error before the run starts (no silent
+    // fake-driver fallback). WP-1401: core-native models.json providers
+    // skip the check — the core serves them itself; E4S1: provider plugins
+    // the same way. With the sidecar unavailable the check is impossible
     // and extension providers are unavailable.
-    if !builtin && models_json.provider(&provider_name).is_none() {
+    if !builtin
+        && models_json.provider(&provider_name).is_none()
+        && plugins.provider(&provider_name).is_none()
+    {
         if ready.is_null() {
             anyhow::bail!(
                 "provider {provider_name} is not a built-in or models.json provider, and the sidecar is unavailable (extension-registered providers cannot be verified)"

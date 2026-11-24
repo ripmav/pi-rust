@@ -11,9 +11,14 @@
 //! runtime refreshes the token sidecar-side (WP-1007). Key material never
 //! appears in errors.
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
+/// Serializes the core's auth.json writes (in-process).
+// shortcut: upstream takes a cross-process lockfile (proper-lockfile); the
+// core serializes in-process only — fine while a single pi-rust process owns
+// the core-owned credentials (the sidecar writes only sidecar-owned ones).
+static AUTH_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Ambient env var per provider (subset of upstream `env-api-keys.ts`,
 /// api-key auth only; unknown providers rely on auth.json or get a typed
 /// error).
@@ -161,6 +166,43 @@ pub fn resolve_api_key(provider: &str, agent_dir: &Path) -> Result<String> {
             "no credentials for provider {provider}: set {env} or store a credential in auth.json"
         )
     })
+}
+
+/// Writes the credential for `provider` to auth.json (read-modify-write;
+/// other providers' entries preserved). Creates auth.json 0600 (unix).
+/// Shared by the core-native oauth storage (`oauth::save`) and the
+/// provider-plugin login (E4S1 — the core stores whatever credential the
+/// plugin's handshake returned; plugins never write auth.json themselves).
+pub fn save_credential(agent_dir: &Path, provider: &str, cred: &Value) -> Result<()> {
+    let _guard = AUTH_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = agent_dir.join("auth.json");
+    let existed = path.exists();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut data: Value = if existed {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if raw.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
+        }
+    } else {
+        json!({})
+    };
+    data.as_object_mut()
+        .context("auth.json root is not an object")?
+        .insert(provider.to_string(), cred.clone());
+    let out = serde_json::to_string_pretty(&data)?;
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

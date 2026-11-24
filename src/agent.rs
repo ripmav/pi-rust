@@ -148,6 +148,10 @@ pub struct Core {
     /// empty when the file is missing or malformed (the run continues with
     /// the bundled catalog).
     pub models_json: Arc<crate::models_json::ModelsJson>,
+    /// E4S1/WP-1501: the provider plugins (bundled + user dirs); their models
+    /// join the registry and their streams route through the vtable (never
+    /// the bridge). Empty set = no plugin dirs.
+    pub plugins: Arc<crate::provider::plugin::PluginSet>,
     /// WP-1401/E3S1: the effective model registry, LAZILY built on first
     /// use (see [`Core::registry`] — the bundled catalog is ~1.1 MB JSON / a
     /// few MB of heap; parsing it at startup would inflate idle RSS past
@@ -265,15 +269,15 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// (bidirectional liveness, no head-of-line blocking).
 impl Core {
     /// WP-1401/E3S1: the effective model registry — the bundled catalog
-    /// merged with the core-native models.json models (cost, contextWindow,
-    /// input modality, set_model validation). Lazily built on first use:
-    /// without extras the shared bundled `Arc` is kept (no clone); the
-    /// merged copy exists only when the user's models.json has
-    /// core-native models.
+    /// merged with the core-native models.json models + provider plugin
+    /// models (cost, contextWindow, input modality, set_model validation).
+    /// Lazily built on first use: without extras the shared bundled `Arc` is
+    /// kept (no clone); the merged copy exists only when extras exist.
     pub fn registry(&self) -> &crate::registry::ModelRegistry {
         self.registry_slot
             .get_or_init(|| {
-                let extra = self.models_json.core_models();
+                let mut extra = self.models_json.core_models();
+                extra.extend(self.plugins.all_models());
                 if extra.is_empty() {
                     crate::registry::ModelRegistry::bundled_arc()
                 } else {
@@ -481,6 +485,25 @@ pub async fn event_task(
                                         }
                                     }
                                     Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
+                            } else if let Some(pl) = ctx.plugins.provider(&p).cloned() {
+                                // E4S1: a provider plugin — the core builds
+                                // the plugin driver (never the bridge; the
+                                // guard also covers a colliding extension
+                                // registration).
+                                match ctx.plugins.driver(&pl, Some(&m), &ctx.agent_dir) {
+                                    Ok(drv) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
                                     Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
                                 }
                             } else if ctx
@@ -1598,6 +1621,7 @@ async fn model_call<'a>(
     // and the guard also covers a colliding extension registration.
     let ext_model = if ctx.models_json.owner(&p, &mid).is_some()
         || (p == crate::oauth::KIMI_CODING && ctx.provider.lock().unwrap().is_some())
+        || ctx.plugins.provider(&p).is_some()
     {
         None
     } else {
@@ -1688,6 +1712,9 @@ async fn model_call<'a>(
                         d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     Some(ProviderDriver::Bedrock(d)) => {
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
+                    }
+                    Some(ProviderDriver::Plugin(d)) => {
                         d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     None => unreachable!("fake_driver is None only while a provider exists"),

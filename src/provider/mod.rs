@@ -6,9 +6,11 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod google;
 pub mod openai;
+pub mod plugin;
 
 pub use anthropic::AnthropicDriver;
 pub use openai::OpenAiDriver;
+pub use plugin::PluginDriver;
 
 use crate::model::{AssistantTurn, ModelDriver, StreamDelta};
 use anyhow::{Context, Result};
@@ -24,6 +26,9 @@ pub enum ProviderDriver {
     Anthropic(Arc<AnthropicDriver>),
     Google(Arc<google::GoogleDriver>),
     Bedrock(Arc<bedrock::BedrockDriver>),
+    /// E4S1: a provider plugin (C ABI vtable cdylib; streams through the
+    /// vtable, never the bridge).
+    Plugin(Arc<PluginDriver>),
 }
 
 impl ProviderDriver {
@@ -39,6 +44,7 @@ impl ProviderDriver {
             ProviderDriver::Anthropic(d) => d.complete(convo, on_delta),
             ProviderDriver::Google(d) => d.complete(convo, on_delta),
             ProviderDriver::Bedrock(d) => d.complete(convo, on_delta),
+            ProviderDriver::Plugin(d) => d.complete(convo, on_delta),
         }
     }
 }

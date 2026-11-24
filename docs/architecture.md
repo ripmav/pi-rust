@@ -161,6 +161,42 @@ flowchart LR
   capabilities; core extensions call the vtable `ui_request` synchronously
   (core routes to the TUI or applies the headless default).
 
+## Provider plugins (E4S1, D16 option 1)
+
+Provider implementations can ship as **plugins**: Rust cdylibs the core
+loads in-process at startup (the ADR 0005/0006 pattern applied to
+providers). Contract: [`docs/provider-plugin-abi.md`](provider-plugin-abi.md).
+
+- **Loading:** `<exe dir>/providers/` (bundled, ships with the binary) then
+  `<agentDir>/providers/` (user dir) — name collision: the user dir wins,
+  override logged. Every failing plugin file (unreadable, missing entry
+  symbol, `abi_version` mismatch, bad `list_models` JSON, panic) is a typed
+  log line; the run continues with the remaining providers.
+- **Registry + dispatch:** plugin models merge into the model registry
+  (bundled catalog + `models.json` + plugins; per-id limit unchanged) and
+  are selectable exactly like built-ins (`--provider`/`--model`, TUI
+  picker, `settings.json`). The core resolves the credential (auth.json)
+  and drives a `ProviderDriver::Plugin` — the vtable stream
+  (`stream_open`/`stream_next`/`stream_close`) runs from a blocking task;
+  **plugin streams never cross the sidecar bridge** (Node-free, incl. with
+  the sidecar degraded).
+- **Login:** `pi-rust auth login <plugin-provider> [--api-key]
+  [--no-browser]` — the core owns the UX (URL print, browser, poll loop)
+  and stores the returned credential in `auth.json`; the plugin only
+  performs protocol steps (`auth_start`/`auth_status`) and never touches
+  the credential store.
+- **Trust (v0):** in-process with the same trust level as compiled-in
+  builtins (the user's own dirs) — no sandbox; a faulty plugin can take
+  down the run (ADR 0006 risk profile; panics are caught and become typed
+  errors).
+- **Reference implementation:** `plugin-samples/openai-compat/`
+  (crate `pi-sample-compat`, provider `sample-compat`) — standalone crate
+  (own workspace) so the normal build stays lean; the e2e
+  (`tests/provider_plugin.rs`) builds it on demand.
+- The compiled-in builtins (openai/anthropic/google/bedrock) stay
+  compiled-in for the MVP (D16 option 1); E4S2 adds the four remaining
+  oauth builtins as plugins, E4S3 (backlog) the rest.
+
 ## Workspace layout
 
 ```
@@ -171,9 +207,11 @@ pi-rust/
 ├── pi-ext/           # public API crate (ADR 0003): pi+ctx surface (ADR 0002),
 │                     #   bridge wire types, v6 process client (user target),
 │                     #   core vtable binding (cdylib target)
-└── core-ext/         # the six core extensions, one cdylib crate each (ADR 0005)
-    ├── hello/  permission-gate/  claude-rules/
-    └── prompt-customizer/  with-deps/  plan-mode/
+├── core-ext/         # the six core extensions, one cdylib crate each (ADR 0005)
+│   ├── hello/  permission-gate/  claude-rules/
+│   └── prompt-customizer/  with-deps/  plan-mode/
+└── plugin-samples/   # provider plugin samples (standalone crates, E4S1)
+    └── openai-compat/  # pi-sample-compat: reference ABI v1 implementation
 ```
 
 ## Release & install

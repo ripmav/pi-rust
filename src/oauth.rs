@@ -26,7 +26,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::Duration;
 
 /// The only oauth builtin the core serves natively in v0 (D15).
@@ -90,12 +89,6 @@ pub fn is_expired(cred: &OauthCredential) -> bool {
 // ---------------------------------------------------------------------------
 // Credential store (auth.json)
 
-/// Serializes the core's auth.json writes (in-process).
-// shortcut: upstream takes a cross-process lockfile (proper-lockfile); the
-// core serializes in-process only — fine while a single pi-rust process owns
-// the core-owned credentials (the sidecar writes only sidecar-owned ones).
-static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
 /// Reads the stored credential for `provider` (typed error on a malformed
 /// auth.json; `None` when the file or entry is absent, or the entry is not
 /// an oauth credential).
@@ -132,46 +125,20 @@ pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential
     }))
 }
 
-/// Writes the oauth credential for `provider` (read-modify-write; other
-/// provider entries preserved). Creates auth.json 0600 (unix).
+/// Writes the oauth credential for `provider` (the upstream auth.json shape;
+/// other provider entries preserved, 0600-on-create via
+/// [`crate::auth::save_credential`]).
 pub fn save(agent_dir: &Path, provider: &str, cred: &OauthCredential) -> Result<()> {
-    let _guard = AUTH_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = agent_dir.join("auth.json");
-    let existed = path.exists();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut data: Value = if existed {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if raw.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
-        }
-    } else {
-        json!({})
-    };
-    data.as_object_mut()
-        .expect("auth.json root is an object")
-        .insert(
-            provider.to_string(),
-            json!({
-                "type": "oauth",
-                "access": cred.access,
-                "refresh": cred.refresh,
-                "expires": cred.expires,
-            }),
-        );
-    let out = serde_json::to_string_pretty(&data)?;
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    if !existed {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::auth::save_credential(
+        agent_dir,
+        provider,
+        &json!({
+            "type": "oauth",
+            "access": cred.access,
+            "refresh": cred.refresh,
+            "expires": cred.expires,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +567,8 @@ mod tests {
         responses: Vec<(u16, String)>,
     ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let recorded: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec2 = recorded.clone();
         std::thread::spawn(move || {
             let mut queue = responses.into_iter();
