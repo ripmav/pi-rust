@@ -49,7 +49,11 @@ flowchart LR
   the js/ts-extension compatibility layer (E3: its built-in extension
   hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
   E3S2 it no longer reads or routes the agent dir's `models.json` — model
-  providers are the core's (E3S1); since E3S3 its built-in mcp extension
+  providers are the core's (E3S1) — and the core is the **single source of
+  truth for models.json (D11, answered by the PO 2026-11-24)**: from E3S5
+  the sidecar's `ModelRuntime` is created with `modelsPath: null` (no direct
+  file access at all); if the sidecar ever needs models.json data, the core
+  passes it via the `init` payload (the E3S3 `mcpConfig` pattern); since E3S3 its built-in mcp extension
   connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
   config servers the core still cannot host (E3S4, D13); since E3S4 it no
   longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
