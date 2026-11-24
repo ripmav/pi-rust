@@ -39,26 +39,46 @@ flowchart LR
   trust ([src/trust.rs](https://github.com/ripmav/pi-rust/blob/main/src/trust.rs)), TUI ([src/tui/](https://github.com/ripmav/pi-rust/tree/main/src/tui)).
   Loads `<agentDir>/models.json` natively (E3S1, JSONC) and serves its
   OpenAI-compatible providers through the built-in driver — a Node-free run.
+  **No shell execution from config files (D12, answered by the PO
+  2026-11-24):** models.json `apiKey` supports literals and
+  `$ENV_VAR`/`${ENV_VAR}` templates (unset var = typed error naming the var,
+  never its value); `!command` is a typed rejection — the same rule the core
+  already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
-  Hosts the configured MCP servers itself (E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
+  Hosts **all** MCP servers itself — the configured ones (agent-dir
+  `mcp.json` + trusted project `.pi/mcp.json`, E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
   JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
-  native tool execution) — since E3S5 the core is the ONLY MCP connector
-  (the sidecar hosts no MCP servers; `oauth`/`auth` servers are skipped with
-  a warning, D17). Owns the oauth builtin it can natively stream
-  (`kimi-coding`, E3S4, [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs)) —
-  since E3S5 the sidecar hosts no oauth branches either (D15 answered).
+  native tool execution) — the core is the **single source of truth for
+  MCP (D13, answered by the PO 2026-11-24)**: from E3S5 the sidecar hosts
+  no MCP servers at all (its built-in mcp extension + `mcpConfig` path are
+  removed); until E3S5 the `oauth`/`auth` config servers stayed
+  sidecar-side as the documented interim — since E3S5 the core skips
+  them with a logged warning (no host remains; D17). Extension
+  `pi.registerMcpServer` registrations are accepted by the unmodified
+  runner but never connected (no host remains; forwarding the registration
+  to the core is the follow-up — task log L15). Owns the oauth builtin
+  it can natively stream (`kimi-coding`, E3S4,
+  [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs));
+  the other four stay sidecar-side until E4S2 (M15, D15 answered
+  2026-11-24).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
-  the **js/ts-extension compatibility layer** (E3 end state, E3S5): since
-  E3S2 it no longer reads or routes the agent dir's `models.json` (model
-  providers are the core's, E3S1), since E3S5 its built-in mcp extension and
-  `mcpConfig` path are gone (the core hosts every configured MCP server,
-  E3S3) and since E3S4/E3S5 it advertises and routes no oauth builtins
-  (`kimi-coding` core-owned, E3S4; the other four — radius, github-copilot,
-  xai, meta — wait for their core wire-API drivers, D16). Its remaining
-  built-in extension hosting (tool-search/llama/codemode) is itself js/ts
-  and stays until its own core-native stories, if the user wants them.
+  the js/ts-extension compatibility layer. Since E3S2 it no longer reads or
+  routes the agent dir's `models.json` — model providers are the core's
+  (E3S1), and the core is the **single source of truth for models.json
+  (D11, answered by the PO 2026-11-24)**: the bridge never uses the
+  models.json providers the (unmodified) upstream `ModelRuntime` loads
+  internally; if the sidecar ever needs models.json data, the core passes
+  it via the `init` payload. Since E3S5 its built-in mcp extension +
+  `mcpConfig` registration path are gone (the core is the single source of
+  truth for MCP, D13); since E3S4 it no longer advertises or routes the
+  `kimi-coding` oauth builtin (core-owned — D15) and keeps its oauth
+  branches for the other four builtins (radius, github-copilot, xai, meta)
+  until E4S2 (M15 provider plugin platform) is green (D15 answered
+  2026-11-24). Its remaining built-in extension hosting
+  (tool-search/llama/codemode) is itself js/ts and stays until its own
+  core-native stories, if the user wants them.
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog
@@ -79,9 +99,11 @@ flowchart LR
   E3S3/E3S5, D13 final form).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
-  respawn); clean shutdown or failed handshake → `Stopped`. E3S1: a
-  **spawn failure is also `Stopped` and not fatal** — the run continues
-  Node-free (built-ins + core-native models.json providers).
+  respawn); clean shutdown or failed handshake → `Stopped`. A **spawn
+  failure is also `Stopped` and not fatal** (E3S1; **D10, answered by the
+  PO 2026-11-24 — non-fatal by decision**: the core is standalone by
+  design, the sidecar is only the js/ts-extension layer) — the run
+  continues Node-free (built-ins + core-native models.json providers).
 
 ## Extension runtime — target state (E1S2–E1S5, not yet implemented)
 

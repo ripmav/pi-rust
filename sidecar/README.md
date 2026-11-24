@@ -57,9 +57,13 @@ cd sidecar && node smoke.mjs     # or: npm run smoke
   event names). Post-ready tool-set changes are pushed
   as `tools_changed` (v2). Since E3S5 the sidecar hosts **no MCP servers**
   (its built-in mcp extension + the `mcpConfig` registration path are
-  removed — the core is the only connector, E3S3) and **no model providers**
-  (models.json is the core's, E3S1/E3S2; the oauth builtin branch is gone,
-  E3S4/E3S5) — its role is js/ts extensions only.
+  removed — the core is the single source of truth for MCP, D13 /
+  E3S3). It still serves the four wire-API-less oauth builtins
+  (radius, github-copilot, xai, meta) through the upstream
+  `ModelRuntime` until E4S2 (M15) is green (D15 answered 2026-11-24);
+  models.json is the core's (E3S1/E3S2) and the bridge never uses the
+  runtime's models.json providers. Its role: js/ts extensions (+ that
+  interim oauth hosting).
 - F&F events dispatch to `runner.emit`; decision events
   (`tool_call`, `tool_result`, `context*`, `input`, `before_agent_start`,
   `user_bash`) run the upstream emitters and return combined results per the

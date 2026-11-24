@@ -1238,7 +1238,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
             &Value::Null,
         );
         if let Some(ms) = data.get("messages").and_then(Value::as_array) {
-            custom = ms.to_vec();
+            // Upstream agent-session.ts: handler results are role-less
+            // Pick<CustomMessage>; re-tag them at ingestion.
+            custom = ms.iter().map(normalize_custom_message).collect();
         }
         if let Some(p) = data.get("systemPrompt").and_then(Value::as_str) {
             system_prompt = p.to_string();
@@ -1572,6 +1574,10 @@ async fn model_call<'a>(
     convo: &[Value],
     mut deltas: Box<dyn FnMut(crate::model::StreamDelta) + Send + 'a>,
 ) -> Result<AssistantTurn, String> {
+    // Upstream convertToLlm before every LLM call (prompt turns and the
+    // compaction summary alike): extension providers are strict about
+    // message shape and the built-in drivers must not lose context.
+    let convo: Vec<Value> = convert_to_llm(convo);
     // WP-701: an extension-registered model always routes via the
     // bridge — an explicit provider selection wins over the scripted
     // fake driver and the live provider driver.
@@ -1670,21 +1676,21 @@ async fn model_call<'a>(
             }
         }
         None => match fake_driver {
-            Some(d) => d.complete(convo, deltas).await.map_err(|e| e.to_string()),
+            Some(d) => d.complete(&convo, deltas).await.map_err(|e| e.to_string()),
             None => {
                 let drv = ctx.provider.lock().unwrap().clone();
                 match drv.as_ref() {
                     Some(ProviderDriver::OpenAi(d)) => {
-                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     Some(ProviderDriver::Anthropic(d)) => {
-                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     Some(ProviderDriver::Google(d)) => {
-                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     Some(ProviderDriver::Bedrock(d)) => {
-                        d.complete(convo, deltas).await.map_err(|e| e.to_string())
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     None => unreachable!("fake_driver is None only while a provider exists"),
                 }
@@ -1937,6 +1943,89 @@ fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
     };
     tools::merge_with_extensions(defs, ext)
 }
+/// Upstream agent-session.ts before_agent_start ingestion: the handler
+/// result is `Pick<CustomMessage, "customType" | "content" | "display" |
+/// "details">` (no role); tag it `role: "custom"`, normalize
+/// missing/null content to `[]` (untyped extensions), keep the detail
+/// fields, stamp a timestamp.
+fn normalize_custom_message(m: &Value) -> Value {
+    let content = match m.get("content") {
+        Some(c) if !c.is_null() => c.clone(),
+        _ => Value::Array(Vec::new()),
+    };
+    let mut v = serde_json::Map::new();
+    v.insert("role".into(), json!("custom"));
+    if let Some(ct) = m.get("customType") {
+        v.insert("customType".into(), ct.clone());
+    }
+    v.insert("content".into(), content);
+    if let Some(d) = m.get("display") {
+        v.insert("display".into(), d.clone());
+    }
+    if let Some(d) = m.get("details") {
+        v.insert("details".into(), d.clone());
+    }
+    v.insert("timestamp".into(), json!(crate::session::now_ms()));
+    Value::Object(v)
+}
+
+/// Upstream COMPACTION_SUMMARY_PREFIX/SUFFIX (core/messages.ts).
+const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+
+/// Upstream convertToLlm (core/messages.ts): make the conversation
+/// LLM-safe for the provider. The four standard roles pass through;
+/// `custom` and `compactionSummary` become user messages (string content
+/// as a text block); anything else is filtered. Without this, raw
+/// extension messages (no role, string content) reach the streamer and
+/// crash strict extension providers, and the built-in drivers silently
+/// dropped custom entries and compaction summaries (v0 shortcut).
+fn convert_to_llm(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            let role = m.get("role").and_then(Value::as_str)?;
+            match role {
+                "system" | "user" | "assistant" | "toolResult" => Some(m.clone()),
+                "custom" => {
+                    let content = match m.get("content") {
+                        Some(Value::String(s)) => json!([{
+                            "type": "text",
+                            "text": s
+                        }]),
+                        Some(Value::Array(_)) => m.get("content").cloned().unwrap(),
+                        _ => return None,
+                    };
+                    Some(json!({
+                        "role": "user",
+                        "content": content,
+                        "timestamp": m.get("timestamp").cloned().unwrap_or(Value::Null)
+                    }))
+                }
+                "compactionSummary" => {
+                    let summary = m
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .and_then(|b| b.first())
+                        .and_then(|b| b.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Some(json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": COMPACTION_SUMMARY_PREFIX.to_string() + summary + COMPACTION_SUMMARY_SUFFIX
+                        }],
+                        "timestamp": m.get("timestamp").cloned().unwrap_or(Value::Null)
+                    }))
+                }
+                // UI-only/unknown roles are filtered (upstream default arm).
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<Value> {
     let tool_defs = merged_tool_defs(ctx);
     let mut v = vec![
@@ -2413,5 +2502,92 @@ mod wp1009_image_tests {
             &json!({"provider":"nope","id":"nothing"}),
             reg
         ));
+    }
+}
+
+#[cfg(test)]
+mod convert_to_llm_tests {
+    use super::{convert_to_llm, normalize_custom_message};
+    use serde_json::json;
+
+    #[test]
+    fn ingestion_re_tags_role_less_handler_result() {
+        // The shape deja-recall (and the upstream type) actually send.
+        let raw = json!({"customType":"deja-recall","content":"recall text","display":false,"details":{"digest":true}});
+        let m = normalize_custom_message(&raw);
+        assert_eq!(m["role"], "custom");
+        assert_eq!(m["customType"], "deja-recall");
+        assert_eq!(m["content"], "recall text");
+        assert_eq!(m["display"], false);
+        assert_eq!(m["details"], json!({"digest":true}));
+        assert!(m["timestamp"].is_u64());
+
+        // Untyped extensions: missing/null content normalizes to [].
+        assert_eq!(
+            normalize_custom_message(&json!({"customType":"x"}))["content"],
+            json!([])
+        );
+        assert_eq!(
+            normalize_custom_message(&json!({"customType":"x","content":null}))["content"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn standard_roles_pass_through_unchanged() {
+        let in_msgs = vec![
+            json!({"role":"system","content":"s","toolsAdded":[],"timestamp":1}),
+            json!({"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":2}),
+            json!({"role":"assistant","content":[{"type":"text","text":"yo"}],"timestamp":3}),
+            json!({"role":"toolResult","content":[],"toolName":"bash","timestamp":4}),
+        ];
+        assert_eq!(convert_to_llm(&in_msgs), in_msgs);
+    }
+
+    #[test]
+    fn custom_entries_become_user_messages() {
+        let out = convert_to_llm(&[
+            // String content (deja-recall style) -> one text block.
+            normalize_custom_message(
+                &json!({"customType":"deja-recall","content":"remember 42","display":false}),
+            ),
+            // Array content passes through as-is.
+            json!({"role":"custom","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"timestamp":9}),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(
+            out[0]["content"],
+            json!([{"type":"text","text":"remember 42"}])
+        );
+        assert!(out[0]["timestamp"].is_u64());
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(
+            out[1]["content"],
+            json!([{"type":"text","text":"a"},{"type":"text","text":"b"}])
+        );
+    }
+
+    #[test]
+    fn compaction_summary_becomes_prefixed_user_message() {
+        let out = convert_to_llm(&[
+            json!({"role":"compactionSummary","content":[{"type":"text","text":"the summary"}],"timestamp":5}),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        let text = out[0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("The conversation history before this point was compacted into the following summary:\n\n<summary>\n"));
+        assert!(text.ends_with("\n</summary>"));
+        assert!(text.contains("the summary"));
+    }
+
+    #[test]
+    fn unknown_roles_and_bad_custom_content_are_filtered() {
+        let out = convert_to_llm(&[
+            json!({"role":"notification","content":"ui only"}),
+            json!({"content":"no role at all"}),
+            json!({"role":"custom","content":123}),
+        ]);
+        assert!(out.is_empty(), "filtered: {out:?}");
     }
 }

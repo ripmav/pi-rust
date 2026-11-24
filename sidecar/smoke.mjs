@@ -10,11 +10,6 @@
  * shutdown dispatch guard, orderly exit on a broken stdout pipe, and the
  * 1 MB stdin line cap. Phase 3 verifies the UNMODIFIED upstream
  * custom-provider-gitlab-duo example loads and registers (701c).
- *
- * E3S5/WP-1405 (final form, sidecar = js/ts extensions only): the oauth
- * builtin branch (advertise + route) and the built-in mcp extension hosting
- * (mcpConfig registration) are REMOVED — the negative pins in (b2), (f4)
- * and (m) guard the deletion (a re-added branch would fail them).
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -308,31 +303,25 @@ async function main() {
 			["tool_call", "session_start", "before_agent_start"].every((ev) => ready.events.includes(ev)),
 			ready.events,
 		);
-		// E3S5: the built-in mcp extension is gone (the sidecar hosts no MCP
-		// servers — the core is the only connector, E3S3).
 		check("ready lists 10 extensions (7 + builtins tool-search/codemode/llama), no errors", ready.extensions.length === 10 && ready.errors.length === 0, ready.errors);
 
 		// (b2) WP-701: ready.providers is the object shape [{name, models:[...]}].
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
-		// 3 = smokeprovider + smoke-badkey + llama.cpp (native form). E3S5
-		// removed the four builtinOauth entries (smokeprovider + smoke-badkey
-		// + llama + the four = the pre-E3S5 count of 7).
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 3 &&
+			Array.isArray(ready.providers) && ready.providers.length === 7 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
 		);
-		// E3S5/WP-1405 (D15, PO descoped): the sidecar is js/ts-extensions-
-		// only — the oauth builtin branch (advertise + route) is removed.
-		// The four builtins (radius, github-copilot, xai, meta — no core
-		// wire-API driver yet) must NOT be advertised (pinning the E3S5
-		// deletion: a re-added builtinOauth branch would make this fail,
-		// same as the E3S2/E3S4 pins below).
+		// WP-1007: the upstream built-in oauth providers the SIDE-CAR serves are
+		// exposed from the upstream runtime (static catalogs; radius may be
+		// empty until the first authenticated refresh — only presence + shape
+		// are asserted). Since E3S4/WP-1404 (D15) kimi-coding is core-owned
+		// and not advertised here (pinned by the negative check below).
 		check(
-			"builtin oauth providers NOT advertised in ready (E3S5, sidecar js/ts-only)",
-			!["radius", "github-copilot", "xai", "meta"].some(
-				(name) => ready.providers?.some((p) => p?.name === name),
+			"builtin oauth providers exposed (radius, github-copilot, xai, meta)",
+			["radius", "github-copilot", "xai", "meta"].every(
+				(name) => ready.providers?.some((p) => p?.name === name && Array.isArray(p.models) && p.models.length > 0),
 			),
 			ready.providers?.map((p) => p?.name),
 		);
@@ -509,22 +498,6 @@ async function main() {
 			options: {},
 		});
 		check("unknown provider rejects", unknownProv.success === false && /unknown extension provider/.test(unknownProv.error), unknownProv);
-		// E3S5 pin: an off-route provider_stream for a former oauth builtin
-		// (radius) is rejected as an unknown extension provider — the
-		// builtin routing branch is gone (a re-added branch would answer
-		// with the "builtin provider … has no model" error instead).
-		const formerBuiltin = await core.request({
-			type: "provider_stream",
-			streamId: "s4",
-			model: { provider: "radius", id: "nope/1" },
-			messages: [],
-			options: {},
-		});
-		check(
-			"provider_stream for a former oauth builtin rejects (E3S5)",
-			formerBuiltin.success === false && /unknown extension provider/.test(formerBuiltin.error),
-			formerBuiltin,
-		);
 
 		// (g) before_agent_start: claude-rules rewrites the system prompt
 		const bas = await core.request({
@@ -685,13 +658,13 @@ async function main() {
 		check("gitlab-duo sidecar clean exit 0", code3 === 0, code3);
 
 		// (m) E3S5/WP-1405: the sidecar's built-in mcp extension hosting is
-		// REMOVED — the core is the only MCP connector (E3S3; the 702b
-		// positive scenario moved to the core-side e2e, tests/extension_bridge
-		// .rs). An init that still carries mcpConfig is ignored: the fixture
-		// server is never spawned and no mcp__ tools are ever declared
-		// (pinning the E3S5 deletion — a re-added mcpConfig branch or
-		// loadBuiltinMcpExtension would spawn the server on session_start and
-		// fail these checks).
+		// REMOVED — the core is the single source of truth for MCP (D13,
+		// answered by the PO 2026-11-24; the 702b positive scenario moved to
+		// the core-side e2e, tests/extension_bridge.rs). An init that still
+		// carries mcpConfig is ignored: the fixture server is never spawned
+		// and no mcp__ tools are ever declared (pinning the E3S5 deletion —
+		// a re-added mcpConfig branch or loadBuiltinMcpExtension would spawn
+		// the server on session_start and fail these checks).
 		const mcpFixture = path.join(ROOT, "tests/fixtures/mcp-server-fixture.mjs");
 		const mcpSpawnLog = path.join(tmp, "mcp-spawns.log");
 		const agentDir4 = path.join(tmp, "agent4");
@@ -773,13 +746,6 @@ async function main() {
 		// (E3S1). The e2e `models_json_custom_provider_end_to_end`
 		// (tests/extension_bridge.rs) re-points the user scenario at the
 		// core-native path.
-		// E3S5/WP-1405: the mcp hosting phase (m above, now the negative pin)
-		// and the oauth builtin advertise + route (the (b2)/(f4) negative
-		// pins) are removed with the bridge branches — the sidecar is
-		// js/ts-extensions-only. The e2e `wp702_mcp_register_via_extension`
-		// became the negative pin `wp1405_register_mcp_server_not_hosted_pin`,
-		// and `wp1405_sidecar_degraded_full_regression` is the E3 end-state
-		// regression (providers + MCP + oauth, sidecar spawn failing).
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);
