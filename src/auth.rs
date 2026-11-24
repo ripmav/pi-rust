@@ -4,11 +4,12 @@
 //!
 //! v0 scope: `api_key` credentials with literal keys or `${ENV_VAR}`
 //! references (credential `env` overlay shadows ambient env). Command
-//! references are NOT executed (typed error). OAuth credentials: the
-//! built-in drivers do not consume them in v0 — the sidecar-routed models
-//! of the upstream oauth providers (radius, kimi-coding, github-copilot,
-//! xai, meta) resolve and refresh the token sidecar-side (WP-1007). Key
-//! material never appears in errors.
+//! references are NOT executed (typed error). OAuth credentials: `kimi-coding`
+//! is core-native (E3S4 — the core refreshes it in its driver build,
+//! `src/oauth.rs`); the remaining upstream oauth providers (radius,
+//! github-copilot, xai, meta) are sidecar-routed — the sidecar's upstream
+//! runtime refreshes the token sidecar-side (WP-1007). Key material never
+//! appears in errors.
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,6 +26,8 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         "cloudflare-workers-ai" | "cloudflare-ai-gateway" => "CLOUDFLARE_API_KEY",
         "groq" => "GROQ_API_KEY",
         "xai" => "XAI_API_KEY",
+        // E3S4: upstream kimiCodingProvider envApiKeyAuth(["KIMI_API_KEY"]).
+        "kimi-coding" => "KIMI_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
         "huggingface" => "HF_TOKEN",
         "cerebras" => "CEREBRAS_API_KEY",
@@ -76,6 +79,23 @@ fn expand_refs(key: &str, cred_env: &HashMap<String, String>) -> String {
     out
 }
 
+/// `true` when auth.json holds an `api_key` credential for `provider`
+/// (the oauth check is `crate::oauth::stored`; together they cover the
+/// stored-credential branches of the upstream resolution order).
+pub fn has_api_key_credential(agent_dir: &Path, provider: &str) -> bool {
+    let path = agent_dir.join("auth.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    data.get(provider)
+        .and_then(|c| c.get("type"))
+        .and_then(Value::as_str)
+        == Some("api_key")
+}
+
 /// Resolves the API key for `provider` from `<agent_dir>/auth.json` first,
 /// then the ambient env var. Errors name the env var but never a key value.
 pub fn resolve_api_key(provider: &str, agent_dir: &Path) -> Result<String> {
@@ -107,14 +127,20 @@ pub fn resolve_api_key(provider: &str, agent_dir: &Path) -> Result<String> {
                     Ok(expand_refs(key, &cred_env))
                 }
                 Some("oauth") => {
-                    // WP-1007: precise typed error. The upstream oauth
-                    // providers are usable through the sidecar-routed models
-                    // (the sidecar's upstream runtime refreshes the token);
-                    // this core driver path cannot consume oauth in v0.
-                    if matches!(
-                        provider,
-                        "radius" | "kimi-coding" | "github-copilot" | "xai" | "meta"
-                    ) {
+                    // E3S4: kimi-coding is core-native now (the core
+                    // resolves + refreshes it in its driver build); this
+                    // path only fires when a models.json provider shadows
+                    // the builtin name without its own apiKey.
+                    if provider == "kimi-coding" {
+                        bail!(
+                            "auth.json credential for {provider} is oauth — the core-native {provider} builtin resolves and refreshes it itself (select the bundled {provider} model); the models.json apiKey fallback does not consume oauth; run `pi-rust auth login {provider}` to (re)log in"
+                        )
+                    }
+                    // WP-1007: precise typed error. The remaining upstream
+                    // oauth providers are usable through the sidecar-routed
+                    // models (the sidecar's upstream runtime refreshes the
+                    // token); this core driver path cannot consume them in v0.
+                    if matches!(provider, "radius" | "github-copilot" | "xai" | "meta") {
                         bail!(
                             "auth.json credential for {provider} is oauth; this built-in driver does not consume oauth in v0 — select the {provider} model provided by the extension sidecar (it refreshes the token itself) or run `pi-rust auth login {provider}`"
                         )

@@ -226,6 +226,22 @@ async function main() {
 	writeFileSync(path.join(tmp, ".claude/rules/testing.md"), "# testing rules\n");
 	const agentDir = path.join(tmp, "agent");
 	mkdirSync(agentDir, { recursive: true }); // isolate discovery from the user's global extensions
+	// WP-1402/E3S2 negative fixture: a models.json present in the smoke's
+	// agent dir (throwaway provider id). The core owns this file (E3S1) —
+	// the bridge must NOT advertise its provider in ready.providers.
+	writeFileSync(
+		path.join(agentDir, "models.json"),
+		JSON.stringify({
+			providers: {
+				smokemj: {
+					baseUrl: "http://127.0.0.1:1/v1",
+					api: "openai-completions",
+					apiKey: "smoke-mj-key",
+					models: [{ id: "smoke/mj-1", contextWindow: 1024, maxTokens: 64 }],
+				},
+			},
+		}),
+	);
 
 	const child = spawn(
 		process.execPath,
@@ -293,16 +309,18 @@ async function main() {
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 8 &&
+			Array.isArray(ready.providers) && ready.providers.length === 7 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
 		);
-		// WP-1007: the five upstream built-in oauth providers are exposed from
-		// the upstream runtime (static catalogs; radius may be empty until the
-		// first authenticated refresh — only presence + shape are asserted).
+		// WP-1007: the upstream built-in oauth providers the SIDE-CAR serves are
+		// exposed from the upstream runtime (static catalogs; radius may be
+		// empty until the first authenticated refresh — only presence + shape
+		// are asserted). Since E3S4/WP-1404 (D15) kimi-coding is core-owned
+		// and not advertised here (pinned by the negative check below).
 		check(
-			"builtin oauth providers exposed (radius, kimi-coding, github-copilot, xai, meta)",
-			["radius", "kimi-coding", "github-copilot", "xai", "meta"].every(
+			"builtin oauth providers exposed (radius, github-copilot, xai, meta)",
+			["radius", "github-copilot", "xai", "meta"].every(
 				(name) => ready.providers?.some((p) => p?.name === name && Array.isArray(p.models) && p.models.length > 0),
 			),
 			ready.providers?.map((p) => p?.name),
@@ -319,6 +337,23 @@ async function main() {
 			"ready provider model entry carries provider/id/api",
 			Boolean(smokeProv?.models?.some((m) => m.provider === "smokeprovider" && m.id === "smoke/echo-1" && m.api === "smoke-api" && m.name === "Smoke Echo")),
 			smokeProv,
+		);
+		// WP-1402/E3S2: the agent dir's models.json is the CORE's config now
+		// (E3S1) — the bridge no longer reads or advertises it (pinning the
+		// E3S2 deletion: a re-added models.json branch would make this fail).
+		check(
+			"models.json provider NOT advertised in ready (E3S2)",
+			!ready.providers?.some((p) => p?.name === "smokemj"),
+			ready.providers?.map((p) => p?.name),
+		);
+		// E3S4/WP-1404 (D15): the core owns kimi-coding end-to-end (login/
+		// store/refresh/stream) — the bridge must not advertise it (pinning
+		// the E3S4 deletion: a re-added builtinOauth entry would make this
+		// fail, same as the E3S2 pin above).
+		check(
+			"kimi-coding NOT advertised in ready (E3S4, core-owned)",
+			!ready.providers?.some((p) => p?.name === "kimi-coding"),
+			ready.providers?.map((p) => p?.name),
 		);
 
 		// (c) session_start: pi.events round-trip + claude-rules scan
@@ -699,6 +734,13 @@ async function main() {
 		core5.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
 		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("shortcut sidecar clean exit 0", code5 === 0, code5);
+
+		// WP-1402/E3S2: the WP-1301 phase (o) — models.json advertise +
+		// stream through the sidecar's upstream ModelRuntime — is removed
+		// with the bridge branches: models.json is the core's config now
+		// (E3S1). The e2e `models_json_custom_provider_end_to_end`
+		// (tests/extension_bridge.rs) re-points the user scenario at the
+		// core-native path.
 	} catch (err) {
 		failed++;
 		console.error(`FAIL - smoke aborted: ${err.message}`);

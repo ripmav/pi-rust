@@ -144,6 +144,15 @@ pub struct Core {
     /// WP-701: extension-registered models keyed `provider/id` (ready +
     /// providers_changed payloads); per-turn bridge routing + set_model gate.
     pub ext_models: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
+    /// WP-1401/E3S1: the agent dir's models.json (core-native providers);
+    /// empty when the file is missing or malformed (the run continues with
+    /// the bundled catalog).
+    pub models_json: Arc<crate::models_json::ModelsJson>,
+    /// WP-1401/E3S1: the effective model registry, LAZILY built on first
+    /// use (see [`Core::registry`] — the bundled catalog is ~1.1 MB JSON / a
+    /// few MB of heap; parsing it at startup would inflate idle RSS past
+    /// the WP-905 bench baseline).
+    pub registry_slot: Arc<std::sync::OnceLock<Arc<crate::registry::ModelRegistry>>>,
     /// WP-801: skills discovered at startup (system-prompt section + /skill: expansion).
     pub skills: Arc<Vec<crate::skills::Skill>>,
     pub ready: Mutex<Option<tokio::sync::oneshot::Sender<Value>>>, // full `ready` payload → cli
@@ -170,6 +179,13 @@ pub struct Core {
     /// WP-1103 reads it; allow until then (dead-code gate).
     #[allow(dead_code)]
     pub project_trusted: bool,
+    /// E3S3/WP-1403: the core's MCP host — the configured servers (agent-dir
+    /// `mcp.json` + the trusted project `.pi/mcp.json`, `config::merge_project_mcp`)
+    /// are connected and driven by the core itself (D13): upstream naming and
+    /// schemas, `direct`-exposure tools declared to the model, calls executed
+    /// natively (no `extension_tool_call` hop). Except `oauth`/`auth` servers
+    /// (E3S4), which the sidecar still hosts while alive.
+    pub mcp: Arc<crate::mcp::McpHost>,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
     /// WP-702: drain barrier for event_task — `sync_tool_set` sends a ping
@@ -247,6 +263,27 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// Sidecar→core event processor. Runs on its own task so a nested
 /// `tool_call_request` can be answered while the agent loop awaits a decision
 /// (bidirectional liveness, no head-of-line blocking).
+impl Core {
+    /// WP-1401/E3S1: the effective model registry — the bundled catalog
+    /// merged with the core-native models.json models (cost, contextWindow,
+    /// input modality, set_model validation). Lazily built on first use:
+    /// without extras the shared bundled `Arc` is kept (no clone); the
+    /// merged copy exists only when the user's models.json has
+    /// core-native models.
+    pub fn registry(&self) -> &crate::registry::ModelRegistry {
+        self.registry_slot
+            .get_or_init(|| {
+                let extra = self.models_json.core_models();
+                if extra.is_empty() {
+                    crate::registry::ModelRegistry::bundled_arc()
+                } else {
+                    Arc::new(crate::registry::ModelRegistry::bundled().merged_with(&extra))
+                }
+            })
+            .as_ref()
+    }
+}
+
 pub async fn event_task(
     mut events: mpsc::UnboundedReceiver<Value>,
     mut tools_sync: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
@@ -405,10 +442,55 @@ pub async fn event_task(
                     };
                     match (provider, model_id) {
                         (Some(p), Some(m)) => {
-                            // WP-701: extension-registered model — routable via
-                            // the bridge stream; no bundled driver is built.
-                            let key = format!("{p}/{m}");
-                            if ctx.ext_models.lock().unwrap().contains_key(&key) {
+                            // WP-1401: core-native models.json model — the
+                            // core serves it itself (built-in OpenAI driver,
+                            // D11). E3S2: the sidecar no longer advertises
+                            // models.json providers; the guard also covers
+                            // an extension registering the same provider
+                            // name.
+                            if let Some(owner) = ctx.models_json.owner(&p, &m) {
+                                match crate::models_json::build_driver(owner, &m, &ctx.agent_dir) {
+                                    Ok(drv) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
+                            } else if p == crate::oauth::KIMI_CODING {
+                                // E3S4 (D15): core-owned oauth builtin — the
+                                // native driver, never the bridge (the sidecar
+                                // no longer advertises it; the guard also
+                                // covers a colliding extension registration).
+                                match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
+                                    Ok(Some(drv)) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
+                            } else if ctx
+                                .ext_models
+                                .lock()
+                                .unwrap()
+                                .contains_key(&format!("{p}/{m}"))
+                            {
+                                // WP-701: extension-registered model — routable via
+                                // the bridge stream; no bundled driver is built.
                                 let prev = ctx.model.lock().unwrap().0.clone();
                                 let model = json!({"id":m,"provider":p});
                                 ctx.model.lock().unwrap().0 = model.clone();
@@ -417,7 +499,7 @@ pub async fn event_task(
                                 if subscribed(&ctx, "model_select") {
                                     ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
                                 }
-                            } else if crate::registry::ModelRegistry::bundled().resolve(&p, &m).is_none() {
+                            } else if ctx.registry().resolve(&p, &m).is_none() {
                                 reply(false, json!(format!("unknown model {p}/{m}")));
                             } else {
                                 match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
@@ -654,7 +736,7 @@ async fn execute_tool_call(
     let image_warning = read_image_warning(
         name,
         &mut details,
-        model_supports_image_value(&active),
+        model_supports_image_value(&active, ctx.registry()),
         active
             .get("id")
             .and_then(Value::as_str)
@@ -688,11 +770,25 @@ async fn run_tool(
             .unwrap()
             .iter()
             .any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+    // E3S3: a tool of a CORE-OWNED configured MCP server executes natively —
+    // no `extension_tool_call` hop (the sidecar does not hold the server).
+    // The ext_hit check above wins on a name collision (upstream override
+    // semantics: the sidecar-registered tool shadows the core's).
+    if !ext_hit {
+        if let Some((server, tool)) = ctx
+            .mcp
+            .owner_of(name)
+            .or_else(|| ctx.mcp.server_prefix_of(name))
+        {
+            return Ok(core_mcp_call(ctx, &server, &tool, input).await);
+        }
+    }
     // WP-702: MCP tool names (upstream `mcp__<server>__<tool>` scheme and the
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
-    // model-script error.
+    // model-script error (this now covers NON-configured servers — e.g. ones
+    // an extension registers — which stay sidecar-side until E3S5).
     let mcp_name = name.starts_with("mcp__")
         || matches!(
             name,
@@ -741,6 +837,27 @@ async fn run_tool(
         Decision::Unavailable => Err(ToolFailure::Other(
             "extension_tool_call unanswered: bridge degraded".into(),
         )),
+    }
+}
+
+/// E3S3: one native MCP tool call (core-owned configured server). The
+/// mapped `CallToolResult` flows through the normal tool_result pipeline
+/// (content/details/isError; `terminate` is never set — as built-ins).
+/// A failed call is an error tool result, never a model-script abort.
+async fn core_mcp_call(ctx: &Core, server: &str, tool: &str, input: &Value) -> tools::ExecResult {
+    match ctx.mcp.call(server, tool, input).await {
+        Ok((content, is_error)) => tools::ExecResult {
+            content,
+            details: json!({ "server": server, "tool": tool }),
+            is_error,
+            terminate: false,
+        },
+        Err(e) => tools::ExecResult {
+            content: json!([{ "type": "text", "text": e }]),
+            details: json!({ "server": server, "tool": tool }),
+            is_error: true,
+            terminate: false,
+        },
     }
 }
 
@@ -1081,6 +1198,11 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
     // systemPrompt (present only when a handler changed it) replaces the prompt
     // for this run.
     let mut custom: Vec<Value> = Vec::new();
+    // E3S3: the first prompt waits for the core's servers whose configured
+    // exposure includes `direct` (upstream `waitForDirectServers`, 10 s cap,
+    // once per session) so their tools are declared in the first turn — the
+    // sidecar used to do this in its mcp extension's before_agent_start.
+    ctx.mcp.await_direct().await;
     // WP-801: the skills section is part of the base prompt (upstream builds
     // it before before_agent_start); a handler-returned systemPrompt replaces
     // the whole prompt including the section.
@@ -1243,11 +1365,9 @@ async fn run_agent(ctx: &Core, u: &QueuedUser) -> Result<(), String> {
                 .and_then(Value::as_str)
                 .unwrap_or("fake")
                 .to_string();
-            let cost = turn.usage.cost_usd(
-                crate::registry::ModelRegistry::bundled()
-                    .resolve(&p, &m)
-                    .map(|x| &x.cost),
-            );
+            let cost = turn
+                .usage
+                .cost_usd(ctx.registry().resolve(&p, &m).map(|x| &x.cost));
             ctx.session.set_usage(&turn.usage, cost);
             ctx.usage_total.lock().unwrap().add(&turn.usage);
             *ctx.cost_total.lock().unwrap() += cost;
@@ -1464,12 +1584,23 @@ async fn model_call<'a>(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let ext_model = ctx
-        .ext_models
-        .lock()
-        .unwrap()
-        .get(&format!("{p}/{mid}"))
-        .cloned();
+    // WP-1401: a core-native models.json model is always served by the
+    // core driver (D11) — E3S2: the sidecar no longer advertises or routes
+    // models.json providers, this guard also covers the name-collision case
+    // (an extension registers the same provider name). E3S4: kimi-coding is
+    // core-owned the same way (D15) — the sidecar no longer advertises it,
+    // and the guard also covers a colliding extension registration.
+    let ext_model = if ctx.models_json.owner(&p, &mid).is_some()
+        || (p == crate::oauth::KIMI_CODING && ctx.provider.lock().unwrap().is_some())
+    {
+        None
+    } else {
+        ctx.ext_models
+            .lock()
+            .unwrap()
+            .get(&format!("{p}/{mid}"))
+            .cloned()
+    };
     match ext_model {
         Some(model) => {
             let stream_id = uuid::Uuid::new_v4().to_string();
@@ -1579,9 +1710,7 @@ fn compaction_settings(ctx: &Core) -> Option<(u64, u64, u64)> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let window = crate::registry::ModelRegistry::bundled()
-        .resolve(&p, &mid)?
-        .context_window?;
+    let window = ctx.registry().resolve(&p, &mid)?.context_window?;
     Some((
         window,
         crate::session::DEFAULT_RESERVE_TOKENS,
@@ -1781,6 +1910,11 @@ async fn run_compaction(
 /// precedence (extension tools shadow built-ins by name). Degraded: extension
 /// tools are dropped from the set.
 fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
+    // E3S3: the core's `direct`-exposure MCP tools join the model's set
+    // (upstream naming/schemas); sidecar extension tools still shadow on a
+    // name collision (upstream override semantics).
+    let mcp = ctx.mcp.declared_tools();
+    let defs = tools::merge_with_extensions(tools::schemas(), mcp);
     let ext = if ctx.client.state() == State::Running {
         // WP-1003: only ACTIVE extension tools are declared to the model
         // (upstream: the active set is the set declared to the model).
@@ -1799,7 +1933,7 @@ fn merged_tool_defs(ctx: &Core) -> Vec<Value> {
     } else {
         Vec::new()
     };
-    tools::merge_with_extensions(tools::schemas(), ext)
+    tools::merge_with_extensions(defs, ext)
 }
 fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<Value> {
     let tool_defs = merged_tool_defs(ctx);
@@ -1811,7 +1945,10 @@ fn build_conversation(ctx: &Core, system_prompt: &str, custom: &[Value]) -> Vec<
     // WP-1009 (upstream 4be4cb4): per-request image swap — a model without
     // image input never sees an image block; the session keeps it for a
     // later vision model.
-    swap_images_for_model(&mut v, model_supports_image_value(&active_model(ctx)));
+    swap_images_for_model(
+        &mut v,
+        model_supports_image_value(&active_model(ctx), ctx.registry()),
+    );
     v
 }
 
@@ -1857,13 +1994,13 @@ fn active_model(ctx: &Core) -> Value {
 /// WP-1009: does the active model accept image input? The model object's own
 /// `input` array wins (extension catalogs), the bundled registry is the
 /// fallback; an unknown model keeps the v0 behavior (send the image).
-fn model_supports_image_value(active: &Value) -> bool {
+fn model_supports_image_value(active: &Value, registry: &crate::registry::ModelRegistry) -> bool {
     if let Some(input) = active.get("input").and_then(Value::as_array) {
         return input.iter().any(|m| m.as_str() == Some("image"));
     }
     let provider = active.get("provider").and_then(Value::as_str).unwrap_or("");
     let id = active.get("id").and_then(Value::as_str).unwrap_or("");
-    match crate::registry::ModelRegistry::bundled().resolve(provider, id) {
+    match registry.resolve(provider, id) {
         Some(m) => m.input.iter().any(|i| i == "image"),
         None => true,
     }
@@ -2251,22 +2388,28 @@ mod wp1009_image_tests {
 
     #[test]
     fn model_capability_from_input_array_then_bundled_registry() {
+        let reg = crate::registry::ModelRegistry::bundled();
         assert!(model_supports_image_value(
-            &json!({"id":"x","input":["text","image"]})
+            &json!({"id":"x","input":["text","image"]}),
+            reg
         ));
         assert!(!model_supports_image_value(
-            &json!({"id":"x","input":["text"]})
+            &json!({"id":"x","input":["text"]}),
+            reg
         ));
         // Fallback: bundled catalog (bedrock vision vs text-only).
         assert!(model_supports_image_value(
-            &json!({"provider":"amazon-bedrock","id":"amazon.nova-2-lite-v1:0"})
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-2-lite-v1:0"}),
+            reg
         ));
         assert!(!model_supports_image_value(
-            &json!({"provider":"amazon-bedrock","id":"amazon.nova-micro-v1:0"})
+            &json!({"provider":"amazon-bedrock","id":"amazon.nova-micro-v1:0"}),
+            reg
         ));
         // Unknown model: v0 behavior (send the image).
         assert!(model_supports_image_value(
-            &json!({"provider":"nope","id":"nothing"})
+            &json!({"provider":"nope","id":"nothing"}),
+            reg
         ));
     }
 }

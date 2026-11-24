@@ -9,10 +9,17 @@
  * `--die-after-first-call`: exit(0) right after the first successful
  * tools/call — pins the upstream crash semantics (no auto-restart; the next
  * call reconnects lazily and gets a fresh process).
+ *
+ * `--spawn-log <path>`: append one line per process start — the e2e counts
+ * spawns to pin that a configured server is connected exactly once (E3S3:
+ * the core owns the connection; a live sidecar must not double-connect).
  */
 import process from "node:process";
+import { appendFileSync } from "node:fs";
 
 const dieAfterFirstCall = process.argv.includes("--die-after-first-call");
+const spawnLogIdx = process.argv.indexOf("--spawn-log");
+if (spawnLogIdx !== -1) appendFileSync(process.argv[spawnLogIdx + 1], `spawn ${process.pid}\n`);
 let counter = 0;
 let calls = 0;
 

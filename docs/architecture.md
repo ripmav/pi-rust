@@ -37,10 +37,24 @@ flowchart LR
   built-in tools ([src/tools.rs](https://github.com/ripmav/pi-rust/blob/main/src/tools.rs)),
   sessions ([src/session.rs](https://github.com/ripmav/pi-rust/blob/main/src/session.rs)),
   trust ([src/trust.rs](https://github.com/ripmav/pi-rust/blob/main/src/trust.rs)), TUI ([src/tui/](https://github.com/ripmav/pi-rust/tree/main/src/tui)).
+  Loads `<agentDir>/models.json` natively (E3S1, JSONC) and serves its
+  OpenAI-compatible providers through the built-in driver — a Node-free run.
+  The core never streams models of *extension*-registered providers itself.
+  Hosts the configured MCP servers itself (E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
+  JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
+  native tool execution) — except the `oauth`/`auth` ones (E3S4, D13).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
-  override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner;
-  never talks to a model.
+  override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
+  the js/ts-extension compatibility layer (E3: its built-in extension
+  hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
+  E3S2 it no longer reads or routes the agent dir's `models.json` — model
+  providers are the core's (E3S1); since E3S3 its built-in mcp extension
+  connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
+  config servers the core still cannot host (E3S4, D13); since E3S4 it no
+  longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
+  D15) and keeps its oauth branches for the other four builtins (radius,
+  github-copilot, xai, meta) until they are core-native (E3S5).
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog
@@ -57,10 +71,13 @@ flowchart LR
   effect; the core sends the resolved decision as `init.projectTrusted` and
   the sidecar excludes untrusted project-scope TS extensions. WP-1103: trusted
   project `.pi/` config (settings, MCP) is applied by the core and passed via
-  `init`.
+  `init`. Since E3S3 the core hosts the merged MCP config itself and passes
+  the sidecar only the `oauth`/`auth` entries (D13).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
-  respawn); clean shutdown or failed handshake → `Stopped`.
+  respawn); clean shutdown or failed handshake → `Stopped`. E3S1: a
+  **spawn failure is also `Stopped` and not fatal** — the run continues
+  Node-free (built-ins + core-native models.json providers).
 
 ## Extension runtime — target state (E1S2–E1S5, not yet implemented)
 

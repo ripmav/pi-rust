@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agent::{Core, EventLog, Item, QueuedUser};
-use crate::client::{BridgeClient, Decision, INIT_TIMEOUT_MS};
+use crate::client::{BridgeClient, Decision, State, INIT_TIMEOUT_MS};
 use crate::model::FakeDriver;
 use crate::provider::{build_provider, ProviderDriver};
 use crate::session::Session;
@@ -208,7 +208,8 @@ pub async fn run() -> Result<i32> {
         let cwd = std::env::current_dir().context("cwd")?;
         return Ok(crate::auth_login::run(&args[1..], &cwd, &|c| {
             find_sidecar(c).map_err(|e| e.to_string())
-        }));
+        })
+        .await);
     }
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
@@ -533,6 +534,40 @@ pub async fn run() -> Result<i32> {
     for w in mcp_warnings {
         crate::corelog::line(&format!("[core] {w}"));
     }
+    // E3S3/WP-1403: the core hosts the configured MCP servers itself (D13):
+    // parse + validate here (an invalid entry is skipped with a logged
+    // warning, never fatal — upstream load-error semantics); the sidecar
+    // receives only the `oauth`/`auth` subset at init (below).
+    let (mcp_host, mcp_parse_warnings) = crate::mcp::McpHost::new(mcp_config.as_ref(), &cwd);
+    for w in mcp_parse_warnings {
+        crate::corelog::line(&format!("[core] {w}"));
+    }
+    let mcp_host = Arc::new(mcp_host);
+    // The configured servers as the `mcp_servers_change` payload for the
+    // sidecar (D13: subscribing extensions still observe the core's set;
+    // the sidecar's built-in mcp extension ignores it — it connects only
+    // servers extensions register).
+    let mcp_server_entries: Vec<Value> = mcp_config
+        .as_ref()
+        .and_then(|c| c.get("mcpServers"))
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(n, e)| json!({ "name": n, "config": e.clone() }))
+                .collect()
+        })
+        .unwrap_or_default();
+    // WP-1401/E3S1: the agent dir's models.json — core-native custom
+    // providers (the solheim case). Missing file = no-op; malformed = typed
+    // error, the run continues with the bundled catalog (logged, not fatal).
+    let models_json = match crate::models_json::load(&agent_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            crate::corelog::line(&format!("[core] {e} — continuing with the bundled catalog"));
+            crate::models_json::ModelsJson::default()
+        }
+    };
+    let models_json = Arc::new(models_json);
     let (provider_name, model_id) = crate::config::resolve_provider_flags(
         provider_flag.as_deref(),
         model_id.as_deref(),
@@ -542,15 +577,47 @@ pub async fn run() -> Result<i32> {
     // WP-701: a name unknown to the bundled registry may be an
     // extension-registered provider — no driver is built at startup; the
     // bridge routes it after `ready` (typed error if never registered).
+    // WP-1401/E3S1: a core-native models.json provider (the agent dir's
+    // models.json) gets the built-in OpenAI driver on the provider's
+    // baseUrl + resolved apiKey — no sidecar needed.
     let builtin = crate::provider::is_builtin_provider(&provider_name);
     if !builtin && model_id.is_none() {
         anyhow::bail!("--provider {provider_name} (not a built-in provider) requires --model <id>");
     }
-    let provider: Option<ProviderDriver> = if builtin {
-        build_provider(&provider_name, model_id.as_deref(), &agent_dir)?
-    } else {
-        None
-    };
+    let provider: Option<ProviderDriver> =
+        if let Some(owner) = models_json.owner(&provider_name, model_id.as_deref().unwrap_or("")) {
+            Some(crate::models_json::build_driver(
+                owner,
+                model_id.as_deref().unwrap(),
+                &agent_dir,
+            )?)
+        } else if builtin {
+            build_provider(&provider_name, model_id.as_deref(), &agent_dir)?
+        } else {
+            None
+        };
+    // A models.json provider the core cannot serve natively: typed error,
+    // no crash (E3S1) — the model is unknown to the provider, or its api is
+    // not core-native yet (e.g. `anthropic-messages`).
+    if provider.is_none()
+        && !builtin
+        && model_id.is_some()
+        && models_json.provider(&provider_name).is_some()
+    {
+        let mid = model_id.as_deref().unwrap();
+        let def = models_json.provider(&provider_name).unwrap();
+        if !def.models.iter().any(|m| m.id == mid) {
+            anyhow::bail!("model {mid} is not defined in models.json provider {provider_name}");
+        }
+        match def.api.as_deref() {
+            Some(api) => anyhow::bail!(
+                "models.json provider {provider_name} uses api {api:?}, which is not core-native yet (the core streams `openai-completions` only)"
+            ),
+            None => anyhow::bail!(
+                "models.json provider {provider_name} has no `api` (the core streams `openai-completions` only)"
+            ),
+        }
+    }
     let fake_mode = builtin && provider.is_none();
     let initial_model = if fake_mode {
         json!({"id":"fake","provider":"fake"})
@@ -578,13 +645,19 @@ pub async fn run() -> Result<i32> {
             );
         }
         let model_str = model_id.as_deref().unwrap_or_default();
-        let m = crate::registry::ModelRegistry::bundled()
-            .resolve(&provider_name, model_str)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--image: model {provider_name}/{model_str} not in the bundled registry"
-                )
-            })?;
+        // WP-1401: the bundled catalog first, then core-native models.json.
+        let m = match crate::registry::ModelRegistry::bundled().resolve(&provider_name, model_str)
+        {
+            Some(m) => m.clone(),
+            None => models_json
+                .model(&provider_name, model_str)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--image: model {provider_name}/{model_str} not in the registry (bundled catalog or models.json)"
+                    )
+                })?,
+        };
         if !m.input.iter().any(|i| i == "image") {
             anyhow::bail!("--image: model {provider_name}/{model_str} does not accept image input (input: {})", m.input.join(", "));
         }
@@ -594,7 +667,10 @@ pub async fn run() -> Result<i32> {
             let is_openai_wire = provider_name == "openai"
                 || crate::provider::compat_family_base(&provider_name).is_some()
                 || provider_name == "azure"
-                || provider_name.starts_with("cloudflare");
+                || provider_name.starts_with("cloudflare")
+                // E3S4: kimi-coding is OpenAI wire (openai-completions).
+                || provider_name == "kimi-coding"
+                || models_json.owner(&provider_name, model_str).is_some();
             if !is_openai_wire {
                 anyhow::bail!(
                     "--image: provider {provider_name} does not support image input in v0"
@@ -700,9 +776,24 @@ pub async fn run() -> Result<i32> {
     let (tools_sync_tx, tools_sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Child inherits the core's cwd (upstream: ctx.cwd = project dir).
-    let (child, tx, rx) =
-        transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await?;
-    let (client, events_rx) = BridgeClient::connect(child, tx, rx);
+    // WP-1401/E3S1: a sidecar spawn failure does NOT kill the run —
+    // protocol: it leaves the core `stopped` (no extensions, built-ins
+    // only). The core-native models.json providers and the built-in
+    // providers keep working; extension providers are unavailable.
+    let (client, events_rx, sidecar_spawned) =
+        match transport::spawn(&node, &sidecar, &sidecar_args, &cwd, sidecar_stderr).await {
+            Ok((child, tx, rx)) => {
+                let (client, events_rx) = BridgeClient::connect(child, tx, rx);
+                (client, events_rx, true)
+            }
+            Err(e) => {
+                crate::corelog::line(&format!(
+                "[core] sidecar spawn failed: {e} — continuing without extensions (bridge stopped)"
+            ));
+                let (client, events_rx) = BridgeClient::dead();
+                (client, events_rx, false)
+            }
+        };
     let client = Arc::new(client);
 
     // Handshake: init → success response → ready event → state Running.
@@ -731,10 +822,27 @@ pub async fn run() -> Result<i32> {
     };
     let mut init =
         json!({"protocolVersion":6,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
-    // WP-702/702c: pass the agent-dir MCP config through (absent = omitted).
-    if let Some(cfg) = &mcp_config {
-        init["mcpConfig"] = cfg.clone();
-    }
+    // E3S3 (D13): the core OWNS the configured MCP servers — they connect
+    // through the core host (below), so the sidecar's registry stays empty
+    // and its built-in mcp extension only connects servers extensions
+    // register with `pi.registerMcpServer` (no double-connect). The one
+    // exception: servers carrying `oauth`/`auth` fields — the core cannot
+    // authenticate them yet (E3S4) — stay in the sidecar's mcpConfig so
+    // they keep working while the sidecar is alive (no mid-epic
+    // regression). The sidecar still accepts a non-empty `mcpConfig` — its
+    // path stays until E3S5.
+    let sidecar_mcp_servers: serde_json::Map<String, Value> = mcp_config
+        .as_ref()
+        .and_then(|c| c.get("mcpServers"))
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(_, e)| e.get("oauth").is_some() || e.get("auth").is_some())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    init["mcpConfig"] = json!({ "mcpServers": sidecar_mcp_servers });
     // WP-1102 (D2): the trust gate for project-scoped resources (the sidecar
     // excludes project extensions when untrusted).
     init["projectTrusted"] = json!(project_trusted);
@@ -745,15 +853,26 @@ pub async fn run() -> Result<i32> {
         kb_map.insert(a.clone(), json!(kb.get_keys(&a)));
     }
     init["keybindings"] = Value::Object(kb_map);
+    // WP-1401/E3S1: an init failure (the sidecar died before completing the
+    // handshake) is not fatal either — the core continues `stopped`:
+    // built-ins + core-native providers only, extension providers
+    // unavailable (every write drops to its protocol default).
     match client.request_init("init", init).await {
         Decision::Response(r) if r.get("success") == Some(&json!(true)) => {}
-        Decision::Response(r) => bail!(
-            "init failed: {}",
+        Decision::Response(r) => crate::corelog::line(&format!(
+            "[core] sidecar init failed: {} — continuing without extensions (bridge stopped)",
             r.get("error").and_then(Value::as_str).unwrap_or("?")
+        )),
+        Decision::Unavailable => crate::corelog::line(
+            "[core] sidecar init unanswered — continuing without extensions (bridge stopped)",
         ),
-        Decision::Unavailable => bail!("init unanswered: sidecar transport lost"),
     }
 
+    // WP-1401/E3S1: the core-native models.json models for the TUI model
+    // picker (the effective registry itself is built lazily — see
+    // `Core::registry`; the bundled catalog must not parse at startup,
+    // WP-905 idle-RSS baseline).
+    let extra_models = models_json.core_models();
     let ctx = Arc::new(Core {
         client: client.clone(),
         session: session.clone(),
@@ -761,6 +880,8 @@ pub async fn run() -> Result<i32> {
         ext_tools: Arc::default(),
         ext_active_tools: Arc::default(),
         ext_models: Arc::default(),
+        models_json: models_json.clone(),
+        registry_slot: Arc::default(),
         skills: Arc::new(skills.clone()),
         ready: Mutex::new(Some(ready_tx)),
         log: log.clone(),
@@ -778,6 +899,7 @@ pub async fn run() -> Result<i32> {
         cost_total: Arc::default(),
         tui: tui_mode,
         project_trusted,
+        mcp: mcp_host.clone(),
         ui_tx,
         tools_sync_tx,
         compact_override,
@@ -833,21 +955,44 @@ pub async fn run() -> Result<i32> {
     ));
     tokio::spawn(crate::agent::agent_task(ctx.clone(), msg_rx));
 
-    let ready = tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), ready_rx)
-        .await
-        .context("sidecar did not send `ready` in time")?
-        .context("sidecar event task exited before `ready`")?;
-    if ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
+    // WP-1401/E3S1: no `ready` (spawn failed, or the sidecar died before
+    // the handshake) → null payload; the run continues with built-ins +
+    // core-native providers (protocol: `stopped`). Extension-registered
+    // providers are simply unavailable. A spawn that failed outright never
+    // handshakes — no waiting.
+    let ready = if sidecar_spawned {
+        match tokio::time::timeout(Duration::from_millis(INIT_TIMEOUT_MS), ready_rx).await {
+            Ok(Ok(r)) => r,
+            _ => {
+                crate::corelog::line(
+                    "[core] no sidecar `ready` — continuing without extensions (bridge stopped)",
+                );
+                Value::Null
+            }
+        }
+    } else {
+        Value::Null
+    };
+    if !ready.is_null() && ready.get("apiVersion").and_then(Value::as_u64) != Some(0) {
         bail!("sidecar apiVersion != 0");
     }
-    // WP-701: a startup --provider unknown to the bundled registry must have
-    // been registered by an extension — typed error before the run starts
-    // (no silent fake-driver fallback).
-    if !builtin {
-        let ext = crate::agent::parse_providers(&ready);
-        let key = format!("{provider_name}/{}", model_id.as_deref().unwrap_or(""));
-        if !ext.contains_key(&key) {
-            bail!("provider {key} is not a built-in provider and was not registered by an extension (check --extension-dir)");
+    // WP-701: a startup --provider unknown to the bundled registry and to
+    // models.json must have been registered by an extension — typed error
+    // before the run starts (no silent fake-driver fallback). WP-1401:
+    // core-native models.json providers skip the check — the core serves
+    // them itself; with the sidecar unavailable the check is impossible
+    // and extension providers are unavailable.
+    if !builtin && models_json.provider(&provider_name).is_none() {
+        if ready.is_null() {
+            anyhow::bail!(
+                "provider {provider_name} is not a built-in or models.json provider, and the sidecar is unavailable (extension-registered providers cannot be verified)"
+            );
+        } else {
+            let ext = crate::agent::parse_providers(&ready);
+            let key = format!("{provider_name}/{}", model_id.as_deref().unwrap_or(""));
+            if !ext.contains_key(&key) {
+                bail!("provider {key} is not a built-in provider and was not registered by an extension (check --extension-dir)");
+            }
         }
     }
     for e in ready
@@ -858,8 +1003,12 @@ pub async fn run() -> Result<i32> {
     {
         crate::corelog::line(&format!("[core] extension load error: {e}"));
     }
-    client.set_running();
-    {
+    if ready.is_null() {
+        // No handshake: the bridge stays `stopped` (or `degraded` when the
+        // sidecar died mid-handshake) — writes drop to protocol defaults.
+        crate::corelog::line("[core] sidecar unavailable — built-ins + core-native providers only");
+    } else {
+        client.set_running();
         let ev = ctx.events.lock().unwrap().clone();
         crate::corelog::line(&format!("[core] running: subscribed events {ev:?}"));
         if ev.contains("session_start") {
@@ -867,7 +1016,20 @@ pub async fn run() -> Result<i32> {
                 json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
             );
         }
+        // E3S3 (D13): forward the core-owned configured servers as
+        // mcp_servers_change, so an extension subscribing to it still sees
+        // the change (the sidecar used to emit it on registration at init).
+        if !mcp_host.is_empty() {
+            client.fire(
+                json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":mcp_server_entries}}),
+            );
+        }
     }
+    // E3S3: the core's session-start connect for its configured servers
+    // (upstream: the mcp extension connects on session_start) — with or
+    // without the sidecar; connections run in the background and their
+    // tools appear as they land (declared on the next turn build).
+    mcp_host.start();
 
     // WP-905: --bench — measure at idle (no model I/O), print one JSON line,
     // then fall through: no runs are seeded, so the normal shutdown path
@@ -1014,7 +1176,8 @@ pub async fn run() -> Result<i32> {
         )
         .with_shortcuts(ext_shortcuts)
         .with_commands(ext_cmds, tui_templates)
-        .with_skills(skills);
+        .with_skills(skills)
+        .with_extra_models(extra_models);
         if let Some(e) = kb_error {
             app.last_error = Some(format!("keybindings: {e}"));
         }
@@ -1219,9 +1382,16 @@ pub async fn run() -> Result<i32> {
     // Clean shutdown: session_shutdown → sidecar exits 0. The core marks the
     // state Stopped once the shutdown is sent (avoids misclassifying the
     // normal-exit race); a non-zero sidecar exit is still recorded as a
-    // failure. A degraded bridge has no live sidecar to shut down: skip the
-    // handshake and exit 3 below.
-    if !client.degraded_seen() {
+    // failure. A bridge that never reached `Running` (sidecar degraded
+    // mid-run, or spawn/handshake failed — WP-1401) has no live sidecar to
+    // shut down: skip the handshake; a degraded bridge exits 3 below, a
+    // spawn failure exits 0 (the run used built-ins only, never touched
+    // the bridge).
+    // E3S3: the core's MCP connections close first (the actors end their
+    // transports: stdio stdin close + kill-on-drop, HTTP best-effort
+    // DELETE) — independent of the bridge state.
+    ctx.mcp.close().await;
+    if client.state() == State::Running {
         client.fire(
             json!({"type":"session_shutdown","event":{"type":"session_shutdown","reason":"quit"}}),
         );

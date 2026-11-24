@@ -183,3 +183,150 @@ fn auth_login_api_key_stores_upstream_credential() {
     }
     assert!(res.status.success(), "auth login PTY harness failed: {out}");
 }
+
+const PYTHON_KIMI_LOGIN: &str = r#"
+#!/usr/bin/env python3
+# E3S4/WP-1404 acceptance: auth login kimi-coding through a real PTY — the
+# CORE performs the device flow itself (mock token endpoint). The child's
+# PI_RUST_NODE points at a nonexistent binary: if the core still needed the
+# node helper for this login, it would fail.
+import json, os, pty, select, sys, time
+
+BIN = os.path.join(sys.argv[1], "target", "debug", "pi-rust")
+ROOT = sys.argv[1]
+AGENT_DIR = sys.argv[2]
+OAUTH_HOST = sys.argv[3]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["PI_CODING_AGENT_DIR"] = AGENT_DIR
+    os.environ["PI_RUST_NODE"] = "/nonexistent/pi-rust-wp1404-node"
+    os.environ["KIMI_CODE_OAUTH_HOST"] = OAUTH_HOST
+    os.chdir(ROOT)
+    os.execvp(BIN, [BIN, "auth", "login", "kimi-coding", "--no-browser"])
+
+buf = b""
+def read_until(needle: bytes, timeout=60.0) -> bool:
+    global buf
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return needle in buf
+            if not data:
+                return needle in buf
+            buf += data
+        if needle in buf:
+            return True
+    return needle in buf
+
+# Device flow UX (upstream wording): the verification URL + user code, then
+# the wait line; the mock completes the first poll, so the success line
+# lands seconds later.
+ok1 = read_until(b"Waiting for authentication...")
+ok2 = read_until(b"Logged in to Kimi For Coding")
+ok3 = read_until(b"Credentials saved to")
+time.sleep(1.0)
+try:
+    os.close(fd)
+except OSError:
+    pass
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+
+auth_path = os.path.join(AGENT_DIR, "auth.json")
+stored = None
+if os.path.exists(auth_path):
+    with open(auth_path) as f:
+        stored = json.load(f)
+kimi = (stored or {}).get("kimi-coding") or {}
+sys.stderr.write("wait-seen=%s logged=%s saved-to=%s\n" % (ok1, ok2, ok3))
+sys.stderr.write("credential-shape=%s\n" % (
+    kimi.get("type") == "oauth"
+    and kimi.get("access") == "new-access"
+    and kimi.get("refresh") == "new-refresh"))
+# The user code is displayed by design (not a secret); the tokens are not.
+sys.stderr.write("token-in-output=%s\n" % (b"new-access" in buf or b"new-refresh" in buf))
+sys.stderr.write("===EXIT %d\n" % code)
+if not (ok1 and ok2 and ok3):
+    sys.stderr.write("TRANSCRIPT:\n" + buf.decode("utf-8", "replace")[-4000:] + "\nEND-TRANSCRIPT\n")
+sys.exit(0 if (ok1 and ok2 and ok3 and code == 0
+               and kimi.get("type") == "oauth"
+               and kimi.get("access") == "new-access"
+               and kimi.get("refresh") == "new-refresh"
+               and b"new-access" not in buf and b"new-refresh" not in buf) else 11)
+"#;
+
+#[test]
+fn auth_login_kimi_device_flow_core_native_node_free() {
+    // E3S4: the kimi-coding account login is core-native — it must work with
+    // NO node (the child's PI_RUST_NODE does not exist). The PTY harness
+    // needs the POSIX pty module; Windows runs the headless suite only
+    // (the arg-shape test above still covers it).
+    if cfg!(windows) {
+        eprintln!("skipping: PTY harness unavailable on Windows (WP-1008)");
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("pi-rust-kimi-login-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    // Mock oauth endpoint (device_authorization + token), all local.
+    let log_file = tmp.join("oauth-log.jsonl");
+    let mut child = Command::new("node")
+        .arg(repo_root().join("tests/fixtures/kimi-oauth-mock.mjs"))
+        .arg(&log_file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawning mock kimi oauth endpoint");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("mock stdout"));
+    let mut port_line = String::new();
+    use std::io::BufRead;
+    stdout.read_line(&mut port_line).expect("mock port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock port");
+    let oauth_host = format!("http://127.0.0.1:{port}");
+
+    let py = tmp.join("kimi_login_harness.py");
+    std::fs::write(&py, PYTHON_KIMI_LOGIN).unwrap();
+    let res = Command::new("python3")
+        .arg(&py)
+        .arg(repo_root())
+        .arg(&agent_dir)
+        .arg(&oauth_host)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawning the PTY harness")
+        .wait_with_output()
+        .expect("harness exited");
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut out = String::from_utf8_lossy(&res.stdout).to_string();
+    out.push_str(&String::from_utf8_lossy(&res.stderr));
+    let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    if !res.status.success() {
+        eprintln!("preserving {tmp:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    assert!(res.status.success(), "kimi login PTY harness failed: {out}");
+
+    // The login flow hit the mock: device authorization + one device-code
+    // token poll (upstream grant type).
+    assert!(log.contains("device_authorization"), "{log}");
+    assert!(
+        log.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code")
+            || log.contains("grant_type=urn:ietf:params:oauth:grant-type:device_code"),
+        "{log}"
+    );
+}

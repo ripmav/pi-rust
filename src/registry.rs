@@ -5,7 +5,7 @@
 //! tree — the catalog is frozen at build time, matching the upstream pin).
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,17 +53,30 @@ pub struct ModelRegistry {
     by_key: BTreeMap<ModelKey, Model>,
 }
 
+/// The bundled catalog, parsed once and shared (the 1.1 MB JSON catalog
+/// expands to several MB of heap — never hold a second copy, WP-1401
+/// bench regression: a per-run clone doubled idle RSS).
+fn bundled_shared() -> &'static Arc<ModelRegistry> {
+    static ONCE: OnceLock<Arc<ModelRegistry>> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let raw: BTreeMap<String, Model> =
+            serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/models.json"))).unwrap();
+        Arc::new(ModelRegistry {
+            by_key: raw.into_iter().collect(),
+        })
+    })
+}
+
 impl ModelRegistry {
     /// The bundled catalog, parsed once (1.1 MB JSON, a few ms).
     pub fn bundled() -> &'static ModelRegistry {
-        static ONCE: OnceLock<ModelRegistry> = OnceLock::new();
-        ONCE.get_or_init(|| {
-            let raw: BTreeMap<String, Model> =
-                serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/models.json")))
-                    .unwrap();
-            let by_key = raw.into_iter().collect();
-            ModelRegistry { by_key }
-        })
+        bundled_shared().as_ref()
+    }
+
+    /// The bundled catalog as a shared `Arc` (WP-1401: the effective
+    /// registry when no models.json extras exist — no clone).
+    pub fn bundled_arc() -> Arc<ModelRegistry> {
+        bundled_shared().clone()
     }
 
     /// Read by the in-crate tests (bundled count).
@@ -89,6 +102,22 @@ impl ModelRegistry {
             .values()
             .filter(|m| m.provider == provider)
             .collect()
+    }
+
+    /// The catalog with extra models merged in (WP-1401/E3S1: models.json
+    /// core-native models). An extra never replaces a bundled entry — the
+    /// bundled catalog wins per model id (documented v0 limit, E2S1).
+    /// Clones the whole map — only called when extras exist (the caller
+    /// uses [`Self::bundled_arc`] otherwise, to keep a single catalog copy
+    /// in memory).
+    pub fn merged_with(&self, extra: &[Model]) -> ModelRegistry {
+        let mut by_key = self.by_key.clone();
+        for m in extra {
+            by_key
+                .entry(format!("{}/{}", m.provider, m.id))
+                .or_insert(m.clone());
+        }
+        ModelRegistry { by_key }
     }
 }
 

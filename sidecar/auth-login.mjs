@@ -2,8 +2,12 @@
 /**
  * pi-auth-login (WP-1007) — runs the pinned upstream's `auth login` flow
  * UNMODIFIED (`ModelRuntime.create` + `runAuthLogin`, the same entry the
- * upstream CLI uses). The terminal is relayed to the core over stdio as
- * NDJSON, because the core owns the user's TTY:
+ * upstream CLI uses). E3S4/WP-1404 (D15): `kimi-coding` account login is
+ * core-native now (the core performs the device flow itself, src/oauth.rs)
+ * — the core no longer spawns this helper for it. The remaining providers
+ * (and `kimi-coding --api-key`) still come through here. The terminal is
+ * relayed to the core over stdio as NDJSON, because the core owns the user's
+ * TTY:
  *
  *   sidecar -> core:
  *     {"type":"write","line":string}        plain line to stdout
