@@ -1,8 +1,10 @@
 //! Model registry: the bundled upstream catalog (WP-302).
 //!
-//! Build time: `build.rs` merges `upstream/packages/ai/src/providers/data/*.json`
-//! into a single JSON blob in OUT_DIR (zero runtime deps on the upstream
-//! tree — the catalog is frozen at build time, matching the upstream pin).
+//! Build time: `build.rs` merges the committed `catalog/data/*.json`
+//! snapshot into a single JSON blob in OUT_DIR (zero runtime deps on the
+//! upstream tree; D14 — the catalog is frozen at the committed snapshot,
+//! refreshed only via the re-pin procedure in `catalog/README.md`).
+use serde::Deserialize;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};

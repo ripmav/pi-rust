@@ -46,8 +46,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Re-bundle upstream catalog if stale (WP-1403 incident guard)
-        uses: ./.github/actions/refresh-catalog
+      - name: Verify bundled catalog against committed snapshot (D14 stale-cache guard)
+        uses: ./.github/actions/catalog-verify
 
       - name: Build
         run: cargo build
@@ -61,27 +61,13 @@ jobs:
   clippy:
     name: clippy
     # Hard gate from WP-902: the clippy baseline (0 warnings) landed here.
+    # D14: the bundled catalog is the committed catalog/ snapshot — build.rs
+    # no longer reads the upstream tree, so this job needs no upstream clone
+    # or npm build.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-
-      # build.rs reads the upstream model catalog, which the upstream build
-      # generates from TS source into packages/ai/src/providers/data.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 26
-      - name: Fetch pinned upstream (pinned source, built catalog)
-        run: |
-          git init upstream
-          git -C upstream remote add origin https://github.com/earendil-works/pi.git
-          git -C upstream fetch --depth 1 origin "$UPSTREAM_SHA"
-          git -C upstream checkout --detach FETCH_HEAD
-      - name: Upstream npm install + build
-        working-directory: upstream
-        run: |
-          npm ci
-          npm run build
 
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
@@ -118,8 +104,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
-      - name: Re-bundle upstream catalog if stale (WP-1403 incident guard)
-        uses: ./.github/actions/refresh-catalog
+      - name: Verify bundled catalog against committed snapshot (D14 stale-cache guard)
+        uses: ./.github/actions/catalog-verify
 
       - name: Build (release)
         run: cargo build --release
