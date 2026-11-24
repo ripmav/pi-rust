@@ -39,19 +39,35 @@ flowchart LR
   trust ([src/trust.rs](https://github.com/ripmav/pi-rust/blob/main/src/trust.rs)), TUI ([src/tui/](https://github.com/ripmav/pi-rust/tree/main/src/tui)).
   Loads `<agentDir>/models.json` natively (E3S1, JSONC) and serves its
   OpenAI-compatible providers through the built-in driver — a Node-free run.
+  **No shell execution from config files (D12, answered by the PO
+  2026-11-24):** models.json `apiKey` supports literals and
+  `$ENV_VAR`/`${ENV_VAR}` templates (unset var = typed error naming the var,
+  never its value); `!command` is a typed rejection — the same rule the core
+  already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
-  Hosts the configured MCP servers itself (E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
-  JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
-  native tool execution) — except the `oauth`/`auth` ones (E3S4, D13).
+  Hosts **all** MCP servers itself — the configured ones (agent-dir
+  `mcp.json` + trusted project `.pi/mcp.json`) and those extensions register
+  via `pi.registerMcpServer` (the sidecar forwards the registration to the
+  core from E3S5; the sidecar hosts no MCP servers at all) — the core is the
+  **single source of truth for MCP (D13, answered by the PO 2026-11-24)**.
+  E3S3: JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/
+  exposure, native tool execution; until E3S5 the `oauth`/`auth` config
+  servers stay sidecar-side as the documented interim (D13).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
   the js/ts-extension compatibility layer (E3: its built-in extension
   hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
   E3S2 it no longer reads or routes the agent dir's `models.json` — model
-  providers are the core's (E3S1); since E3S3 its built-in mcp extension
+  providers are the core's (E3S1) — and the core is the **single source of
+  truth for models.json (D11, answered by the PO 2026-11-24)**: from E3S5
+  the sidecar's `ModelRuntime` is created with `modelsPath: null` (no direct
+  file access at all); if the sidecar ever needs models.json data, the core
+  passes it via the `init` payload (the E3S3 `mcpConfig` pattern); since E3S3 its built-in mcp extension
   connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
-  config servers the core still cannot host (E3S4, D13); since E3S4 it no
+  config servers the core still cannot host (documented interim — from E3S5
+  the sidecar hosts NO MCP servers at all: `registerMcpServer` calls are
+  forwarded to the core, D13); since E3S4 it no
   longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
   D15) and keeps its oauth branches for the other four builtins (radius,
   github-copilot, xai, meta) until they are core-native (E3S5).
@@ -75,9 +91,11 @@ flowchart LR
   the sidecar only the `oauth`/`auth` entries (D13).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
-  respawn); clean shutdown or failed handshake → `Stopped`. E3S1: a
-  **spawn failure is also `Stopped` and not fatal** — the run continues
-  Node-free (built-ins + core-native models.json providers).
+  respawn); clean shutdown or failed handshake → `Stopped`. A **spawn
+  failure is also `Stopped` and not fatal** (E3S1; **D10, answered by the
+  PO 2026-11-24 — non-fatal by decision**: the core is standalone by
+  design, the sidecar is only the js/ts-extension layer) — the run
+  continues Node-free (built-ins + core-native models.json providers).
 
 ## Extension runtime — target state (E1S2–E1S5, not yet implemented)
 
