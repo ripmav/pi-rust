@@ -75,9 +75,11 @@ flowchart LR
   the sidecar only the `oauth`/`auth` entries (D13).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
-  respawn); clean shutdown or failed handshake → `Stopped`. E3S1: a
-  **spawn failure is also `Stopped` and not fatal** — the run continues
-  Node-free (built-ins + core-native models.json providers).
+  respawn); clean shutdown or failed handshake → `Stopped`. A **spawn
+  failure is also `Stopped` and not fatal** (E3S1; **D10, answered by the
+  PO 2026-11-24 — non-fatal by decision**: the core is standalone by
+  design, the sidecar is only the js/ts-extension layer) — the run
+  continues Node-free (built-ins + core-native models.json providers).
 
 ## Extension runtime — target state (E1S2–E1S5, not yet implemented)
 
