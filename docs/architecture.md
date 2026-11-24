@@ -45,9 +45,14 @@ flowchart LR
   never its value); `!command` is a typed rejection — the same rule the core
   already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
-  Hosts the configured MCP servers itself (E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
-  JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
-  native tool execution) — except the `oauth`/`auth` ones (E3S4, D13).
+  Hosts **all** MCP servers itself — the configured ones (agent-dir
+  `mcp.json` + trusted project `.pi/mcp.json`) and those extensions register
+  via `pi.registerMcpServer` (the sidecar forwards the registration to the
+  core from E3S5; the sidecar hosts no MCP servers at all) — the core is the
+  **single source of truth for MCP (D13, answered by the PO 2026-11-24)**.
+  E3S3: JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/
+  exposure, native tool execution; until E3S5 the `oauth`/`auth` config
+  servers stay sidecar-side as the documented interim (D13).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
@@ -60,7 +65,9 @@ flowchart LR
   file access at all); if the sidecar ever needs models.json data, the core
   passes it via the `init` payload (the E3S3 `mcpConfig` pattern); since E3S3 its built-in mcp extension
   connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
-  config servers the core still cannot host (E3S4, D13); since E3S4 it no
+  config servers the core still cannot host (documented interim — from E3S5
+  the sidecar hosts NO MCP servers at all: `registerMcpServer` calls are
+  forwarded to the core, D13); since E3S4 it no
   longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
   D15) and keeps its oauth branches for the other four builtins (radius,
   github-copilot, xai, meta) until they are core-native (E3S5).
