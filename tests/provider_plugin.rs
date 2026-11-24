@@ -372,9 +372,14 @@ fn e2e_provider_plugin() {
     // lines, the run continues (the bundled plugin still serves).
     let user_prov = agent.join("providers");
     std::fs::create_dir_all(&user_prov).unwrap();
+    let garbage: &[u8] = if plugin_ext() == "dll" {
+        b"MZ"
+    } else {
+        b"\x7fELF\x02\x01\x01 truncated"
+    };
     std::fs::write(
-        user_prov.join("pi-garbage.so"),
-        b"\x7fELF\x02\x01\x01 truncated",
+        user_prov.join(format!("pi-garbage.{ext}", ext = plugin_ext())),
+        garbage,
     )
     .unwrap();
     let wrong_dir = tmp.join("wrong");
@@ -404,7 +409,7 @@ fn e2e_provider_plugin() {
         .to_string()
         .contains("Hello from sample plugin"));
     assert!(
-        stderr.contains("pi-garbage.so") && stderr.contains("failed to load"),
+        stderr.contains("pi-garbage") && stderr.contains("failed to load"),
         "garbage plugin: typed log line\n{stderr}"
     );
     assert!(

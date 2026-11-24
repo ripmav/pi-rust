@@ -120,9 +120,11 @@ impl LoadedPlugin {
                 self.name
             )
         })?;
-        // SAFETY: `req_c` is a valid NUL-terminated string for the call;
-        // the returned pointer is valid until the next vtable call.
-        let ptr = catch_unwind(AssertUnwindSafe(|| f(req_c.as_ptr())))
+        // SAFETY: `req_c` is a valid NUL-terminated UTF-8 string for the
+        // call; the returned pointer is valid until the next vtable call.
+        // `as_bytes_with_nul().as_ptr()` is the platform-independent form
+        // (c_char is i8 or u8 depending on the target).
+        let ptr = catch_unwind(AssertUnwindSafe(|| f(req_c.as_bytes_with_nul().as_ptr())))
             .map_err(|_| anyhow::anyhow!("provider plugin {} panicked", self.name))?;
         cstr_to_string(ptr)
             .map_err(|e| anyhow::anyhow!("provider plugin {name}: {e}", name = self.name))
@@ -550,7 +552,7 @@ fn drive_stream_inner(
         let raw = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: `handle_c` is valid NUL-terminated UTF-8 for the call;
             // a NULL return ends the stream.
-            (plugin.vt.stream_next)(handle_c.as_ptr())
+            (plugin.vt.stream_next)(handle_c.as_bytes_with_nul().as_ptr())
         }))
         .map_err(|_| anyhow::anyhow!("provider plugin {} panicked in stream_next", plugin.name))?;
         if raw.is_null() {
@@ -614,7 +616,7 @@ fn drive_stream_inner(
     // Best effort: a panicking close must not mask the result.
     // SAFETY: `handle_c` is valid NUL-terminated UTF-8 for the call.
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        (plugin.vt.stream_close)(handle_c.as_ptr())
+        (plugin.vt.stream_close)(handle_c.as_bytes_with_nul().as_ptr())
     }));
     let turn = turn.context("the plugin stream ended without a done event")?;
     let turn: AssistantTurn =
@@ -749,8 +751,14 @@ static VT: Vt = Vt { abi_version, name, list_models, stream_open, stream_next, s
         let tmp = tmpdir("garbage");
         let user = tmp.join("user");
         std::fs::create_dir_all(&user).unwrap();
-        // A truncated ELF header — dlopen must fail, not crash.
-        std::fs::write(user.join("pi-garbage.so"), b"\x7fELF\x02\x01\x01 garbage").unwrap();
+        // A truncated platform image header — dlopen must fail, not crash.
+        let ext = plugin_exts()[0];
+        let bytes: &[u8] = if ext == "dll" {
+            b"MZ"
+        } else {
+            b"\x7fELF\x02\x01\x01 garbage"
+        };
+        std::fs::write(user.join(format!("pi-garbage.{ext}")), bytes).unwrap();
         let _good = compile_stub(&user, "pi-good", &GOOD_STUB.replace("__MODEL_ID__", "s1"));
         let set = load(None, Some(&user));
         assert!(set.provider("stubprov").is_some(), "the good plugin loads");
