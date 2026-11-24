@@ -309,16 +309,18 @@ async function main() {
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 8 &&
+			Array.isArray(ready.providers) && ready.providers.length === 7 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
 		);
-		// WP-1007: the five upstream built-in oauth providers are exposed from
-		// the upstream runtime (static catalogs; radius may be empty until the
-		// first authenticated refresh — only presence + shape are asserted).
+		// WP-1007: the upstream built-in oauth providers the SIDE-CAR serves are
+		// exposed from the upstream runtime (static catalogs; radius may be
+		// empty until the first authenticated refresh — only presence + shape
+		// are asserted). Since E3S4/WP-1404 (D15) kimi-coding is core-owned
+		// and not advertised here (pinned by the negative check below).
 		check(
-			"builtin oauth providers exposed (radius, kimi-coding, github-copilot, xai, meta)",
-			["radius", "kimi-coding", "github-copilot", "xai", "meta"].every(
+			"builtin oauth providers exposed (radius, github-copilot, xai, meta)",
+			["radius", "github-copilot", "xai", "meta"].every(
 				(name) => ready.providers?.some((p) => p?.name === name && Array.isArray(p.models) && p.models.length > 0),
 			),
 			ready.providers?.map((p) => p?.name),
@@ -342,6 +344,15 @@ async function main() {
 		check(
 			"models.json provider NOT advertised in ready (E3S2)",
 			!ready.providers?.some((p) => p?.name === "smokemj"),
+			ready.providers?.map((p) => p?.name),
+		);
+		// E3S4/WP-1404 (D15): the core owns kimi-coding end-to-end (login/
+		// store/refresh/stream) — the bridge must not advertise it (pinning
+		// the E3S4 deletion: a re-added builtinOauth entry would make this
+		// fail, same as the E3S2 pin above).
+		check(
+			"kimi-coding NOT advertised in ready (E3S4, core-owned)",
+			!ready.providers?.some((p) => p?.name === "kimi-coding"),
 			ready.providers?.map((p) => p?.name),
 		);
 

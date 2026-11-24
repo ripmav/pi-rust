@@ -171,13 +171,15 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- WP-701: extension-registered providers (legacy config form) ----
 
-	// WP-1007: the five oauth-capable upstream built-in providers. Their
-	// models are exposed in the providers payload and stream through the
-	// upstream runtime, whose auth resolution performs the stored-credential
-	// refresh (5-minute validity margin, per-provider refresh flow) and
-	// writes the rotated token back to auth.json — all sidecar-side, so no
-	// token crosses the wire.
-	const OAUTH_BUILTIN_PROVIDERS = ["radius", "kimi-coding", "github-copilot", "xai", "meta"];
+	// WP-1007: the upstream built-in oauth providers the SIDECAR serves.
+	// Since E3S4/WP-1404 (D15) the core owns `kimi-coding` end-to-end (login,
+	// credential storage, refresh, streaming through its built-in driver) —
+	// the sidecar no longer advertises or routes it (E3S2 pattern); an
+	// off-route `provider_stream` for it falls through to the unknown-
+	// extension-provider rejection below. The other four (their wire APIs —
+	// pi-messages, copilot multi-API, openai-responses — have no core driver
+	// yet) stay sidecar-side until their core-native stories.
+	const OAUTH_BUILTIN_PROVIDERS = ["radius", "github-copilot", "xai", "meta"];
 
 	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
 	const providersPayload = () => {
@@ -207,9 +209,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name && m.name !== m.id ? { name: m.name } : {}),
 				})),
 		}));
-		// WP-1007: the upstream built-in oauth providers (extension-registered
-		// providers keep priority — this only adds what the extension layer
-		// did not already claim).
+		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
+		// still serves (extension-registered providers keep priority — this
+		// only adds what the extension layer did not already claim).
+		// kimi-coding is absent: core-owned since E3S4 (D15).
 		const builtinOauth = (modelRuntime?.getProviders?.() ?? [])
 			.filter((p) => OAUTH_BUILTIN_PROVIDERS.includes(p.id) && !state.nativeProviders.has(p.id) && !state.providers.has(p.id))
 			.map((p) => ({
@@ -342,11 +345,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			forwardStream(streamId, stream, full);
 			return;
 		}
-		// WP-1007: the upstream built-in oauth providers (radius, kimi-coding,
-		// github-copilot, xai, meta). The stream runs in the upstream runtime,
-		// whose auth resolution refreshes an expired stored credential (5-min
-		// validity margin, per-provider flow) and writes the rotated token
-		// back to auth.json — sidecar-side, unmodified upstream code.
+		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
+		// still serves (radius, github-copilot, xai, meta). The stream runs in
+		// the upstream runtime, whose auth resolution refreshes an expired
+		// stored credential (5-min validity margin, per-provider flow) and
+		// writes the rotated token back to auth.json — sidecar-side, unmodified
+		// upstream code. kimi-coding is core-owned (E3S4): it is not in the
+		// list, so its provider_stream falls through to the rejection below.
 		if (modelRuntime && OAUTH_BUILTIN_PROVIDERS.includes(model.provider)) {
 			const providerDef = modelRuntime.getProviders().find((p) => p.id === model.provider);
 			const builtin = (providerDef?.getModels?.() ?? []).find((m) => m?.id === model.id);

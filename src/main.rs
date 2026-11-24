@@ -9,6 +9,7 @@ mod edit_diff;
 mod mcp;
 mod model;
 mod models_json;
+mod oauth;
 mod provider;
 mod registry;
 mod session;

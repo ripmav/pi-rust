@@ -208,7 +208,8 @@ pub async fn run() -> Result<i32> {
         let cwd = std::env::current_dir().context("cwd")?;
         return Ok(crate::auth_login::run(&args[1..], &cwd, &|c| {
             find_sidecar(c).map_err(|e| e.to_string())
-        }));
+        })
+        .await);
     }
     let mut ext_dirs: Vec<String> = Vec::new();
     let mut agent_dir: Option<PathBuf> = None;
@@ -667,6 +668,8 @@ pub async fn run() -> Result<i32> {
                 || crate::provider::compat_family_base(&provider_name).is_some()
                 || provider_name == "azure"
                 || provider_name.starts_with("cloudflare")
+                // E3S4: kimi-coding is OpenAI wire (openai-completions).
+                || provider_name == "kimi-coding"
                 || models_json.owner(&provider_name, model_str).is_some();
             if !is_openai_wire {
                 anyhow::bail!(

@@ -51,7 +51,10 @@ flowchart LR
   E3S2 it no longer reads or routes the agent dir's `models.json` — model
   providers are the core's (E3S1); since E3S3 its built-in mcp extension
   connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
-  config servers the core still cannot host (E3S4, D13).
+  config servers the core still cannot host (E3S4, D13); since E3S4 it no
+  longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
+  D15) and keeps its oauth branches for the other four builtins (radius,
+  github-copilot, xai, meta) until they are core-native (E3S5).
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog

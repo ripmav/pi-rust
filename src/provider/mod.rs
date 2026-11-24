@@ -61,6 +61,7 @@ pub fn is_builtin_provider(name: &str) -> bool {
             | "cloudflare-ai-gateway"
             | "google"
             | "google-vertex"
+            | "kimi-coding"
     ) || compat_family_base(name).is_some()
         || not_supported_v0(name).is_some()
 }
@@ -77,6 +78,35 @@ pub fn build_provider(
 			let key = crate::auth::resolve_api_key("anthropic", agent_dir)?;
 			let base = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
 			Ok(Some(ProviderDriver::Anthropic(Arc::new(AnthropicDriver::new(base, key, model.to_string())))))
+		}
+		"kimi-coding" => {
+			// E3S4/WP-1404: the core-native oauth builtin — the stored oauth
+			// credential is refreshed when < 5 min remain (upstream margin)
+			// and the rotated credential is written back; the api_key
+			// credential / KIMI_API_KEY env fallback is upstream
+			// `envApiKeyAuth` behavior (resolve_api_key).
+			let model = model.context("--provider kimi-coding requires --model <id>")?;
+			let key = match crate::oauth::stored(agent_dir, crate::oauth::KIMI_CODING)? {
+				Some(_) => crate::oauth::resolve_kimi_coding_bearer(agent_dir)?,
+				None => {
+					// Upstream envApiKeyAuth order: stored api_key credential,
+					// then the ambient KIMI_API_KEY. Nothing at all: steer at
+					// the core-native login (typed error, before the run).
+					if !crate::auth::has_api_key_credential(agent_dir, "kimi-coding")
+						&& std::env::var("KIMI_API_KEY").is_err()
+					{
+						anyhow::bail!(
+							"no credential for kimi-coding — run `pi-rust auth login kimi-coding` (account sign-in) or set KIMI_API_KEY"
+						)
+					}
+					crate::auth::resolve_api_key("kimi-coding", agent_dir)?
+				}
+			};
+			// Upstream baseUrl (https://api.kimi.com/coding/v1); KIMI_BASE_URL
+			// override for local/mock endpoints (e2e — no real provider traffic).
+			let base = std::env::var("KIMI_BASE_URL")
+				.unwrap_or_else(|_| "https://api.kimi.com/coding/v1".into());
+			Ok(Some(ProviderDriver::OpenAi(Arc::new(OpenAiDriver::new(base, key, model.to_string())))))
 		}
 		p if compat_family_base(p).is_some() => {
 			let model = model.with_context(|| format!("--provider {p} requires --model <id>"))?;
@@ -191,7 +221,7 @@ pub fn build_provider(
 		p if not_supported_v0(p).is_some() => {
 			anyhow::bail!("provider {p} is not supported in v0 (upstream wire API: {})", not_supported_v0(p).unwrap())
 		}
-		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, cloudflare-workers-ai, cloudflare-ai-gateway, amazon-bedrock, openai, groq, cerebras, deepseek, together, huggingface, openrouter)"),
+		other => anyhow::bail!("unknown provider {other} (supported: fake, anthropic, google, google-vertex, azure, cloudflare-workers-ai, cloudflare-ai-gateway, amazon-bedrock, kimi-coding, openai, groq, cerebras, deepseek, together, huggingface, openrouter)"),
 	}
 }
 

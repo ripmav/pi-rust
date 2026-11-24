@@ -1,8 +1,12 @@
 //! `pi-rust auth login <provider> [--api-key] [--no-browser]` (WP-1007).
 //!
-//! The pinned upstream's terminal login flow runs UNMODIFIED in
-//! `sidecar/auth-login.mjs` (`ModelRuntime.create` + `runAuthLogin`); the
-//! core owns the user's TTY and relays prompts/notifications over NDJSON.
+//! `kimi-coding` account login is CORE-NATIVE (E3S4/WP-1404): the core
+//! performs the pinned upstream's device flow itself (`src/oauth.rs`) — no
+//! node helper, works with the sidecar degraded. All other providers (and
+//! `kimi-coding --api-key`) run the pinned upstream's terminal login flow
+//! UNMODIFIED in `sidecar/auth-login.mjs` (`ModelRuntime.create` +
+//! `runAuthLogin`); the core owns the user's TTY and relays
+//! prompts/notifications over NDJSON.
 //! Key material only arrives as prompt answers and is never logged (the
 //! WP-904 redaction rule).
 
@@ -27,7 +31,7 @@ enum AuthEvent {
 }
 
 /// Entry point for `pi-rust auth ...` (args after the `auth` word).
-pub fn run(
+pub async fn run(
     args: &[String],
     cwd: &Path,
     find_sidecar: &dyn Fn(&Path) -> Result<PathBuf, String>,
@@ -71,6 +75,42 @@ pub fn run(
         return 1;
     }
 
+    let agent_dir = crate::config::resolve_agent_dir(
+        None,
+        std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
+        &std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(".")),
+    );
+
+    // E3S4/WP-1404: the kimi-coding account login is core-native — the core
+    // performs the upstream device flow itself (no node helper; works with
+    // the sidecar degraded). --api-key stays on the helper path (upstream
+    // flow, all providers).
+    if provider == crate::oauth::KIMI_CODING && !api_key {
+        if let Err(e) = crate::config::ensure_agent_dir(&agent_dir) {
+            eprintln!("fatal: {e}");
+            return 1;
+        }
+        return match crate::oauth::kimi_device_login(&agent_dir, !no_browser).await {
+            Ok(()) => {
+                println!(
+                    "Logged in to Kimi For Coding. Credentials saved to {}",
+                    agent_dir.join("auth.json").display()
+                );
+                0
+            }
+            Err(e) if e.to_string() == "Login cancelled" => {
+                eprintln!("Login cancelled.");
+                1
+            }
+            Err(e) => {
+                eprintln!("Failed to log in to Kimi For Coding: {e}");
+                1
+            }
+        };
+    }
+
     let sidecar = match find_sidecar(cwd) {
         Ok(p) => p,
         Err(e) => {
@@ -82,13 +122,6 @@ pub fn run(
         .parent()
         .map(|d| d.join("auth-login.mjs"))
         .unwrap_or_else(|| sidecar.clone());
-    let agent_dir = crate::config::resolve_agent_dir(
-        None,
-        std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
-        &std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(".")),
-    );
     if let Err(e) = crate::config::ensure_agent_dir(&agent_dir) {
         eprintln!("fatal: {e}");
         return 1;
@@ -304,7 +337,7 @@ fn read_secret_line(message: &str) -> String {
     value
 }
 
-fn open_browser(url: &str) {
+pub fn open_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "windows") {
@@ -325,18 +358,19 @@ fn open_browser(url: &str) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn login_arg_parsing_rejects_bad_shapes() {
+    #[tokio::test]
+    async fn login_arg_parsing_rejects_bad_shapes() {
         // No provider -> usage, exit 1 (checked through run() only for the
         // arg-parse layer: it exits before any TTY/spawn work).
         assert_eq!(
-            run(&[], Path::new("/tmp"), &|_| Err("no sidecar".into())),
+            run(&[], Path::new("/tmp"), &|_| Err("no sidecar".into())).await,
             1
         );
         assert_eq!(
             run(&["login".into()], Path::new("/tmp"), &|_| Err(
                 "no sidecar".into()
-            )),
+            ))
+            .await,
             1
         );
         assert_eq!(
@@ -349,7 +383,8 @@ mod tests {
                 ],
                 Path::new("/tmp"),
                 &|_| Err("no sidecar".into())
-            ),
+            )
+            .await,
             1
         );
     }

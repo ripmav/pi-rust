@@ -463,6 +463,26 @@ pub async fn event_task(
                                     }
                                     Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
                                 }
+                            } else if p == crate::oauth::KIMI_CODING {
+                                // E3S4 (D15): core-owned oauth builtin — the
+                                // native driver, never the bridge (the sidecar
+                                // no longer advertises it; the guard also
+                                // covers a colliding extension registration).
+                                match crate::provider::build_provider(&p, Some(&m), &ctx.agent_dir) {
+                                    Ok(Some(drv)) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
                             } else if ctx
                                 .ext_models
                                 .lock()
@@ -1567,8 +1587,12 @@ async fn model_call<'a>(
     // WP-1401: a core-native models.json model is always served by the
     // core driver (D11) — E3S2: the sidecar no longer advertises or routes
     // models.json providers, this guard also covers the name-collision case
-    // (an extension registers the same provider name).
-    let ext_model = if ctx.models_json.owner(&p, &mid).is_some() {
+    // (an extension registers the same provider name). E3S4: kimi-coding is
+    // core-owned the same way (D15) — the sidecar no longer advertises it,
+    // and the guard also covers a colliding extension registration.
+    let ext_model = if ctx.models_json.owner(&p, &mid).is_some()
+        || (p == crate::oauth::KIMI_CODING && ctx.provider.lock().unwrap().is_some())
+    {
         None
     } else {
         ctx.ext_models

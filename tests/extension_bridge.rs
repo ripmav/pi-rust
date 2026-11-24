@@ -4026,44 +4026,31 @@ fn wp1006_headless_custom_is_noop() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// WP-1007: an expired stored oauth credential (kimi-coding) is refreshed
-/// per upstream semantics before the provider call — sidecar-side, through
-/// the pinned upstream runtime. The token endpoint is mocked via
-/// KIMI_CODE_OAUTH_HOST; the chat call then hits the real api.kimi.com with
-/// the (fake) rotated token and fails with a typed model error. Asserted:
-/// the refresh request used the stored refresh token, auth.json holds the
-/// rotated credential, the run ends as a typed model error (no crash), and
-/// no token material lands in any output or log.
+/// WP-1007 (re-pointed by E3S4/WP-1404): an expired stored oauth credential
+/// (kimi-coding) is refreshed per upstream semantics before the provider
+/// call — now CORE-side (the core owns kimi-coding end-to-end, D15): the
+/// refresh + rotated write-back run in the Rust core, and the stream goes
+/// through the core's built-in OpenAI driver. The token endpoint is mocked
+/// via KIMI_CODE_OAUTH_HOST and the chat call via KIMI_BASE_URL (all local
+/// mocks — no real provider endpoint, the WP-1007 original hit
+/// api.kimi.com); the sidecar is ALIVE but no longer routes the provider,
+/// so a successful run is also the coexistence proof. Asserted: the refresh
+/// request used the stored refresh token, auth.json holds the rotated
+/// credential, the transcript carries the mock's text (typed run, exit 0),
+/// and no token material lands in any output or log.
 #[test]
 fn wp1007_oauth_credential_refreshes_before_provider_call() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-wp1007-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let refresh_log = tmp.join("refresh-log.jsonl");
 
-    let mut child = Command::new("node")
-        .arg(repo().join("tests/fixtures/kimi-oauth-mock.mjs"))
-        .arg(&refresh_log)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawning mock kimi oauth token endpoint");
-    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock stdout"));
-    let mut port_line = String::new();
-    port_reader
-        .read_line(&mut port_line)
-        .expect("mock port line");
-    let port: u16 = port_line
-        .trim()
-        .rsplit(' ')
-        .next()
-        .and_then(|p| p.parse().ok())
-        .expect("mock port");
+    let (oauth_host, refresh_log, mut child) = start_kimi_oauth_mock(&tmp);
+    let (chat_base, _chat) = sse_no_finish_mock("Kimi refresh run ok");
 
     let agent_dir = tmp.join("agent-dir");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // Pre-seed an EXPIRED oauth credential (expires in the past; upstream
-    // treats <5min remaining as expired).
+    // Pre-seed an EXPIRED oauth credential (expires in the past; the core
+    // treats <5min remaining as expired, upstream margin).
     std::fs::write(
         agent_dir.join("auth.json"),
         r#"{"kimi-coding":{"type":"oauth","access":"old-access","refresh":"old-refresh","expires":1}}"#,
@@ -4082,7 +4069,8 @@ fn wp1007_oauth_credential_refreshes_before_provider_call() {
         .arg(&agent_dir)
         .arg("--session-file")
         .arg(&session_file)
-        .env("KIMI_CODE_OAUTH_HOST", format!("http://127.0.0.1:{port}"))
+        .env("KIMI_CODE_OAUTH_HOST", &oauth_host)
+        .env("KIMI_BASE_URL", &chat_base)
         .output()
         .expect("running pi-rust");
     let _ = child.kill();
@@ -4120,16 +4108,22 @@ fn wp1007_oauth_credential_refreshes_before_provider_call() {
         "expires must be in the future: {cred}"
     );
 
-    // 3) The run ends as a typed model error (the fake token is rejected by
-    //    the real api.kimi.com) — not a crash and not a success.
+    // 3) The run succeeds against the mock chat endpoint (core driver; the
+    //    sidecar is alive but no longer routes the provider).
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert_eq!(
         out.status.code(),
-        Some(2),
-        "model error exit code\nstdout: {stdout}\nstderr: {stderr}"
+        Some(0),
+        "core-native run against the mock chat\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(!stderr.contains("panic"), "no crash\n{stderr}");
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Kimi refresh run ok"),
+        "the mock's text in the transcript\n{dump}"
+    );
 
     // 4) Redaction: no token material in outputs or logs (WP-904 rule).
     let combined = format!("{stdout}\n{stderr}");
@@ -4618,6 +4612,365 @@ fn models_json_malformed_run_continues_with_bundled() {
     let lines = event_log(&stdout);
     let dump = lines.last().expect("no events")["session"].to_string();
     assert!(dump.contains("ok"), "transcript: {dump}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Like `sse_no_finish_mock`, but records the `authorization` header of
+/// every request into `log_file` (one line per request) — E3S4: proves the
+/// core's driver sent the stored/rotated credential (or the env key).
+fn sse_no_finish_mock_recording(
+    text: &str,
+    log_file: &std::path::Path,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let text = text.to_string();
+    let log_file = log_file.to_path_buf();
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+        loop {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = vec![0u8; 65536];
+            let mut n = 0usize;
+            loop {
+                match s.read(&mut buf[n..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => {
+                        n += k;
+                        if n > 4 && buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let auth = head
+                .lines()
+                .map(str::to_lowercase)
+                .find_map(|l| l.strip_prefix("authorization:").map(str::to_string))
+                .map(|a| a.trim().to_string());
+            if let Some(auth) = auth {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)
+                {
+                    let _ = std::io::Write::write_all(&mut f, format!("{auth}\n").as_bytes());
+                }
+            }
+            let c1 = json!({"choices":[{"delta":{"role":"assistant","content":text}}]}).to_string();
+            let sse = format!("data: {c1}\ndata: [DONE]\n");
+            let mut body =
+                String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+            for line in sse.split_inclusive('\n') {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let b = line.as_bytes();
+                body.push_str(&format!("{:x}\r\n", b.len()));
+                body.push_str(line);
+                body.push_str("\r\n");
+            }
+            body.push_str("0\r\n\r\n");
+            use std::io::Write;
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    (base, server)
+}
+
+/// Spawns the kimi oauth token-endpoint mock (tests/fixtures/kimi-oauth-mock.mjs)
+/// and returns (base URL, log file path, child). The token endpoint answers
+/// rotated tokens and logs every request body (WP-1007 fixture; the E3S4
+/// device_authorization extension serves the login flow as well).
+fn start_kimi_oauth_mock(
+    tmp: &std::path::Path,
+) -> (String, std::path::PathBuf, std::process::Child) {
+    let refresh_log = tmp.join("refresh-log.jsonl");
+    let mut child = Command::new("node")
+        .arg(repo().join("tests/fixtures/kimi-oauth-mock.mjs"))
+        .arg(&refresh_log)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning mock kimi oauth token endpoint");
+    let mut port_reader = std::io::BufReader::new(child.stdout.take().expect("mock stdout"));
+    let mut port_line = String::new();
+    port_reader
+        .read_line(&mut port_line)
+        .expect("mock port line");
+    let port: u16 = port_line
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("mock port");
+    (format!("http://127.0.0.1:{port}"), refresh_log, child)
+}
+
+/// WP-1404 / E3S4 (HARD acceptance): the kimi-coding oauth builtin runs
+/// through the CORE with the sidecar DEGRADED (spawn failure) — the core
+/// refreshes the expired stored credential (mock token endpoint) and streams
+/// the call through its built-in OpenAI driver (mock chat endpoint, NO
+/// `finish_reason` — the sidecar's upstream streamer would reject it, so the
+/// transcript carrying the text proves the call never crossed the bridge).
+/// All traffic local: token endpoint + chat endpoint are mocks.
+#[test]
+fn wp1404_kimi_oauth_native_sidecar_degraded() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1404-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (oauth_host, refresh_log, mut child) = start_kimi_oauth_mock(&tmp);
+    let (chat_base, _chat) =
+        sse_no_finish_mock_recording("Kimi hello from the core", &tmp.join("auth-headers.txt"));
+
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // Pre-seed an EXPIRED oauth credential (expires in the past; the core
+    // treats <5min remaining as expired, upstream margin) + an unrelated
+    // provider entry that the rotated write-back must preserve.
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        r#"{"kimi-coding":{"type":"oauth","access":"old-access","refresh":"old-refresh","expires":1},"groq":{"type":"api_key","key":"groq-key"}}"#,
+    )
+    .unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("kimi-coding")
+        .arg("--model")
+        .arg("k3")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        // Sidecar degraded: the node binary does not exist — the run must be
+        // served by the core alone (login/refresh/stream, no bridge).
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1404-node")
+        .env("KIMI_CODE_OAUTH_HOST", &oauth_host)
+        .env("KIMI_BASE_URL", &chat_base)
+        .output()
+        .expect("running pi-rust");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // 1) The run went through the degraded-sidecar path and still succeeded:
+    // the core's native driver served the provider call.
+    assert_eq!(out.status.code(), Some(0), "exit\n{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("sidecar spawn failed"),
+        "the run must go through the degraded-sidecar path\n{stderr}"
+    );
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Kimi hello from the core"),
+        "the core's native driver must have served the call (no sidecar)\n{dump}"
+    );
+
+    // 2) The refresh went to the mock with the stored refresh token.
+    let log = std::fs::read_to_string(&refresh_log).unwrap_or_default();
+    assert!(
+        log.contains("old-refresh"),
+        "no refresh with the stored token\n{log}"
+    );
+    assert!(
+        log.contains("grant_type=refresh_token"),
+        "upstream grant type\n{log}"
+    );
+
+    // 3) The rotated credential is written back to auth.json (upstream shape;
+    // other providers preserved).
+    let auth: Value =
+        serde_json::from_str(&std::fs::read_to_string(agent_dir.join("auth.json")).unwrap())
+            .unwrap();
+    let cred = &auth["kimi-coding"];
+    assert_eq!(cred["type"], json!("oauth"));
+    assert_eq!(cred["access"], json!("new-access"), "rotated access token");
+    assert_eq!(
+        cred["refresh"],
+        json!("new-refresh"),
+        "rotated refresh token"
+    );
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        cred["expires"].as_i64().unwrap_or(0) > now_ms,
+        "expires must be in the future: {cred}"
+    );
+    assert_eq!(
+        auth["groq"]["key"],
+        json!("groq-key"),
+        "write-back must preserve other providers"
+    );
+
+    // 4) The call carried the ROTATED token as bearer.
+    let headers = std::fs::read_to_string(tmp.join("auth-headers.txt")).unwrap_or_default();
+    assert!(
+        headers.contains("bearer new-access"),
+        "rotated token used for the call\n{headers}"
+    );
+
+    // 5) Redaction: no token material in outputs or logs (WP-904 rule).
+    let combined = format!("{stdout}\n{stderr}");
+    let corelog = std::fs::read_to_string(agent_dir.join("core.log")).unwrap_or_default();
+    for secret in ["old-access", "old-refresh", "new-access", "new-refresh"] {
+        assert!(
+            !combined.contains(secret),
+            "token material in output: {secret}"
+        );
+        assert!(
+            !corelog.contains(secret),
+            "token material in core.log: {secret}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1404 / E3S4 (coexistence, E3S2 pattern): with the sidecar ALIVE the
+/// core still owns kimi-coding — the sidecar no longer advertises it in
+/// `ready.providers`, so the core routes the model to the native driver. The
+/// mock's final chunk has no `finish_reason` (the sidecar's upstream streamer
+/// requires it), so a transcript carrying the text proves the call never
+/// crossed the bridge even though one exists.
+#[test]
+fn wp1404_kimi_oauth_native_sidecar_healthy_still_native() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1404h-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (oauth_host, refresh_log, mut child) = start_kimi_oauth_mock(&tmp);
+    let (chat_base, _chat) = sse_no_finish_mock("Kimi hello with sidecar alive");
+
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        r#"{"kimi-coding":{"type":"oauth","access":"old-access","refresh":"old-refresh","expires":1}}"#,
+    )
+    .unwrap();
+    let session_file = tmp.join("session.jsonl");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("kimi-coding")
+        .arg("--model")
+        .arg("k3")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(&session_file)
+        .env("KIMI_CODE_OAUTH_HOST", &oauth_host)
+        .env("KIMI_BASE_URL", &chat_base)
+        .output()
+        .expect("running pi-rust");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0), "\n{stdout}\n{stderr}");
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Kimi hello with sidecar alive"),
+        "the core's native driver must serve kimi-coding even with the sidecar alive\n{dump}"
+    );
+    // The core refreshed (not the sidecar — it no longer routes the provider).
+    let log = std::fs::read_to_string(&refresh_log).unwrap_or_default();
+    assert!(
+        log.contains("old-refresh"),
+        "core-owned refresh with the stored token\n{log}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// WP-1404 / E3S4: no credential + no env key is a TYPED error pointing at
+/// the core-native login (before the run starts, degraded or not); the
+/// `KIMI_API_KEY` env fallback (upstream `envApiKeyAuth`) streams through the
+/// core driver with the env key as bearer.
+#[test]
+fn wp1404_kimi_oauth_no_credential_typed_error() {
+    let tmp = std::env::temp_dir().join(format!("pi-rust-wp1404nc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (chat_base, _chat) =
+        sse_no_finish_mock_recording("Kimi hello with env key", &tmp.join("auth-headers.txt"));
+    let agent_dir = tmp.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    // (a) No auth.json entry, no env key: typed fatal at startup.
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("kimi-coding")
+        .arg("--model")
+        .arg("k3")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(tmp.join("session-a.jsonl"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1404-node")
+        .env("KIMI_BASE_URL", &chat_base)
+        .env_remove("KIMI_API_KEY")
+        .output()
+        .expect("running pi-rust (no credential)");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "typed fatal exit\n{stderr}");
+    assert!(
+        stderr.contains("pi-rust auth login kimi-coding"),
+        "the error must point at the core-native login\n{stderr}"
+    );
+
+    // (b) The env key fallback (upstream envApiKeyAuth order: nothing stored ->
+    // ambient env) streams through the core driver.
+    let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
+        .arg("--provider")
+        .arg("kimi-coding")
+        .arg("--model")
+        .arg("k3")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .arg("--session-file")
+        .arg(tmp.join("session-b.jsonl"))
+        .env("PI_RUST_NODE", "/nonexistent/pi-rust-wp1404-node")
+        .env("KIMI_BASE_URL", &chat_base)
+        .env("KIMI_API_KEY", "env-kimi-key")
+        .output()
+        .expect("running pi-rust (env key)");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0), "\n{stderr}");
+    let lines = event_log(&stdout);
+    let dump = lines.last().expect("no events")["session"].to_string();
+    assert!(
+        dump.contains("Kimi hello with env key"),
+        "the env-key fallback must stream through the core driver\n{dump}"
+    );
+    let headers = std::fs::read_to_string(tmp.join("auth-headers.txt")).unwrap_or_default();
+    assert!(
+        headers.contains("bearer env-kimi-key"),
+        "the env key used as bearer\n{headers}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
