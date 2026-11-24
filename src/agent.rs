@@ -570,6 +570,40 @@ pub async fn event_task(
                     }
                 }
                 "tool_call_request" => nested_tool(&ctx, &ev).await,
+                "mcp_server_register" => {
+                    // E3S5 follow-up (D13): a user extension's
+                    // pi.registerMcpServer forwarded by the sidecar — the
+                    // core hosts the server itself (the same path as the
+                    // configured servers: stdio + streamable HTTP, native
+                    // tool execution). Rejection (invalid entry, duplicate,
+                    // oauth/auth — D17) is a typed error response the
+                    // sidecar surfaces to the extension; a successful
+                    // registration re-fires mcp_servers_change with the
+                    // core's FULL set (configured + extension-registered)
+                    // so subscribing extensions observe the change.
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = ev.get("name").and_then(Value::as_str);
+                    let config = ev.get("config").cloned().unwrap_or(Value::Null);
+                    let owner = ev.get("extensionPath").and_then(Value::as_str);
+                    let result = match name {
+                        Some(n) => ctx.mcp.register_server(n, &config, owner),
+                        None => Err("mcp_server_register needs a string name".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            let n = name.unwrap_or_default().to_string();
+                            crate::corelog::line(&format!("[core] mcp: extension-registered server \"{n}\" hosted by the core (D13 forward)"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":true}));
+                            if !ctx.mcp.is_empty() {
+                                ctx.client.fire(json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":ctx.mcp.server_entries()}}));
+                            }
+                        }
+                        Err(e) => {
+                            crate::corelog::line(&format!("[core] mcp: extension registration rejected: {e}"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":false,"error":e}));
+                        }
+                    }
+                }
                 other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
                 }
             }

@@ -2348,14 +2348,24 @@ fn wp702_mcp_config_stdio_round_trip() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// E3S5/WP-1405 (D13 final form): the sidecar's built-in mcp extension is
-/// gone, so an extension's `pi.registerMcpServer` call is still accepted by
-/// the unmodified upstream runner (the API is part of the mirror, ADR 0002)
-/// but the server is NEVER connected — no `mcp__fixture_reg__*` tool is ever
-/// declared and the fixture process is never spawned. Pinning the E3S5
-/// deletion (the WP-702 registration path "stayed until E3S5" — D13): with
-/// the old sidecar this test is RED (the tool is declared and the server is
-/// spawned on session_start).
+/// E3S5/WP-1405 (D13 final form) + the E3S5 follow-up (D13 forward,
+/// PO 2026-11-24): the sidecar's built-in mcp extension is gone, so the
+/// sidecar hosts no MCP servers — but an extension's `pi.registerMcpServer`
+/// call is still accepted by the unmodified upstream runner (the API is
+/// part of the mirror, ADR 0002) and is FORWARDED to the core over the
+/// bridge (`mcp_server_register`): the core hosts the server itself, the
+/// same path as configured servers. Pins (the pre-follow-up RED: the tool
+/// was neither declared nor callable, the server never spawned, and the
+/// change event carried no extension server):
+/// - ready carries 5 extensions (fixture + probe + the 3 builtins — NO
+///   `builtin:mcp`: the sidecar still hosts nothing, E3S5);
+/// - the registered server's tools ARE declared to the model (exposure
+///   direct) and a call executes natively (the sidecar has no MCP host
+///   code at all — pinned negative in sidecar/smoke.mjs (m) — so a bridge
+///   hop is impossible);
+/// - the core's `mcp_servers_change` forward carries the full set
+///   (configured + extension-registered) — observable parity;
+/// - the fixture process is spawned exactly once (by the core).
 #[test]
 fn wp1405_register_mcp_server_not_hosted_pin() {
     let tmp = std::env::temp_dir().join(format!("pi-rust-wp1405r-{}", std::process::id()));
@@ -2364,15 +2374,26 @@ fn wp1405_register_mcp_server_not_hosted_pin() {
     let spawn_log = tmp.join("spawns.log");
     let agent_dir = tmp.join("agent-dir");
     std::fs::create_dir_all(&agent_dir).unwrap();
+    let scenario = json!({
+        "user_messages": ["count it"],
+        "model_scripts": [[
+            { "tool_call": { "name": "mcp__fixture_reg__counter", "input": {} } },
+            { "text": "counted" }
+        ]]
+    });
+    let scen = tmp.join("scenario.json");
+    std::fs::write(&scen, scenario.to_string()).unwrap();
     let session_file = tmp.join("session.jsonl");
 
     let out = Command::new(env!("CARGO_BIN_EXE_pi-rust"))
         .arg("--extension-dir")
         .arg(repo().join("tests/fixtures/mcp-register-fixture.ts"))
+        .arg("--extension-dir")
+        .arg(repo().join("tests/fixtures/mcp-tools-probe.ts"))
         .arg("--agent-dir")
         .arg(&agent_dir)
-        .arg("--prompt")
-        .arg("hi")
+        .arg("--scenario")
+        .arg(&scen)
         .arg("--session-file")
         .arg(&session_file)
         .env("MCP_REGISTER_SPAWN_LOG", &spawn_log)
@@ -2384,12 +2405,13 @@ fn wp1405_register_mcp_server_not_hosted_pin() {
         Some(0),
         "pi-rust exited non-zero\n{stderr}"
     );
-    // The extension itself loads (the API call is accepted by the unmodified
-    // runner): 4 = fixture + tool-search + llama + codemode builtins (the
-    // built-in mcp extension is gone — E3S5).
+    // The extensions load (the API call is accepted by the unmodified
+    // runner): 5 = register fixture + mcp-tools-probe + the 3 builtins
+    // (the built-in mcp extension is gone — E3S5; a re-added sidecar host
+    // would be a 6th).
     assert!(
-        stderr.contains("ready: 4 extensions"),
-        "the register fixture must load (positive control)\n{stderr}"
+        stderr.contains("ready: 5 extensions"),
+        "the fixtures must load (positive control)\n{stderr}"
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2398,38 +2420,64 @@ fn wp1405_register_mcp_server_not_hosted_pin() {
         !lines
             .iter()
             .any(|l| l.get("kind").and_then(Value::as_str) == Some("extension_error")),
-        "unexpected extension_error\n{stdout}",
+        "unexpected extension_error (the forward must succeed)\n{stdout}",
     );
-    // Pin 1: the registered server's tools are never declared to the model.
-    let selected: Vec<&str> = lines
+    // The probe recorded the declared set + the change event as custom
+    // session entries (the core persists pi.appendEntry calls).
+    let file = std::fs::read_to_string(&session_file).expect("session file missing");
+    let entries: Vec<Value> = file
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    // Pin 1: the registered server's tools are declared to the model now
+    // (forwarded + connected core-side; exposure direct).
+    let selected = entries
         .iter()
-        .filter(|l| {
-            l.get("kind").and_then(Value::as_str) == Some("decision")
-                && l.get("name").and_then(Value::as_str) == Some("before_agent_start")
-        })
-        .filter_map(|l| l["request"]["systemPromptOptions"]["selectedTools"].as_array())
-        .flatten()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp1403-selected-tools")
+        .expect("selectedTools probe entry missing\n{file}");
+    let tools: Vec<String> = selected["data"]["selectedTools"]
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(Value::as_str)
+        .map(str::to_string)
         .collect();
     assert!(
-        !selected.iter().any(|t| t.starts_with("mcp__fixture_reg__")),
-        "the registered server's tools must never be declared (no host)\n{selected:?}"
+        tools.iter().any(|t| t == "mcp__fixture_reg__counter")
+            && tools.iter().any(|t| t == "mcp__fixture_reg__echo"),
+        "the registered server's direct tools must be declared: {tools:?}"
     );
-    // Pin 2: no execution of a registered-server tool.
+    // Pin 2: the core's mcp_servers_change forward carries the full set —
+    // the extension-registered server is in it (observable parity).
+    let change = entries
+        .iter()
+        .find(|e| e["type"] == "custom" && e["customType"] == "wp1403-mcp-change")
+        .expect("mcp_servers_change probe entry missing\n{file}");
+    let servers: Vec<String> = change["data"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
     assert!(
-        !lines.iter().any(
-            |l| l.get("kind").and_then(Value::as_str) == Some("tool_execution")
-                && l["name"]
-                    .as_str()
-                    .is_some_and(|n| n.starts_with("mcp__fixture_reg__"))
-        ),
-        "no mcp__fixture_reg__ tool may execute\n{stdout}"
+        servers.iter().any(|s| s == "fixture-reg"),
+        "the change event must carry the extension-registered server: {servers:?}"
     );
-    // Pin 3: the server process was never spawned.
-    assert!(
-        !spawn_log.exists(),
-        "the registered server must never be spawned (no sidecar host)\n{}",
-        std::fs::read_to_string(&spawn_log).unwrap_or_default()
+    // Pin 3: the tool executes natively with its result in the transcript
+    // (no bridge hop possible — the sidecar has no MCP host code).
+    let counter = lines
+        .iter()
+        .find(|l| l["kind"] == "tool_execution" && l["name"] == "mcp__fixture_reg__counter")
+        .expect("registered-server tool execution missing\n{stdout}");
+    assert_eq!(counter["result_summary"], "count:1", "{counter}");
+    // Pin 4: the server process was spawned exactly once — by the core
+    // (the sidecar's no-host form is pinned negative in smoke (m)).
+    let spawns = std::fs::read_to_string(&spawn_log).expect("spawn log missing");
+    assert_eq!(
+        spawns.lines().count(),
+        1,
+        "the registered server must be connected exactly once (by the core): {spawns}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2769,8 +2817,8 @@ fn wp703_mcp_http_round_trip() {
 // E3S3/WP-1403: core-native MCP hosting — the core connects and drives the
 // configured MCP servers itself; since E3S5/WP-1405 the sidecar hosts NO MCP
 // servers at all (its built-in mcp extension + the mcpConfig registration
-// path are removed; `pi.registerMcpServer` is accepted by the unmodified
-// runner but never connected — the negative pin above, D13). The
+// path are removed; `pi.registerMcpServer` is FORWARDED to the core —
+// the negative pin above, D13, E3S5 follow-up). The
 // sidecar-degraded runs below are the HARD acceptance: the existing MCP
 // fixture scenarios (stdio + HTTP, exposure rules) pass with no sidecar at
 // all.

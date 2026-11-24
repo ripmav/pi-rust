@@ -30,12 +30,15 @@ const paneKeybindings = new tui.KeybindingsManager(tui.TUI_KEYBINDINGS);
 const F_AND_FORGET = new Set(
 	"session_start agent_start agent_end turn_start turn_end message_start message_update message_end set_model set_thinking_level session_compact session_compact_failed mcp_servers_change".split(" "),
 );
-// mcp_servers_change (E3S3/WP-1403): the core forwards its OWN configured
-// MCP servers (mcp.json + trusted project .pi/mcp.json) after session_start,
-// so a user extension subscribing to mcp_servers_change still observes
-// them. Since E3S5/WP-1405 the sidecar hosts no MCP servers at all (the
-// core is the single source of truth for MCP — D13, answered by the PO
-// 2026-11-24) — the event is a pure extension notification.
+// mcp_servers_change (E3S3/WP-1403 + E3S5 follow-up, D13): the core
+// forwards its OWN full MCP set — the configured servers (mcp.json +
+// trusted project .pi/mcp.json) PLUS the extension-registered ones
+// (forwarded over mcp_server_register) — as a one-time event after
+// session_start and again after every successful runtime registration,
+// so a user extension subscribing to mcp_servers_change observes the
+// complete set. Since E3S5/WP-1405 the sidecar hosts no MCP servers at
+// all (the core is the single source of truth for MCP — D13, answered by
+// the PO 2026-11-24) — the event is a pure extension notification.
 const message = (err) => (err instanceof Error ? err.message : String(err));
 const MAX_LINE = 1024 * 1024; // v0: a single NDJSON command line never exceeds 1 MB
 const response = (id, command, success, data, error) =>
@@ -588,12 +591,17 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		// WP-1007: the upstream runtime for the built-in oauth providers. No
 		// network at creation (static catalogs stay, dynamic ones stay empty
 		// until the first authenticated refresh after login).
-		modelRuntime = await ca.ModelRuntime.create({ allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
+		// D11 (E3S5 follow-up, PO 2026-11-24): `modelsPath: null` — the
+		// runtime does NOT load the agent dir's models.json at all (the core
+		// owns the file, E3S1; the sidecar has no direct models.json access).
+		// The four oauth builtins come from the upstream runtime's builtin
+		// catalog (independent of models.json, verified against the pinned
+		// model-runtime.ts: builtinProviderCatalog.builtinProviders()).
+		modelRuntime = await ca.ModelRuntime.create({ modelsPath: null, allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
 
-		// WP-1402/E3S2: the agent dir's models.json is the CORE's config now
-		// (E3S1) — the bridge no longer reads it. (The upstream ModelRuntime
-		// above still loads it internally, unmodified; the bridge never uses
-		// those providers.)
+		// WP-1402/E3S2 + D11: the agent dir's models.json is the CORE's
+		// config (E3S1) — the runtime above is created with modelsPath: null,
+		// so the sidecar neither reads nor uses it.
 
 		// E3S5: the built-in mcp extension is REMOVED — the sidecar hosts no
 		// MCP servers (the core is the single source of truth for MCP, D13).
@@ -766,11 +774,42 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		loaded.runtime.getActiveTools = () => [...state.activeTools];
 		loaded.runtime.setActiveTools = (names) => applyActiveTools(names);
 
-		// E3S5/WP-1405 (D13, answered by the PO 2026-11-24: "core owns all
-		// MCP, sidecar hosts none"): the sidecar's mcpConfig registration
-		// path is REMOVED — the core hosts every configured server itself
-		// (E3S3) and no longer sends mcpConfig at all. An init that still
-		// carries one is ignored (a dead field from older cores).
+		// D13 (E3S5 follow-up, PO 2026-11-24): the sidecar's mcpConfig
+		// registration path is REMOVED — the core hosts every configured
+		// server itself (E3S3) and no longer sends mcpConfig at all. An init
+		// that still carries one is ignored (a dead field from older cores).
+		// Extension `pi.registerMcpServer` calls are FORWARDED to the core
+		// (new `mcp_server_register` message, additive in protocol v6):
+		// the sidecar registry stays the extension API's record (getMcpServers,
+		// the runner's own mcp_servers_change emit, ownership/clash rules in
+		// the unmodified loader), but the CONNECTION is the core's (its
+		// McpHost, the same path as configured servers). A failed forward
+		// (bridge dead/degraded — the request times out — or a core
+		// rejection: invalid entry, duplicate, oauth/auth (D17)) is a typed
+		// extension-side error (extension_error), never a crash; the run
+		// continues. v0 limit: unregisterMcpServer is not forwarded (the
+		// server stays core-hosted for the rest of the run) and a duplicate
+		// name is rejected by the core (no replace).
+		const mcpRegistry = loaded.runtime.mcpServers;
+		const forwardMcpServer = (server) =>
+			void sendRequest({ type: "mcp_server_register", name: server.name, config: server.config, extensionPath: server.extensionPath }).then((res) => {
+				if (!res.success) {
+					runner.emitError({
+						extensionPath: server.extensionPath,
+						event: "mcp_server_register",
+						error: `registerMcpServer(\"${server.name}\") was not hosted by the core: ${res.error}`,
+					});
+				}
+			});
+		const origMcpRegister = mcpRegistry.register.bind(mcpRegistry);
+		mcpRegistry.register = (server) => {
+			origMcpRegister(server);
+			forwardMcpServer(server);
+		};
+		// Registrations made DURING extension load (the loader runs the
+		// factories before this point) are already in the registry — flush
+		// them, then forward every later registration through the wrap.
+		for (const server of mcpRegistry.list()) forwardMcpServer(server);
 
 		// WP-505: dialog wiring only for clients that advertise UI methods. Headless
 		// clients (no ui methods) keep the runner's noOp UI context, so hasUI() is

@@ -44,6 +44,10 @@ class FakeCore {
 		this.events = [];
 		this.waiters = [];
 		this.buf = "";
+		// E3S5 follow-up (D13): per-phase policy for the sidecar's
+		// `mcp_server_register` forwards (null = no policy, lines are just
+		// recorded as events).
+		this.mcpRegisterPolicy = null;
 		this.exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
 		child.stdout.on("data", (chunk) => this.onData(chunk.toString()));
 	}
@@ -129,6 +133,13 @@ class FakeCore {
 					data: { ok },
 					...(ok ? {} : { error: "test: core declines" }),
 				});
+			} else if (obj.type === "mcp_server_register" && this.mcpRegisterPolicy) {
+				// Test policy: record the forward (assertions read it as an
+				// event) and answer the registerMcpServer forward (D13).
+				this.events.push(obj);
+				for (const wake of [...this.waiters]) wake();
+				const resp = this.mcpRegisterPolicy(obj);
+				if (resp) this.send(resp);
 			} else {
 				// response lines for unknown/null ids (e.g. the parse error) are observable events here
 				this.events.push(obj);
@@ -265,6 +276,9 @@ async function main() {
 	let child3 = null;
 	let child4 = null;
 	let child5 = null;
+	let child6 = null;
+	let child7 = null;
+	let child8 = null;
 	try {
 		// (a) handshake
 		const init = await core.request({
@@ -740,6 +754,170 @@ async function main() {
 		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("shortcut sidecar clean exit 0", code5 === 0, code5);
 
+		// (o) D11 (E3S5 follow-up, PO 2026-11-24): the sidecar's upstream
+		// ModelRuntime is created with `modelsPath: null` — no direct
+		// models.json access at all (the core owns the file, E3S1). Pin 1:
+		// a models.json that OVERLAYS a builtin (adds a model to xai) must
+		// not reach the runtime — with the pre-D11 call (modelsPath defaulting
+		// to <agentDir>/models.json) the composed xai provider would
+		// advertise the overlay model. Pin 2: a MALFORMED models.json still
+		// starts normally (acceptance: present/malformed = no different for
+		// the sidecar).
+		const D11_SCRATCH = `export default function (pi) {
+	pi.registerFlag("d11-probe", { type: "boolean", default: true });
+}
+`;
+		const d11ExtDir = path.join(tmp, "d11-ext");
+		mkdirSync(d11ExtDir, { recursive: true });
+		writeFileSync(path.join(d11ExtDir, "index.ts"), D11_SCRATCH);
+		const agentDir6 = path.join(tmp, "agent6");
+		mkdirSync(agentDir6, { recursive: true });
+		writeFileSync(
+			path.join(agentDir6, "models.json"),
+			JSON.stringify({
+				providers: {
+					xai: {
+						baseUrl: "http://127.0.0.1:1/v1",
+						api: "openai-responses",
+						apiKey: "smoke-overlay-key",
+						models: [{ id: "xai/smoke-overlay", name: "Smoke Overlay", input: ["text"], contextWindow: 1024, maxTokens: 64 }],
+					},
+					smokemj2: {
+						baseUrl: "http://127.0.0.1:1/v1",
+						api: "openai-completions",
+						apiKey: "smoke-mj2-key",
+						models: [{ id: "smoke/mj-2", contextWindow: 1024, maxTokens: 64 }],
+					},
+				},
+			}),
+		);
+		child6 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", d11ExtDir, "--agent-dir", agentDir6],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child6.stderr.on("data", (d) => process.stderr.write(d));
+		const core6 = new FakeCore(child6);
+		const init6 = await core6.request({
+			type: "init",
+			protocolVersion: 6,
+			capabilities: { ui: [], timeoutMs: 5000 },
+		});
+		check("D11 sidecar init (models.json overlay present)", init6.success === true, init6);
+		const ready6 = await core6.nextEvent((e) => e.type === "ready", "ready (D11 overlay)");
+		const xai6 = ready6.providers?.find((p) => p?.name === "xai");
+		check(
+			"D11: models.json overlay does NOT reach the runtime (xai catalog pure)",
+			Boolean(xai6) && xai6.models.length > 0 && !xai6.models.some((m) => m.id === "xai/smoke-overlay"),
+			xai6?.models?.map((m) => m.id),
+		);
+		check(
+			"D11: models.json provider not advertised (smokemj2)",
+			!ready6.providers?.some((p) => p?.name === "smokemj2"),
+			ready6.providers?.map((p) => p?.name),
+		);
+		core6.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code6 = await Promise.race([core6.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("D11 sidecar clean exit 0 (models.json present)", code6 === 0, code6);
+		// Malformed models.json: the sidecar starts normally (no direct read,
+		// so there is nothing to fail on — acceptance pin).
+		const agentDir7 = path.join(tmp, "agent7");
+		mkdirSync(agentDir7, { recursive: true });
+		writeFileSync(path.join(agentDir7, "models.json"), "{ this is not valid models.json [");
+		child7 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", d11ExtDir, "--agent-dir", agentDir7],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child7.stderr.on("data", (d) => process.stderr.write(d));
+		const core7 = new FakeCore(child7);
+		const init7 = await core7.request({
+			type: "init",
+			protocolVersion: 6,
+			capabilities: { ui: [], timeoutMs: 5000 },
+		});
+		check("D11 sidecar init (models.json malformed)", init7.success === true, init7);
+		const ready7 = await core7.nextEvent((e) => e.type === "ready", "ready (D11 malformed)");
+		check(
+			"D11: builtin oauth providers intact with a malformed models.json",
+			["radius", "github-copilot", "xai", "meta"].every(
+				(name) => ready7.providers?.some((p) => p?.name === name && p.models.length > 0),
+			),
+			ready7.providers?.map((p) => p?.name),
+		);
+		core7.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code7 = await Promise.race([core7.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("D11 sidecar clean exit 0 (models.json malformed)", code7 === 0, code7);
+
+		// (p) E3S5 follow-up (D13, PO 2026-11-24): pi.registerMcpServer is
+		// FORWARDED to the core — the sidecar no longer hosts the server,
+		// it sends `mcp_server_register` over the bridge (req/resp). The
+		// fake core answers one forward with success (no extension_error)
+		// and one with a typed error (a failed forward must surface as a
+		// typed extension-side error, never a crash).
+		const D13_SCRATCH = `export default function (pi) {
+	pi.registerMcpServer("smokemcp-a", { command: process.execPath, args: ["/nonexistent-mcp-fixture"], exposure: "direct" });
+	pi.registerMcpServer("smokemcp-b", { url: "http://127.0.0.1:1/mcp" });
+}
+`;
+		const d13ExtDir = path.join(tmp, "d13-ext");
+		mkdirSync(d13ExtDir, { recursive: true });
+		writeFileSync(path.join(d13ExtDir, "index.ts"), D13_SCRATCH);
+		const agentDir8 = path.join(tmp, "agent8");
+		mkdirSync(agentDir8, { recursive: true });
+		child8 = spawn(
+			process.execPath,
+			[ENTRY, "--extension-dir", d13ExtDir, "--agent-dir", agentDir8],
+			{ cwd: tmp, stdio: ["pipe", "pipe", "pipe"] },
+		);
+		child8.stderr.on("data", (d) => process.stderr.write(d));
+		const core8 = new FakeCore(child8);
+		core8.mcpRegisterPolicy = (obj) => {
+			if (obj.name === "smokemcp-a") {
+				return { id: obj.id, type: "response", command: "mcp_server_register", success: true };
+			}
+			return { id: obj.id, type: "response", command: "mcp_server_register", success: false, error: "test: core rejects this server" };
+		};
+		const init8 = await core8.request({
+			type: "init",
+			protocolVersion: 6,
+			capabilities: { ui: [], timeoutMs: 5000 },
+		});
+		check("D13 sidecar init (registering extension)", init8.success === true, init8);
+		const ready8 = await core8.nextEvent((e) => e.type === "ready", "ready (D13)");
+		check("D13 fixture loads (1 user extension + builtins), no errors", ready8.extensions.length === 4 && ready8.errors.length === 0, ready8.errors);
+		const reqA = await core8.nextEvent(
+			(e) => e.type === "mcp_server_register" && e.name === "smokemcp-a",
+			"mcp_server_register (smokemcp-a)",
+		);
+		check(
+			"D13: registerMcpServer is forwarded to the core (name + config + owner)",
+			reqA.config?.command === process.execPath && reqA.config?.exposure === "direct" && typeof reqA.extensionPath === "string",
+			reqA,
+		);
+		const reqB = await core8.nextEvent(
+			(e) => e.type === "mcp_server_register" && e.name === "smokemcp-b",
+			"mcp_server_register (smokemcp-b)",
+		);
+		check("D13: the http form is forwarded verbatim", reqB.config?.url === "http://127.0.0.1:1/mcp", reqB);
+		const rejected = await core8.nextEvent(
+			(e) => e.type === "extension_error" && /smokemcp-b/.test(e.error ?? ""),
+			"extension_error (rejected forward)",
+		);
+		check(
+			"D13: a failed forward is a typed extension-side error (no crash)",
+			rejected.event === "mcp_server_register" && /test: core rejects this server/.test(rejected.error),
+			rejected,
+		);
+		check(
+			"D13: an accepted forward raises no extension_error",
+			!core8.events.some((e) => e.type === "extension_error" && /smokemcp-a/.test(e.error ?? "")),
+			core8.events.filter((e) => e.type === "extension_error"),
+		);
+		core8.send({ type: "session_shutdown", event: { type: "session_shutdown", reason: "quit" } });
+		const code8 = await Promise.race([core8.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
+		check("D13 sidecar clean exit 0", code8 === 0, code8);
+
 		// WP-1402/E3S2: the WP-1301 phase (o) — models.json advertise +
 		// stream through the sidecar's upstream ModelRuntime — is removed
 		// with the bridge branches: models.json is the core's config now
@@ -755,6 +933,9 @@ async function main() {
 			child3?.kill("SIGKILL");
 			child4?.kill("SIGKILL");
 			child5?.kill("SIGKILL");
+			child6?.kill("SIGKILL");
+			child7?.kill("SIGKILL");
+			child8?.kill("SIGKILL");
 		} catch {}
 	}
 

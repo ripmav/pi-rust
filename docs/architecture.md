@@ -54,9 +54,12 @@ flowchart LR
   removed); until E3S5 the `oauth`/`auth` config servers stayed
   sidecar-side as the documented interim — since E3S5 the core skips
   them with a logged warning (no host remains; D17). Extension
-  `pi.registerMcpServer` registrations are accepted by the unmodified
-  runner but never connected (no host remains; forwarding the registration
-  to the core is the follow-up — task log L15). Owns the oauth builtin
+  `pi.registerMcpServer` registrations are forwarded to the core over the
+  bridge (`mcp_server_register`, additive in protocol v6 — E3S5 follow-up)
+  and hosted by the core exactly like configured servers (same transports,
+  naming, exposure, native execution); a failed forward is a typed
+  extension-side error, and the core's `mcp_servers_change` forward carries
+  the full set (configured + extension-registered). Owns the oauth builtin
   it can natively stream (`kimi-coding`, E3S4,
   [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs));
   the other four stay sidecar-side until E4S2 (M15, D15 answered
@@ -65,12 +68,17 @@ flowchart LR
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
   the js/ts-extension compatibility layer. Since E3S2 it no longer reads or
-  routes the agent dir's `models.json` — model providers are the core's
-  (E3S1), and the core is the **single source of truth for models.json
-  (D11, answered by the PO 2026-11-24)**: the bridge never uses the
-  models.json providers the (unmodified) upstream `ModelRuntime` loads
-  internally; if the sidecar ever needs models.json data, the core passes
-  it via the `init` payload. Since E3S5 its built-in mcp extension +
+  routes the agent dir's `models.json`, and since the E3S5 follow-up (D11,
+  PO 2026-11-24) it has no direct models.json access **at all** — the
+  sidecar's upstream `ModelRuntime` is created with `modelsPath: null`
+  (the runtime skips the load; its builtin oauth catalog is independent of
+  the file) — model providers are the core's (E3S1), and the core is the
+  **single source of truth for models.json (D11, answered by the PO
+  2026-11-24)**: the bridge never uses models.json data; if the sidecar
+  ever needs it, the core passes it via the `init` payload. Its only MCP
+  duty is to forward `pi.registerMcpServer` registrations to the core
+  (`mcp_server_register` — the core hosts them, D13). Since E3S5 its built-in
+  mcp extension +
   `mcpConfig` registration path are gone (the core is the single source of
   truth for MCP, D13); since E3S4 it no longer advertises or routes the
   `kimi-coding` oauth builtin (core-owned — D15) and keeps its oauth
