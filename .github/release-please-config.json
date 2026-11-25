@@ -1,5 +1,8 @@
 {
   "release-type": "rust",
   "tag-template": "v${version}",
-  "pull-request-title-pattern": "chore(release): ${version}"
+  "pull-request-title-pattern": "chore(release): ${version}",
+  "packages": {
+    ".": {}
+  }
 }

@@ -202,5 +202,15 @@ jobs:
           else
             notes="$(git log --oneline -25 | sed 's/^/- /')"
           fi
-          gh release create "$tag" --title "pi-rust ${tag}" \
-            --notes "$notes" $prerelease dist/*.tar.gz install.sh
+          # --target "$tag": without it, target_commitish defaults to the
+          # checkout context (main), so the release page points at a moving
+          # branch instead of the release commit.
+          # The release-please action creates the tag + GitHub release when
+          # the release PR merges, so only create the release if missing;
+          # otherwise (re-runs included) just (re)upload the assets.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber dist/*.tar.gz install.sh
+          else
+            gh release create "$tag" --title "pi-rust ${tag}" --target "$tag" \
+              --notes "$notes" $prerelease dist/*.tar.gz install.sh
+          fi
