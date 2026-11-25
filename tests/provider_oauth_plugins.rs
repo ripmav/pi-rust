@@ -46,22 +46,35 @@ fn bundled_dir() -> std::path::PathBuf {
     dir
 }
 
-/// The platform cdylib extension (the E4S1 lesson: `.so` is Linux-only —
-/// macOS builds `.dylib`, Windows `.dll`).
-fn plugin_ext() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "dylib"
-    } else if cfg!(target_os = "windows") {
-        "dll"
+/// The cdylib file name for a crate named `pi-provider-{crate_name}`
+/// (dashes → underscores; the `lib` prefix is unix-only — Windows builds
+/// `{libname}.dll`, the E4S1 sample e2e pattern).
+fn plugin_file_name(crate_name: &str) -> String {
+    let lib = crate_name.replace('-', "_");
+    if cfg!(target_os = "windows") {
+        format!("pi_provider_{lib}.dll")
+    } else if cfg!(target_os = "macos") {
+        format!("libpi_provider_{lib}.dylib")
     } else {
-        "so"
+        format!("libpi_provider_{lib}.so")
     }
 }
 
+/// Removes any bundled cdylib for the crate (both naming schemes — the
+/// platform-correct one and the old `lib`-prefixed one — so a stale file
+/// from an older build of this test never survives).
 fn remove_bundled(crate_name: &str) {
     let lib = crate_name.replace('-', "_");
     for ext in ["so", "dylib", "dll"] {
-        let _ = std::fs::remove_file(bundled_dir().join(format!("libpi_provider_{lib}.{ext}")));
+        for name in [
+            std::path::Path::new(&plugin_file_name(crate_name))
+                .with_extension(ext)
+                .to_string_lossy()
+                .into_owned(),
+            format!("libpi_provider_{lib}.{ext}"),
+        ] {
+            let _ = std::fs::remove_file(bundled_dir().join(name));
+        }
     }
 }
 
@@ -84,10 +97,9 @@ fn build_plugin(crate_name: &str) -> std::path::PathBuf {
         "building plugins/{crate_name} failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let lib = crate_name.replace('-', "_");
     let so = shared_target
         .join("debug")
-        .join(format!("libpi_provider_{lib}.{}", plugin_ext()));
+        .join(plugin_file_name(crate_name));
     assert!(so.exists(), "missing cdylib {so:?}");
     so
 }
@@ -97,8 +109,7 @@ fn build_plugin(crate_name: &str) -> std::path::PathBuf {
 /// destination path.
 fn install_bundled(crate_name: &str) -> std::path::PathBuf {
     let so = build_plugin(crate_name);
-    let lib = crate_name.replace('-', "_");
-    let dest = bundled_dir().join(format!("libpi_provider_{lib}.{}", plugin_ext()));
+    let dest = bundled_dir().join(plugin_file_name(crate_name));
     std::fs::copy(&so, &dest).expect("copying the plugin into the bundled dir");
     dest
 }
