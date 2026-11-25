@@ -143,8 +143,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		shuttingDown = true;
 		if (exitScheduled) return;
 		exitScheduled = true;
-		// WP-1007: let an in-flight credential write (rotated token) finish.
-		void modelRuntime?.settleCredentialWrites?.();
 		void (async () => {
 			await new Promise((resolve) => process.stdout.write("", resolve));
 			process.exit(0);
@@ -172,18 +170,13 @@ export async function runBridge({ extensionDirs, agentDir }) {
 
 	// ---- WP-701: extension-registered providers (legacy config form) ----
 
-	// WP-1007: the upstream built-in oauth providers the SIDECAR serves.
-	// Since E3S4/WP-1404 (D15) the core owns `kimi-coding` end-to-end (login,
-	// credential storage, refresh, streaming through its built-in driver) —
-	// the sidecar no longer advertises or routes it (E3S2 pattern); an
-	// off-route `provider_stream` for it falls through to the unknown-
-	// extension-provider rejection below. The other four (their wire APIs —
-	// pi-messages, copilot multi-API, openai-responses — have no core driver
-	// yet) stay sidecar-side until E4S2 (M15 provider plugin platform) is
-	// green — D15 answered 2026-11-24 (the core does all API interactions
-	// incl. logins, as auto-loaded provider libraries); no capability
-	// regression mid-epic (E3 sequencing rule).
-	const OAUTH_BUILTIN_PROVIDERS = ["radius", "github-copilot", "xai", "meta"];
+	// E4S2 (M15): the sidecar hosts NO provider API logic. Since E3S4 the
+	// core owns `kimi-coding` end-to-end; since E4S2 the four remaining
+	// oauth builtins (radius, github-copilot, xai, meta) are CORE provider
+	// plugins (<exe dir>/providers/, docs/provider-plugin-abi.md) — the core
+	// does their logins, refresh and streaming (D15). None of them is
+	// advertised or routed here; an off-route `provider_stream` for one
+	// falls through to the unknown-extension-provider rejection below.
 
 	// ready/providers_changed `providers` payload: [{name, models:[{provider,id,api,name?}]}].
 	const providersPayload = () => {
@@ -213,29 +206,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 					...(m.name && m.name !== m.id ? { name: m.name } : {}),
 				})),
 		}));
-		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
-		// still serves (extension-registered providers keep priority — this
-		// only adds what the extension layer did not already claim).
-		// kimi-coding is absent: core-owned since E3S4 (D15).
-		const builtinOauth = (modelRuntime?.getProviders?.() ?? [])
-			.filter((p) => OAUTH_BUILTIN_PROVIDERS.includes(p.id) && !state.nativeProviders.has(p.id) && !state.providers.has(p.id))
-			.map((p) => ({
-				name: p.id,
-				// Runtime providers are the upstream Provider object form (no
-				// static `models` field) — same shape as the native branch.
-				models: (p.getModels?.() ?? [])
-				.filter((m) => m?.id)
-				.map((m) => ({
-					provider: p.id,
-					id: m.id,
-					api: m.api,
-					...(m.name && m.name !== m.id ? { name: m.name } : {}),
-				})),
-			}));
 		// WP-1402/E3S2: the agent dir's models.json providers are NO LONGER
 		// advertised here — the core owns them (E3S1: parsed natively, its
 		// openai-completions models served by the built-in driver, D11).
-		return [...legacy, ...native, ...builtinOauth];
+		// The four oauth builtins are likewise core-owned (E3S4/E4S2 —
+		// kimi-coding core-native, the other four core plugins).
+		return [...legacy, ...native];
 	};
 
 	// WP-1005: capture the native Provider OBJECT form (upstream
@@ -349,32 +325,10 @@ export async function runBridge({ extensionDirs, agentDir }) {
 			forwardStream(streamId, stream, full);
 			return;
 		}
-		// WP-1007/E3S4: the upstream built-in oauth providers the sidecar
-		// still serves (radius, github-copilot, xai, meta). The stream runs in
-		// the upstream runtime, whose auth resolution refreshes an expired
-		// stored credential (5-min validity margin, per-provider flow) and
-		// writes the rotated token back to auth.json — sidecar-side, unmodified
-		// upstream code. kimi-coding is core-owned (E3S4): it is not in the
-		// list, so its provider_stream falls through to the rejection below.
-		if (modelRuntime && OAUTH_BUILTIN_PROVIDERS.includes(model.provider)) {
-			const providerDef = modelRuntime.getProviders().find((p) => p.id === model.provider);
-			const builtin = (providerDef?.getModels?.() ?? []).find((m) => m?.id === model.id);
-			if (!builtin) {
-				return output(response(id, "provider_stream", false, undefined, `builtin provider ${model.provider} has no model ${model.id} (catalog may still be empty until the first authenticated refresh)`));
-			}
-			const streamId = command.streamId ?? crypto.randomUUID();
-			output(response(id, "provider_stream", true, { ok: true, streamId }));
-			let stream;
-			try {
-				stream = modelRuntime.streamSimple(builtin, { messages: command.messages ?? [] }, { ...(command.options ?? {}) });
-			} catch (err) {
-				stream = (async function* () {
-					yield providerErrorEvent(builtin, err instanceof Error ? err : new Error(String(err)));
-				})();
-			}
-			forwardStream(streamId, stream, builtin);
-			return;
-		}
+		// E4S2: the four oauth builtins (radius, github-copilot, xai, meta)
+		// are core provider plugins — not routed here. A `provider_stream`
+		// for one is a core routing error and falls through to the
+		// unknown-extension-provider rejection below.
 		// WP-1402/E3S2: models.json providers are not routed here any more —
 		// the core serves its own models.json models (E3S1, D11). A
 		// provider_stream for one of them is a core routing error; the
@@ -551,7 +505,12 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		return extension;
 	}
 
-	let modelRuntime = null; // WP-1007: upstream runtime for the builtin oauth providers
+	// E4S2 (M15): the upstream ModelRuntime is GONE — the four remaining
+	// oauth builtins (radius, github-copilot, xai, meta) are core provider
+	// plugins (their wire APIs — pi-messages, copilot multi-API,
+	// openai-responses — live in <exe dir>/plugins, D15). The sidecar is the
+	// final js/ts-extensions-only host: no provider catalog, no streaming,
+	// no credential writes, no models.json access (D11 holds trivially).
 
 	// ---- init: load extensions with the original loader, bind the runner
 	async function handleInit(command) {
@@ -587,21 +546,6 @@ export async function runBridge({ extensionDirs, agentDir }) {
 		loaded.errors.forEach((e) => log(`extension load error ${e.path}: ${e.error}`));
 		session = createSessionView(cwd);
 		runner = new ca.ExtensionRunner(extensions, loaded.runtime, cwd, session.sessionManager, modelRegistryStub);
-
-		// WP-1007: the upstream runtime for the built-in oauth providers. No
-		// network at creation (static catalogs stay, dynamic ones stay empty
-		// until the first authenticated refresh after login).
-		// D11 (E3S5 follow-up, PO 2026-11-24): `modelsPath: null` — the
-		// runtime does NOT load the agent dir's models.json at all (the core
-		// owns the file, E3S1; the sidecar has no direct models.json access).
-		// The four oauth builtins come from the upstream runtime's builtin
-		// catalog (independent of models.json, verified against the pinned
-		// model-runtime.ts: builtinProviderCatalog.builtinProviders()).
-		modelRuntime = await ca.ModelRuntime.create({ modelsPath: null, allowModelNetwork: false, signal: AbortSignal.timeout(15_000) });
-
-		// WP-1402/E3S2 + D11: the agent dir's models.json is the CORE's
-		// config (E3S1) — the runtime above is created with modelsPath: null,
-		// so the sidecar neither reads nor uses it.
 
 		// E3S5: the built-in mcp extension is REMOVED — the sidecar hosts no
 		// MCP servers (the core is the single source of truth for MCP, D13).

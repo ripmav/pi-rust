@@ -1,0 +1,28 @@
+# Radius provider plugin (E4S2/WP-1502): port of the upstream
+# `radiusProvider` (pinned upstream 64a15f4) — wire API `pi-messages`
+# (gateway /v1/messages) + the gateway device-code oauth flow
+# (upstream `auth/oauth/radius.ts`). Standalone crate (own workspace) like
+# plugin-samples/openai-compat; built on demand by the e2e
+# (tests/provider_oauth_plugins.rs), ships as a bundled plugin
+# (<exe dir>/providers/).
+[package]
+name = "pi-provider-radius"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Own workspace root: excluded from the parent (pi-rust) workspace so the
+# normal build/test/clippy never compile it (same isolation as the sample).
+[workspace]
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# Async client + rustls (the e2e mock is plain http; the real provider
+# needs https) + form (the device-code/token endpoints are form-POST).
+# Same versions as the sample.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "form"] }
+futures-util = "0.3"

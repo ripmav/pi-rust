@@ -98,10 +98,13 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
 - Protocol: **bridge protocol v0** — NDJSON over stdio, framing and event
   shapes borrowed from upstream's own headless RPC mode. Full spec:
   [`docs/bridge-protocol.md`](docs/bridge-protocol.md).
-- **Provider plugins (M15, WP-1501):** provider implementations can also
-  ship as Rust cdylibs loaded in-process by the core — see
+- **Provider plugins (M15, WP-1501/WP-1502):** provider implementations can
+  also ship as Rust cdylibs loaded in-process by the core — see
   [Provider plugins](#provider-plugins-m15-wp-1501) below and the ABI
   reference [`docs/provider-plugin-abi.md`](docs/provider-plugin-abi.md).
+  Since WP-1502 (E4S2) the four oauth builtins — radius, github-copilot,
+  xai, meta — ship this way (bundled in `<exe dir>/providers/`), so they
+  work without Node.
 - Upstream pin: `earendil-works/pi @ 64a15f4` (shallow clone in `upstream/`,
   gitignored). The sidecar imports the built `dist/`, so **upstream must be
   built** before running (below). Bumping the pin may require re-checking the
@@ -134,8 +137,9 @@ milestone (all milestone stacks are merged into `main`):
 | custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints — no extension shim required) | ✅ M13/M14 (core-native since E3S1; the M13 sidecar route was removed in E3S2) |
 | core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; since E3S2 the sidecar no longer advertises or routes models.json providers, and since the E3S5 follow-up the sidecar's `ModelRuntime` runs with `modelsPath: null` — no direct models.json access at all, D11) | ✅ M14 (E3S1/E3S2 + E3S5 follow-up) |
 | core-native MCP hosting (the core connects + drives the configured `mcpServers` itself — stdio + streamable HTTP, upstream naming/schemas/exposure, native tool execution, works with the sidecar degraded; since E3S5 the core is the ONLY MCP connector, and since the E3S5 follow-up also the extension-registered ones (`pi.registerMcpServer` forwarded over the bridge, `mcp_servers_change` carries the full set); `oauth`/`auth` servers are skipped with a warning, D17) | ✅ M14 (E3S3/E3S5 + E3S5 follow-up) |
-| core-native oauth builtins (`kimi-coding` end-to-end: device-flow account login, auth.json storage, token refresh + rotated write-back, streaming through the built-in driver — no Node, works with the sidecar degraded; the other four stay sidecar-side until E4S2 (M15) is green — D15 answered 2026-11-24) | ✅ M14 (E3S4/E3S5) |
-| sidecar mcp hosting removed + E3 end-state sidecar-degraded regression (the core is the single source of truth for MCP — the sidecar hosts no MCP servers; a Node-free run carries providers + MCP + the core-owned oauth builtin; the four wire-API-less oauth builtins stay sidecar-side until E4S2, M15) | ✅ M14 (E3S5) |
+| core-native oauth builtins (`kimi-coding` end-to-end: device-flow account login, auth.json storage, token refresh + rotated write-back, streaming through the built-in driver — no Node, works with the sidecar degraded; the other four — radius, github-copilot, xai, meta — since E4S2 (M15) run as **provider plugins** with the same core-side login/refresh/storage, D15 answered 2026-11-24) | ✅ M14 (E3S4/E3S5) + M15 (E4S2) |
+| sidecar mcp hosting removed + E3 end-state sidecar-degraded regression (the core is the single source of truth for MCP — the sidecar hosts no MCP servers; a Node-free run carries providers + MCP + the core-owned oauth builtin) | ✅ M14 (E3S5) |
+| **final sidecar form: js/ts-extensions-only** (the four wire-API-less oauth builtins' sidecar advertise/route branches removed in E4S2, M15 — they are core provider plugins now; a Node-free run streams all five oauth builtins) | ✅ M15 (E4S2) |
 | `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 (config servers core-hosted since E3S3; extension-registered servers are forwarded to the core since the E3S5 follow-up — the core hosts them exactly like config servers, a failed forward is a typed extension-side error) |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |
@@ -143,14 +147,12 @@ milestone (all milestone stacks are merged into `main`):
 | RPC mode (upstream NDJSON command protocol) | ✅ M8 |
 | headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
 | `ctx.ui.custom` (descriptor pane: title/lines/list/input, live updates, keys; dialog-like timeout) | ✅ M10 (TUI; headless keeps the upstream noOp — WP-707 subset, full component model stays a non-goal) |
-| `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10/M14 (`kimi-coding` is core-native since E3S4 — device-flow account login, auth.json storage, refresh + rotated write-back and streaming all in the Rust core, works with the sidecar degraded; the other four — radius, github-copilot, xai, meta — log in through the node helper and stream through the sidecar's upstream runtime as before, until E4S2 (M15) makes them core plugins — D15 answered 2026-11-24) |
+| `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10/M14 (`kimi-coding` is core-native since E3S4 — device-flow account login, auth.json storage, refresh + rotated write-back and streaming all in the Rust core, works with the sidecar degraded; the other four — radius, github-copilot, xai, meta — since E4S2 (M15) log in through their **provider plugins** (device-code flow, the user code is printed) and stream through the plugin's wire API(s) — core-driven end-to-end, no Node, D15 answered 2026-11-24) |
 | project `.pi/` config under the trust gate (D8 project skills now; the settings merge + project MCP are WP-1103) | ✅ M11 (gate, flags, `/trust`, store — WP-1102; settings merge + project MCP — WP-1103) |
 
 Evaluated, documented v0 limits: `ctx.ui.custom` full component model (mouse, focus trees, overlays — WP-707 decision memo in
 `odd/tasks/m7-extension-completeness.md`; the descriptor subset ships in M10), bundled extensions beyond `mcp`
-(WP-708), oauth credentials consumed by the core's built-in drivers (kimi-coding is
- core-native since E3S4; the other four: typed rejection — no core wire-API driver yet; they
-stream sidecar-side until E4S2 (M15) — D15/E4), `AWS_PROFILE`
+(WP-708), `AWS_PROFILE`
 (typed rejection). Full out-of-scope list:
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
@@ -275,6 +277,25 @@ symbol `pi_provider_plugin_init`, a 9-slot C vtable, JSON payloads,
   credential store.
 - **Trust (v0):** plugins run in-process with the same trust level as
   compiled-in builtins (your own dirs) — no sandbox.
+- **The four oauth builtins ship as plugins (E4S2):**
+  `plugins/radius/`, `plugins/github-copilot/`, `plugins/xai/`,
+  `plugins/meta/` — standalone crates like the sample (the normal
+  `cargo build` never compiles them; the e2e `tests/provider_oauth_plugins.rs`
+  builds them on demand and ships them next to the test binary, the
+  `<exe dir>/providers/` layout a release uses). They implement the pinned
+  upstream's provider logic: **xai** (device-code login, OpenAI-responses
+  wire), **meta** (device-code login + the Muse Code key-mint — the minted
+  key ≈24 h is the access token, the identity token is the refresh
+  material; OpenAI-responses wire), **radius** (gateway device-code login,
+  pi-messages wire; the upstream browser/PKCE login is not ported — device
+  flow only), **github-copilot** (GitHub device-code → copilot token
+  exchange → model catalog fetch → policy enable; one of three wire APIs
+  per model — OpenAI-responses / OpenAI-completions / Anthropic-messages).
+  Logins are core-driven over the same ABI (`auth login <p> --no-browser`
+  prints the device code — the pending payload's `code` field, E4S2);
+  expiry uses the stored RAW `expires` and the core's 5-minute validity
+  margin, and an expired credential refreshes through the plugin (ABI
+  refresh request) with rotated write-back to `auth.json`.
 - **Reference plugin:** `plugin-samples/openai-compat/` (crate
   `pi-sample-compat`, provider `sample-compat`) — a standalone crate (the
   normal `cargo build` never compiles it); the e2e builds it on demand:

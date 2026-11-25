@@ -179,8 +179,13 @@ fn plugin_json(s: &str, name: &str) -> Result<Value> {
 #[derive(Debug)]
 pub enum AuthStatus {
     /// The handshake is in flight; `url` is where the user signs in
-    /// (the core prints it and optionally opens a browser).
-    Pending { url: Option<String> },
+    /// (the core prints it and optionally opens a browser). `code` is the
+    /// optional one-time code the device-code flows show (ABI v1 pending
+    /// payload extension, E4S2 — absent for plugins without a code).
+    Pending {
+        url: Option<String>,
+        code: Option<String>,
+    },
     /// The credential material for the core to store in auth.json
     /// (upstream credential shape, e.g. `{"type":"api_key","key":...}`).
     Done { credential: Value },
@@ -192,6 +197,7 @@ fn parse_auth_status(v: &Value, name: &str) -> Result<AuthStatus> {
     match v.get("state").and_then(Value::as_str) {
         Some("pending") => Ok(AuthStatus::Pending {
             url: v.get("url").and_then(Value::as_str).map(str::to_string),
+            code: v.get("code").and_then(Value::as_str).map(str::to_string),
         }),
         Some("done") => Ok(AuthStatus::Done {
             credential: v
@@ -407,6 +413,7 @@ impl PluginSet {
                     plugin.name, plugin.name, plugin.name
                 )
             })?;
+        let credential = refresh_if_expired(plugin, agent_dir, credential)?;
         Ok(ProviderDriver::Plugin(Arc::new(PluginDriver {
             plugin: Arc::clone(plugin),
             model,
@@ -434,12 +441,61 @@ pub fn resolve_plugin_credential(name: &str, agent_dir: &Path) -> Result<Option<
         let key = crate::auth::resolve_api_key(name, agent_dir)?;
         return Ok(Some(serde_json::json!({ "type": "api_key", "key": key })));
     }
-    if let Some(cred) = crate::oauth::stored(agent_dir, name)? {
-        return Ok(Some(
-            serde_json::json!({ "type": "oauth", "access": cred.access }),
-        ));
+    // E4S2: the full stored oauth entry — plugins read `access` plus their
+    // own extras (github-copilot's `enterpriseUrl`); the refresh path
+    // below hands the same entry to the plugin.
+    crate::oauth::stored_raw(agent_dir, name)
+}
+
+/// E4S2 core-side refresh: when the stored oauth credential is inside the
+/// 5-minute validity margin (`crate::oauth::is_expired`) the core asks the
+/// plugin to refresh it — `auth_start` with
+/// `{"action":"refresh","credential":{...}}` (the full stored entry) — and
+/// the core writes the rotated credential back to auth.json (upstream
+/// shape). Same lifecycle as kimi-coding (E3S4); the protocol steps stay in
+/// the plugin, and plugins without a refresh implementation report
+/// `failed` (typed error, run stops — no silent stale-token request).
+fn refresh_if_expired(
+    plugin: &Arc<LoadedPlugin>,
+    agent_dir: &Path,
+    credential: Value,
+) -> Result<Value> {
+    if credential.get("type").and_then(Value::as_str) != Some("oauth") {
+        return Ok(credential);
     }
-    Ok(None)
+    let Some(stored) = crate::oauth::stored(agent_dir, &plugin.name)? else {
+        return Ok(credential);
+    };
+    if !crate::oauth::is_expired(&stored) {
+        return Ok(credential);
+    }
+    let request = serde_json::json!({
+        "action": "refresh",
+        "credential": credential,
+    });
+    match plugin.auth(true, &request.to_string())? {
+        AuthStatus::Done {
+            credential: rotated,
+        } => {
+            crate::auth::save_credential(agent_dir, &plugin.name, &rotated)?;
+            // The rotated entry (full shape, incl. provider extras) is what
+            // the stream request carries — the plugin reads `access` plus
+            // its own fields.
+            Ok(rotated)
+        }
+        AuthStatus::Failed { error } => {
+            anyhow::bail!(
+                "OAuth refresh for {} failed ({error}) — the stored credential may be dead; run `pi-rust auth login {}` to sign in again",
+                plugin.name, plugin.name
+            )
+        }
+        AuthStatus::Pending { .. } => {
+            anyhow::bail!(
+                "provider plugin {}: refresh did not complete synchronously",
+                plugin.name
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

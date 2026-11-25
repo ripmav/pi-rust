@@ -85,8 +85,11 @@ schema, camelCase — the same shape `models.json` uses):
 }
 ```
 
-`credential` is core-resolved (auth.json; `{"type":"api_key","key":...}` or
-`{"type":"oauth","access":...}`) — the plugin consumes it, never stores it.
+`credential` is core-resolved (auth.json). For an API-key credential the
+plugin gets `{"type":"api_key","key":...}`; for an oauth credential it gets
+the **full stored entry** (E4S2: `{"type":"oauth","access":...,"refresh":...,"expires":...}`
+plus provider-specific extras — e.g. github-copilot's `enterpriseUrl` /
+`availableModelIds`). The plugin consumes it, never stores it.
 
 **`stream_open`** returns `{"handle": "..."}` (opaque to the core,
 NUL-terminated) or `{"error": "..."}`.
@@ -117,24 +120,51 @@ parked).
 ## Login (`auth_start` / `auth_status`)
 
 The core owns the login UX and `auth.json`; the plugin only performs
-protocol steps. v0 request JSON: `{}` (empty object).
+protocol steps. Request JSON: `{}` (empty object — start a login) or a
+refresh request (below).
 
 Status JSON (both functions):
 
 ```json
-{"state": "pending", "url": "http://127.0.0.1:PORT/callback"}
+{"state": "pending", "url": "http://127.0.0.1:PORT/callback", "code": "ABCD-1234"}
 {"state": "done", "credential": { "type": "api_key", "key": "..." }}
 {"state": "failed", "error": "user cancelled"}
 ```
 
 - `pending.url`: the core prints it (and opens a browser unless
   `--no-browser`).
+- `pending.code` (optional, E4S2): the one-time code of device-code flows
+  — the core prints `To continue, visit {url} and enter code {code}`
+  (absent for plugins without a code). ABI-compatible extension of the
+  v1 pending payload.
 - `done.credential`: **the core stores it** in `auth.json`
   (`crate::auth::save_credential`) — upstream credential shape
   (`{"type":"api_key","key":...}`, `{"type":"oauth","access":...}`, …).
   The plugin must never write the credential store itself.
 - The core polls `auth_status` (500 ms interval, 15 min budget) until
   `done` / `failed`.
+
+### Refresh (E4S2)
+
+When a run starts with a stored oauth credential inside the 5-minute
+validity margin (the core's `is_expired` rule — one margin for all
+providers, E3S4 semantics), the core asks the plugin to refresh it:
+
+```json
+// request to `auth_start`
+{
+  "action": "refresh",
+  "credential": { "type": "oauth", "access": "...", "refresh": "...", "expires": 1, "...": "full stored entry" }
+}
+```
+
+The plugin answers **synchronously** (no pending state):
+`{"state":"done","credential":{...rotated...}}` or
+`{"state":"failed","error":"..."}`. On `done` the core writes the rotated
+credential back to auth.json (upstream shape, other entries preserved) and
+the stream request carries the rotated entry. Plugins without a refresh
+implementation answer `failed` — the run stops with a typed error pointing
+at `pi-rust auth login <provider>` (no silent stale-token request).
 
 ## Error convention
 

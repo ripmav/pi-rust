@@ -60,10 +60,14 @@ flowchart LR
   naming, exposure, native execution); a failed forward is a typed
   extension-side error, and the core's `mcp_servers_change` forward carries
   the full set (configured + extension-registered). Owns the oauth builtin
-  it can natively stream (`kimi-coding`, E3S4,
-  [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs));
-  the other four stay sidecar-side until E4S2 (M15, D15 answered
-  2026-11-24).
+  it streams compiled-in (`kimi-coding`, E3S4,
+  [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs))
+  and, since E4S2 (M15), the other four oauth builtins (radius,
+  github-copilot, xai, meta) as **provider plugins** — auto-loaded cdylibs
+  (ABI v1, `docs/provider-plugin-abi.md`) from `<exe dir>/providers/`
+  (bundled) + `<agentDir>/providers/` (user): the core drives their
+  device-flow logins, refreshes (ABI refresh request) and streams.
+  `kimi-coding` stays compiled-in (E4S3 descoped by the PO).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
@@ -81,10 +85,11 @@ flowchart LR
   mcp extension +
   `mcpConfig` registration path are gone (the core is the single source of
   truth for MCP, D13); since E3S4 it no longer advertises or routes the
-  `kimi-coding` oauth builtin (core-owned — D15) and keeps its oauth
-  branches for the other four builtins (radius, github-copilot, xai, meta)
-  until E4S2 (M15 provider plugin platform) is green (D15 answered
-  2026-11-24). Its remaining built-in extension hosting
+  `kimi-coding` oauth builtin (core-owned — D15), and since E4S2 (M15)
+  neither for the other four (radius, github-copilot, xai, meta) — those
+  are core provider plugins now, so the sidecar's final form is
+  **js/ts-extensions-only** (D15 answered 2026-11-24). Its remaining
+  built-in extension hosting
   (tool-search/llama/codemode) is itself js/ts and stays until its own
   core-native stories, if the user wants them.
 - **Bridge:** NDJSON over stdio,

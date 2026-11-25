@@ -341,10 +341,16 @@ async fn plugin_account_login(
     let mut status = status;
     loop {
         match &status {
-            crate::provider::plugin::AuthStatus::Pending { url } => {
+            crate::provider::plugin::AuthStatus::Pending { url, code } => {
                 if !url_printed {
                     if let Some(u) = url {
-                        println!("Sign in: {u}");
+                        if let Some(c) = code {
+                            // Device-code flows: the code is what the user
+                            // enters (upstream loginKimiCoding UX).
+                            println!("To continue, visit {u} and enter code {c}");
+                        } else {
+                            println!("Sign in: {u}");
+                        }
                         if !no_browser {
                             open_browser(u);
                         }

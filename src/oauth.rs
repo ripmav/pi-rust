@@ -95,10 +95,13 @@ pub fn is_expired(cred: &OauthCredential) -> bool {
 // ---------------------------------------------------------------------------
 // Credential store (auth.json)
 
-/// Reads the stored credential for `provider` (typed error on a malformed
-/// auth.json; `None` when the file or entry is absent, or the entry is not
-/// an oauth credential).
-pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential>> {
+/// Reads the stored oauth entry for `provider` as raw JSON (typed error on
+/// a malformed auth.json; `None` when the file or entry is absent, or the
+/// entry is not an oauth credential). The raw form keeps provider-specific
+/// extras (e.g. github-copilot's `enterpriseUrl`) that the typed
+/// [`OauthCredential`] drops — the E4S2 plugin refresh passes the full
+/// entry to the plugin.
+pub fn stored_raw(agent_dir: &Path, provider: &str) -> Result<Option<Value>> {
     let path = agent_dir.join("auth.json");
     if !path.exists() {
         return Ok(None);
@@ -113,21 +116,29 @@ pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential
     if cred.get("type").and_then(Value::as_str) != Some("oauth") {
         return Ok(None);
     }
+    for field in ["access", "refresh", "expires"] {
+        let has = match field {
+            "expires" => cred.get("expires").and_then(Value::as_i64).is_some(),
+            _ => cred.get(field).and_then(Value::as_str).is_some(),
+        };
+        if !has {
+            anyhow::bail!("auth.json {provider} credential has no `{field}`");
+        }
+    }
+    Ok(Some(cred.clone()))
+}
+
+/// Reads the stored credential for `provider` (typed error on a malformed
+/// auth.json; `None` when the file or entry is absent, or the entry is not
+/// an oauth credential).
+pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential>> {
+    let Some(cred) = stored_raw(agent_dir, provider)? else {
+        return Ok(None);
+    };
     Ok(Some(OauthCredential {
-        access: cred
-            .get("access")
-            .and_then(Value::as_str)
-            .with_context(|| format!("auth.json {provider} credential has no `access`"))?
-            .to_string(),
-        refresh: cred
-            .get("refresh")
-            .and_then(Value::as_str)
-            .with_context(|| format!("auth.json {provider} credential has no `refresh`"))?
-            .to_string(),
-        expires: cred
-            .get("expires")
-            .and_then(Value::as_i64)
-            .with_context(|| format!("auth.json {provider} credential has no `expires`"))?,
+        access: cred["access"].as_str().unwrap().to_string(),
+        refresh: cred["refresh"].as_str().unwrap().to_string(),
+        expires: cred["expires"].as_i64().unwrap(),
     }))
 }
 

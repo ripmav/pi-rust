@@ -323,19 +323,19 @@ async function main() {
 		const smokeProv = ready.providers?.find((p) => p?.name === "smokeprovider");
 		check(
 			"ready providers are objects with model entries",
-			Array.isArray(ready.providers) && ready.providers.length === 7 &&
+			Array.isArray(ready.providers) && ready.providers.length === 3 &&
 				ready.providers.every((p) => p && typeof p.name === "string" && Array.isArray(p.models)),
 			ready.providers,
 		);
-		// WP-1007: the upstream built-in oauth providers the SIDE-CAR serves are
-		// exposed from the upstream runtime (static catalogs; radius may be
-		// empty until the first authenticated refresh — only presence + shape
-		// are asserted). Since E3S4/WP-1404 (D15) kimi-coding is core-owned
-		// and not advertised here (pinned by the negative check below).
+		// E4S2 (M15): the four remaining oauth builtins (radius,
+		// github-copilot, xai, meta) are CORE provider plugins — the core
+		// does their logins, refresh and streaming (D15); kimi-coding has
+		// been core-owned since E3S4. NONE of them is advertised here (the
+		// sidecar hosts no provider API logic in its final form).
 		check(
-			"builtin oauth providers exposed (radius, github-copilot, xai, meta)",
-			["radius", "github-copilot", "xai", "meta"].every(
-				(name) => ready.providers?.some((p) => p?.name === name && Array.isArray(p.models) && p.models.length > 0),
+			"oauth builtins NOT advertised (core-owned since E3S4/E4S2: kimi-coding, radius, github-copilot, xai, meta)",
+			["kimi-coding", "radius", "github-copilot", "xai", "meta"].every(
+				(name) => !ready.providers?.some((p) => p?.name === name),
 			),
 			ready.providers?.map((p) => p?.name),
 		);
@@ -754,15 +754,14 @@ async function main() {
 		const code5 = await Promise.race([core5.exited, new Promise((r) => setTimeout(() => r("timeout"), 10000))]);
 		check("shortcut sidecar clean exit 0", code5 === 0, code5);
 
-		// (o) D11 (E3S5 follow-up, PO 2026-11-24): the sidecar's upstream
-		// ModelRuntime is created with `modelsPath: null` — no direct
-		// models.json access at all (the core owns the file, E3S1). Pin 1:
-		// a models.json that OVERLAYS a builtin (adds a model to xai) must
-		// not reach the runtime — with the pre-D11 call (modelsPath defaulting
-		// to <agentDir>/models.json) the composed xai provider would
-		// advertise the overlay model. Pin 2: a MALFORMED models.json still
-		// starts normally (acceptance: present/malformed = no different for
-		// the sidecar).
+		// (o) D11 (E3S5 follow-up, PO 2026-11-24): the sidecar has NO direct
+		// models.json access at all (the core owns the file, E3S1). Since
+		// E4S2 there is no upstream ModelRuntime in the sidecar at all, so the
+		// isolation holds trivially — the pins keep asserting the observable
+		// shape: Pin 1: a models.json that OVERLAYS a former builtin (xai) and
+		// defines a new provider must not be advertised. Pin 2: a MALFORMED
+		// models.json still starts normally (acceptance: present/malformed =
+		// no different for the sidecar).
 		const D11_SCRATCH = `export default function (pi) {
 	pi.registerFlag("d11-probe", { type: "boolean", default: true });
 }
@@ -807,9 +806,9 @@ async function main() {
 		const ready6 = await core6.nextEvent((e) => e.type === "ready", "ready (D11 overlay)");
 		const xai6 = ready6.providers?.find((p) => p?.name === "xai");
 		check(
-			"D11: models.json overlay does NOT reach the runtime (xai catalog pure)",
-			Boolean(xai6) && xai6.models.length > 0 && !xai6.models.some((m) => m.id === "xai/smoke-overlay"),
-			xai6?.models?.map((m) => m.id),
+			"D11: models.json overlay does NOT reach the sidecar (xai not advertised — core-owned since E4S2)",
+			!xai6 && !ready6.providers?.some((p) => p?.models?.some((m) => m?.id === "xai/smoke-overlay")),
+			ready6.providers?.map((p) => p?.name),
 		);
 		check(
 			"D11: models.json provider not advertised (smokemj2)",
@@ -839,9 +838,9 @@ async function main() {
 		check("D11 sidecar init (models.json malformed)", init7.success === true, init7);
 		const ready7 = await core7.nextEvent((e) => e.type === "ready", "ready (D11 malformed)");
 		check(
-			"D11: builtin oauth providers intact with a malformed models.json",
+			"D11: oauth builtins still NOT advertised with a malformed models.json (core-owned since E4S2)",
 			["radius", "github-copilot", "xai", "meta"].every(
-				(name) => ready7.providers?.some((p) => p?.name === name && p.models.length > 0),
+				(name) => !ready7.providers?.some((p) => p?.name === name),
 			),
 			ready7.providers?.map((p) => p?.name),
 		);
