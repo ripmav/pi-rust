@@ -592,7 +592,7 @@ above) — pi-rust sessions open in pi and vice versa.
 
 ## Releases
 
-Releases are cut by [release-please](https://github.com/google-github-actions/release-please) (`.github/release-please-config.json`): conventional commits on `main` open a release PR that bumps the root `Cargo.toml` version and writes the next `CHANGELOG.md` section; merging the release PR cuts the `vX.Y.Z` tag and the GitHub release. Release notes are generated from the commit messages (v1.0.0 and earlier have hand-written notes).
+Releases are cut by [release-please](https://github.com/google-github-actions/release-please) (`.github/release-please-config.json`): conventional commits on `main` open a release PR that bumps the root `Cargo.toml` version and writes the next `CHANGELOG.md` section; merging the release PR cuts the `vX.Y.Z` tag and the GitHub release. Release notes are generated from the commit messages (v1.0.0 and earlier have hand-written notes). Note: release-please creates the tag via the GitHub API, which does not fire the tag-push event, so the release workflow (`.github/workflows/release.yml`) is not triggered automatically — if the release has no assets, trigger it manually from the Actions tab (workflow_dispatch, tag input).
 
 The `pi-ext` crate keeps its own version (not yet published) and the `sidecar` package is private — neither is bumped by the release PR.
 
