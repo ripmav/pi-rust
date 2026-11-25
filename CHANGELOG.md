@@ -5,6 +5,42 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## [1.2.0](https://github.com/ripmav/pi-rust/compare/v1.1.0...v1.2.0) (2026-11-25)
+
+
+### Features
+
+* core-native MCP hosting (WP-1403, E3S3) ([e5eb6b1](https://github.com/ripmav/pi-rust/commit/e5eb6b1c79238391be65ada580c5e0c22e1bf737))
+* core-native models.json + OpenAI-compatible streaming (WP-1401, E3S1) ([9efadf0](https://github.com/ripmav/pi-rust/commit/9efadf00dccb1e08872c0f2356e60daff89229a4))
+* core-native oauth builtins (WP-1404, E3S4) ([c8ad94f](https://github.com/ripmav/pi-rust/commit/c8ad94f8cc55259bb5c1ea548fd26e48439afbce))
+* core-native oauth builtins (WP-1404, E3S4) ([14c2d73](https://github.com/ripmav/pi-rust/commit/14c2d736787fedcdb47f84cb18dff86019f3a128))
+* custom providers from models.json (WP-1301, E2S1) ([4760431](https://github.com/ripmav/pi-rust/commit/47604317d8ffb12ecd5943a9862bb6e1a99337af))
+* E3S5 follow-up — D11 (modelsPath: null) + D13 (registerMcpServer forward) (WP-1405) ([0088a93](https://github.com/ripmav/pi-rust/commit/0088a93b15c837e44bf0c5d03c6c2929896f5e27))
+* provider plugin ABI v1 + directory loader (WP-1501, E4S1) ([3b42f27](https://github.com/ripmav/pi-rust/commit/3b42f271cda99d60ae0a08dc362bd2ba6d5e75dc))
+* radius/github-copilot/xai/meta as core provider plugins (E4S2) ([a8f5da3](https://github.com/ripmav/pi-rust/commit/a8f5da34368c3805db0f840b7a5a35f91bbed977))
+* radius/github-copilot/xai/meta as core provider plugins (WP-1502, E4S2) ([2747c63](https://github.com/ripmav/pi-rust/commit/2747c63bb3241afd28b6698180f39c387e77c1ce))
+
+
+### Bug Fixes
+
+* c_char-independent CStr reads (u8 &lt;-&gt; c_char placeholder cast) ([cc0cd2d](https://github.com/ripmav/pi-rust/commit/cc0cd2d650c0644abecb64bccea707002cf8f69b))
+* c_char-independent FFI pointers + platform cdylib exts in plugin tests ([44c0920](https://github.com/ripmav/pi-rust/commit/44c092092e82052d0e5a9fba7e188dcad418e4d9))
+* convert extension custom messages before every LLM call (upstream parity) ([cf88e16](https://github.com/ripmav/pi-rust/commit/cf88e165399917de40137e94e3ffca57b684f971))
+* convert extension custom messages before every LLM call (upstream parity) ([26ed9ba](https://github.com/ripmav/pi-rust/commit/26ed9ba894f13bfa22cd352b53f4af54d43ac94c))
+* e2e plugin cdylib name — Windows has no lib prefix ([97bfd5e](https://github.com/ripmav/pi-rust/commit/97bfd5ef85197964a142cd1bffeb27a7b1330271))
+* e2e plugin cdylib uses the platform extension (.so/.dylib/.dll) ([a4e063f](https://github.com/ripmav/pi-rust/commit/a4e063febc29cdc0544b83c7bd29bf72682effe8))
+* image-capability e2e no longer depends on models.dev drift ([90e2c2c](https://github.com/ripmav/pi-rust/commit/90e2c2c2a008f2a9b2ab11972b0279c68814d1d1))
+* keep idle RSS at the WP-905 baseline (lazy effective registry) ([4122b7e](https://github.com/ripmav/pi-rust/commit/4122b7e37fb04f8334981a49bc5beb47a1b205f6))
+* models.json review fixes — upstream defaults, E3S2 pin, dead field, shared string-skip (WP-1402) ([0a1c238](https://github.com/ripmav/pi-rust/commit/0a1c238b59adee77348696c8199dff202ea367a7))
+* point GitHub releases at their tags so release-please can compute commits ([7fe77cc](https://github.com/ripmav/pi-rust/commit/7fe77cc6262de63b37991d52aea1f7d62d30ee73))
+* re-bundle stale upstream catalog in CI (WP-1403 incident) ([8a0bc77](https://github.com/ripmav/pi-rust/commit/8a0bc77b9481fd7a370f7ef6a891a1b5275a71a5))
+* re-point the registry drift test at the committed catalog (D14) ([f669bca](https://github.com/ripmav/pi-rust/commit/f669bcab2047ce0e56f0001af4b64147898d200f))
+* rebase onto main — task log line break (L17/L18) + duplicate serde import ([1eda58a](https://github.com/ripmav/pi-rust/commit/1eda58a5cf11b885ee0de98b37d84927a775f17d))
+* refresh-catalog step dies under set -e/pipefail on cold builds ([32f4cae](https://github.com/ripmav/pi-rust/commit/32f4cae77afbf3d936735a7f45f17d34e0a830ab))
+* **release-please:** manifest root component is "", not "." ([b524403](https://github.com/ripmav/pi-rust/commit/b524403e5300548af6b8052ecccb7985eca32900))
+* **release-please:** manifest root component is empty string, not "." ([7909d4d](https://github.com/ripmav/pi-rust/commit/7909d4d500d7ce445063415b059d88e16c907c73))
+* user-override fixture uses the platform cdylib extension ([d71259b](https://github.com/ripmav/pi-rust/commit/d71259bc01506d8f34220331e9cbbe021e1fc3a4))
+
 ## v1.1.0 (2026-11-21)
 
 Milestone M12 (E1S2, 3/6) — Rust extension platform groundwork. No
