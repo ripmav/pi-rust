@@ -156,8 +156,10 @@ impl LoadedPlugin {
 /// of the ABI doc).
 fn cstr_to_string(ptr: *const u8) -> Result<String> {
     // SAFETY: vtable contracts — every non-NULL return is a valid
-    // NUL-terminated UTF-8 string for the duration of the call.
-    let s = unsafe { CStr::from_ptr(ptr) };
+    // NUL-terminated UTF-8 string for the duration of the call. The
+    // `as *const _` reinterprets to `*const c_char` (1-byte type; the
+    // placeholder keeps it correct on every platform).
+    let s = unsafe { CStr::from_ptr(ptr as *const _) };
     s.to_str()
         .map(str::to_string)
         .map_err(|_| anyhow::anyhow!("non-UTF-8 string from the plugin"))

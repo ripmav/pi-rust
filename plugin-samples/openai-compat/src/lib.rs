@@ -97,8 +97,9 @@ fn read_cstr(p: *const u8) -> String {
         return String::new();
     }
     // SAFETY: every pointer the core passes is a valid NUL-terminated UTF-8
-    // string it owns for the duration of the call.
-    unsafe { CStr::from_ptr(p) }
+    // string it owns for the duration of the call. The `as *const _`
+    // reinterprets to `*const c_char` (1-byte type, platform-dependent).
+    unsafe { CStr::from_ptr(p as *const _) }
         .to_str()
         .unwrap_or("")
         .to_string()
@@ -454,7 +455,7 @@ mod tests {
         assert_eq!((vt.abi_version)(), 1);
         assert_eq!((vt.name)(), NAME_BYTES.as_ptr());
         let models: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr((vt.list_models)()) }
+            unsafe { CStr::from_ptr((vt.list_models)() as *const _) }
                 .to_str()
                 .unwrap(),
         )
@@ -467,7 +468,7 @@ mod tests {
     #[test]
     fn login_handshake_reports_done_after_callback() {
         let vt = vt();
-        let started = unsafe { CStr::from_ptr((vt.auth_start)(std::ptr::null())) };
+        let started = unsafe { CStr::from_ptr((vt.auth_start)(std::ptr::null()) as *const _) };
         let st: Value = serde_json::from_str(started.to_str().unwrap()).unwrap();
         assert_eq!(st["state"], "pending");
         let url = st["url"].as_str().unwrap().to_string();
@@ -484,7 +485,7 @@ mod tests {
         // The listener thread sets the credential after answering.
         let mut st = Value::Null;
         for _ in 0..100 {
-            let s = unsafe { CStr::from_ptr((vt.auth_status)(std::ptr::null())) };
+            let s = unsafe { CStr::from_ptr((vt.auth_status)(std::ptr::null()) as *const _) };
             st = serde_json::from_str(s.to_str().unwrap()).unwrap();
             if st["state"] == "done" {
                 break;
