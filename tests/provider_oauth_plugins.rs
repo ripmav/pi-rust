@@ -46,9 +46,23 @@ fn bundled_dir() -> std::path::PathBuf {
     dir
 }
 
+/// The platform cdylib extension (the E4S1 lesson: `.so` is Linux-only —
+/// macOS builds `.dylib`, Windows `.dll`).
+fn plugin_ext() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(target_os = "windows") {
+        "dll"
+    } else {
+        "so"
+    }
+}
+
 fn remove_bundled(crate_name: &str) {
     let lib = crate_name.replace('-', "_");
-    let _ = std::fs::remove_file(bundled_dir().join(format!("libpi_provider_{lib}.so")));
+    for ext in ["so", "dylib", "dll"] {
+        let _ = std::fs::remove_file(bundled_dir().join(format!("libpi_provider_{lib}.{ext}")));
+    }
 }
 
 /// Builds the plugin crate on demand (shared target dir — the four crates
@@ -73,7 +87,7 @@ fn build_plugin(crate_name: &str) -> std::path::PathBuf {
     let lib = crate_name.replace('-', "_");
     let so = shared_target
         .join("debug")
-        .join(format!("libpi_provider_{lib}.so"));
+        .join(format!("libpi_provider_{lib}.{}", plugin_ext()));
     assert!(so.exists(), "missing cdylib {so:?}");
     so
 }
@@ -84,7 +98,7 @@ fn build_plugin(crate_name: &str) -> std::path::PathBuf {
 fn install_bundled(crate_name: &str) -> std::path::PathBuf {
     let so = build_plugin(crate_name);
     let lib = crate_name.replace('-', "_");
-    let dest = bundled_dir().join(format!("libpi_provider_{lib}.so"));
+    let dest = bundled_dir().join(format!("libpi_provider_{lib}.{}", plugin_ext()));
     std::fs::copy(&so, &dest).expect("copying the plugin into the bundled dir");
     dest
 }
