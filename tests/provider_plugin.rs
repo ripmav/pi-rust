@@ -419,7 +419,10 @@ fn e2e_provider_plugin() {
 
     // (4) OVERRIDE — a user-dir plugin with the same name shadows the
     // bundled one (logged); its model list wins wholesale.
-    copy_atomic(&sample, &user_prov.join("libpi-user.so"));
+    copy_atomic(
+        &sample,
+        &user_prov.join(format!("libpi-user.{ext}", ext = plugin_ext())),
+    );
     let (code, _stdout, stderr) = run(
         &[("PI_SAMPLE_VARIANT", "user")],
         &[
