@@ -1,8 +1,9 @@
 //! Model registry: the bundled upstream catalog (WP-302).
 //!
-//! Build time: `build.rs` merges `upstream/packages/ai/src/providers/data/*.json`
-//! into a single JSON blob in OUT_DIR (zero runtime deps on the upstream
-//! tree — the catalog is frozen at build time, matching the upstream pin).
+//! Build time: `build.rs` merges the committed `catalog/data/*.json`
+//! snapshot into a single JSON blob in OUT_DIR (zero runtime deps on the
+//! upstream tree; D14 — the catalog is frozen at the committed snapshot,
+//! refreshed only via the re-pin procedure in `catalog/README.md`).
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -126,13 +127,19 @@ mod tests {
     use super::*;
 
     fn data_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("upstream/packages/ai/src/providers/data")
+        // D14: the committed snapshot is the source of truth — the upstream
+        // tree's data dir is regenerated from the live models.dev API and
+        // may legitimately differ (that drift is the point of the freeze;
+        // refreshing is the re-pin procedure in catalog/README.md).
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/data")
     }
 
     #[test]
-    fn bundled_count_matches_upstream_data() {
-        // Unique `provider/id` keys: upstream lists one model under several
+    fn bundled_count_matches_committed_snapshot() {
+        // Pins the bundled registry to the committed catalog/data snapshot
+        // (catches merge-semantics divergence between build.rs and this
+        // counting — e.g. the dedupe rule below). Unique `provider/id`
+        // keys: upstream lists one model under several
         // api groups (e.g. openai-completions + openai-responses); the
         // registry dedupes per provider/id (api variants matter only for
         // driver dispatch, M4).
@@ -160,7 +167,7 @@ mod tests {
         assert_eq!(
             ModelRegistry::bundled().count(),
             keys.len(),
-            "catalog drift vs upstream data dir"
+            "catalog drift vs the committed snapshot (catalog/data)"
         );
     }
 

@@ -44,7 +44,9 @@ Prerequisites: Rust stable, Node ≥ 26 (the upstream build target), npm.
 ```sh
 git clone https://github.com/ripmav/pi-rust && cd pi-rust
 
-# 1. Build upstream once (the sidecar runs its dist/):
+# 1. Build upstream once (the sidecar runs its dist/ — the bundled model
+# catalog is the committed catalog/data/ snapshot, D14; no npm generation
+# needed for the Rust build):
 mkdir upstream && git -C upstream init && git -C upstream remote add origin https://github.com/earendil-works/pi.git
 git -C upstream fetch --depth 1 origin 64a15f4bee63d761d5398bf4126ea63abef0dc98
 git -C upstream checkout --detach FETCH_HEAD
@@ -110,7 +112,10 @@ cargo run -- --extension-dir upstream/packages/coding-agent/examples/extensions/
   built** before running (below). Bumping the pin may require re-checking the
   import surface (`discoverAndLoadExtensions`, `createEventBus`,
   `ExtensionRunner`, `wrapRegisteredTools`, `buildSystemPrompt`,
-  `normalizeBuildSystemPromptOptions`).
+  `normalizeBuildSystemPromptOptions`). The bundled model catalog is the
+  **committed `catalog/data/` snapshot** (D14, 2026-11-24): deterministic
+  builds, no live models.dev — refresh via the re-pin procedure in
+  [`catalog/README.md`](catalog/README.md).
 
 ## Extension compatibility guide
 

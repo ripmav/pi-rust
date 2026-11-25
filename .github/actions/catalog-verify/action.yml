@@ -1,0 +1,47 @@
+# Verifies that the bundled catalog baked into the restored rust-cache
+# matches the committed `catalog/` snapshot (D14, Option 3 — the catalog is
+# frozen; `catalog/data/` is the single source of truth).
+#
+# Why this exists (WP-1403 incident lineage, 2026-11-23): Swatinem/rust-cache
+# can restore a target/ whose OUT_DIR/models.json was baked from an older
+# state, and cargo's rerun-if-changed compares mtimes — the restored cache
+# files are NEWER than the freshly checked-out repo files, so the stale baked
+# catalog is not detected and the suite runs against the wrong registry
+# ("model not in the registry" failures). With the catalog committed (D14)
+# the race only triggers when a snapshot re-pin lands in a PR whose cache was
+# cut from an earlier commit.
+#
+# Content-based guard: build.rs stamps OUT_DIR/catalog-inputs.sha256
+# (sha256 over the name-sorted `name\0content` stream of catalog/data). This
+# step recomputes it from the checkout; a mismatch (or a cache predating the
+# stamp, i.e. no fingerprint file) drops the pi-rust build-script outputs so
+# the Build step re-runs build.rs. Cold builds (no cached target/) are a
+# no-op. Requires Node (present via upstream-setup in the calling jobs).
+name: Verify bundled catalog against committed snapshot
+runs:
+  using: composite
+  steps:
+    - name: Verify bundled catalog (stale-cache guard)
+      shell: bash
+      run: |
+        echo "committed catalog files: $(find catalog/data -name '*.json' | wc -l)"
+        computed="$(node -e '
+          const fs = require("fs"), path = require("path"), crypto = require("crypto");
+          const h = crypto.createHash("sha256");
+          const dir = "catalog/data";
+          for (const f of fs.readdirSync(dir).filter((f) => !f.startsWith(".") && f.endsWith(".json")).sort()) {
+            h.update(f); h.update("\0"); h.update(fs.readFileSync(path.join(dir, f)));
+          }
+          process.stdout.write(h.digest("hex"));
+        ')"
+        for outdir in target/debug/build/pi-rust-*/out target/release/build/pi-rust-*/out; do
+          [ -d "$outdir" ] || continue
+          [ -f "$outdir/models.json" ] || continue
+          if [ -f "$outdir/catalog-inputs.sha256" ] && [ "$(cat "$outdir/catalog-inputs.sha256")" = "$computed" ]; then
+            entries="$(node -p "Object.keys(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))).length" "$outdir/models.json" 2>/dev/null || echo unreadable)"
+            echo "baked catalog is current ($entries entries)"
+          else
+            echo "baked catalog is STALE or unverified — dropping pi-rust build outputs so build.rs re-runs"
+            rm -rf "$(dirname "$outdir")"
+          fi
+        done
