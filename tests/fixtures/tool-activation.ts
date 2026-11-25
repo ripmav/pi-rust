@@ -11,6 +11,11 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
+	// E3S5: the built-in mcp extension (removed with the sidecar's mcp path)
+	// used to be the before_agent_start subscriber that made the core send
+	// the decision in this run; the fixture subscribes itself so the
+	// selectedTools declaration assertions stay observable.
+	pi.on("before_agent_start", async (_event, _ctx) => {});
 	pi.registerTool(
 		defineTool({
 			name: "find_deferred",

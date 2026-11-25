@@ -6,9 +6,11 @@
  *   data { selectedTools } (the tool set declared to the model — the
  *   exposure rule: `direct` in, `codemode`/`deferred` out)
  * - mcp_servers_change -> customType "wp1403-mcp-change"
- *   data { servers } (the core forwards its configured servers to the
- *   sidecar after session_start, so subscribing extensions still see the
- *   change — D13 coexistence)
+ *   data { servers } (the core forwards its FULL set — configured +
+ *   extension-registered, E3S5 follow-up — to the sidecar: the one-time
+ *   event after session_start plus a fresh one after every successful
+ *   runtime registration, so subscribing extensions see the complete set
+ *   — D13)
  *
  * Test-only fixture, not an unmodified upstream extension.
  */

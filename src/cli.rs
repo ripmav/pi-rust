@@ -542,27 +542,22 @@ pub async fn run() -> Result<i32> {
     }
     // E3S3/WP-1403: the core hosts the configured MCP servers itself (D13):
     // parse + validate here (an invalid entry is skipped with a logged
-    // warning, never fatal — upstream load-error semantics); the sidecar
-    // receives only the `oauth`/`auth` subset at init (below).
+    // warning, never fatal — upstream load-error semantics). Since
+    // E3S5/WP-1405 the core is the ONLY connector — the sidecar hosts no
+    // MCP servers at all (its built-in mcp extension + mcpConfig path are
+    // removed).
     let (mcp_host, mcp_parse_warnings) = crate::mcp::McpHost::new(mcp_config.as_ref(), &cwd);
     for w in mcp_parse_warnings {
         crate::corelog::line(&format!("[core] {w}"));
     }
     let mcp_host = Arc::new(mcp_host);
-    // The configured servers as the `mcp_servers_change` payload for the
-    // sidecar (D13: subscribing extensions still observe the core's set;
-    // the sidecar's built-in mcp extension ignores it — it connects only
-    // servers extensions register).
-    let mcp_server_entries: Vec<Value> = mcp_config
-        .as_ref()
-        .and_then(|c| c.get("mcpServers"))
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .map(|(n, e)| json!({ "name": n, "config": e.clone() }))
-                .collect()
-        })
-        .unwrap_or_default();
+    // The `mcp_servers_change` payload for the sidecar comes from the host
+    // itself at fire time (`mcp_host.server_entries()`) — so it carries the
+    // core's FULL set: the configured servers PLUS any extension-registered
+    // servers that arrived via the `mcp_server_register` forward before the
+    // session-start one-shot (E3S3: a user extension subscribing to it
+    // still observes the core's set; since E3S5 the sidecar hosts no MCP
+    // servers — the event is a pure notification).
     // WP-1401/E3S1: the agent dir's models.json — core-native custom
     // providers (the solheim case). Missing file = no-op; malformed = typed
     // error, the run continues with the bundled catalog (logged, not fatal).
@@ -833,27 +828,10 @@ pub async fn run() -> Result<i32> {
     };
     let mut init =
         json!({"protocolVersion":6,"capabilities":{"ui":ui_methods,"timeoutMs":INIT_TIMEOUT_MS}});
-    // E3S3 (D13): the core OWNS the configured MCP servers — they connect
-    // through the core host (below), so the sidecar's registry stays empty
-    // and its built-in mcp extension only connects servers extensions
-    // register with `pi.registerMcpServer` (no double-connect). The one
-    // exception: servers carrying `oauth`/`auth` fields — the core cannot
-    // authenticate them yet (E3S4) — stay in the sidecar's mcpConfig so
-    // they keep working while the sidecar is alive (no mid-epic
-    // regression). The sidecar still accepts a non-empty `mcpConfig` — its
-    // path stays until E3S5.
-    let sidecar_mcp_servers: serde_json::Map<String, Value> = mcp_config
-        .as_ref()
-        .and_then(|c| c.get("mcpServers"))
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter(|(_, e)| e.get("oauth").is_some() || e.get("auth").is_some())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    init["mcpConfig"] = json!({ "mcpServers": sidecar_mcp_servers });
+    // E3S5/WP-1405 (D13 final form): no `mcpConfig` in init any more — the
+    // core hosts every configured server itself (including the
+    // `oauth`/`auth` ones it skips with a warning, D17) and the sidecar's
+    // registration path is gone.
     // WP-1102 (D2): the trust gate for project-scoped resources (the sidecar
     // excludes project extensions when untrusted).
     init["projectTrusted"] = json!(project_trusted);
@@ -1036,12 +1014,15 @@ pub async fn run() -> Result<i32> {
                 json!({"type":"session_start","event":{"type":"session_start","reason":"startup"}}),
             );
         }
-        // E3S3 (D13): forward the core-owned configured servers as
+        // E3S3 (D13): forward the core-owned servers as
         // mcp_servers_change, so an extension subscribing to it still sees
         // the change (the sidecar used to emit it on registration at init).
+        // E3S5 follow-up: the host's full set — configured + extension-
+        // registered (the `mcp_server_register` forward) — for observable
+        // parity.
         if !mcp_host.is_empty() {
             client.fire(
-                json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":mcp_server_entries}}),
+                json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":mcp_host.server_entries()}}),
             );
         }
     }

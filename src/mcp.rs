@@ -20,17 +20,20 @@
 //!   session start; NO auto-restart (a crashed server reconnects lazily
 //!   on the next call, fresh process); close on session shutdown.
 //!
-//! Coexistence with the sidecar (D13): the core OWNS the config servers,
-//! except servers carrying `oauth`/`auth` fields (the core cannot
-//! authenticate them yet — E3S4): those stay in the sidecar's `mcpConfig`
-//! so they keep working while the sidecar is alive. For every other server
-//! the core is the only connection (nothing is double-connected); the
-//! sidecar's built-in mcp extension additionally connects servers
-//! extensions register with `pi.registerMcpServer` (sidecar-only source,
-//! until E3S5).
+//! Ownership (D13, final form E3S5): the core is the ONLY connector of
+//! MCP servers — the sidecar hosts no MCP servers any more (its built-in
+//! mcp extension + the `mcpConfig` registration path were removed in
+//! E3S5), so nothing is double-connected. Servers carrying `oauth`/`auth`
+//! fields are skipped with a warning (the core cannot authenticate them
+//! yet — D17, and no host remains). `pi.registerMcpServer` registrations
+//! by user extensions are FORWARDED to the core over the bridge
+//! (`mcp_server_register`, additive in protocol v6 — E3S5 follow-up) and
+//! hosted exactly like configured servers; a rejected forward (invalid
+//! entry, duplicate, `oauth`/`auth` — D17) is a typed error the sidecar
+//! surfaces to the extension.
 //!
-//! v0 core limits (the sidecar still serves these while alive; E3S4/E3S5
-//! revisit): OAuth/`auth` server fields (typed skip), resource tools,
+//! v0 core limits (the sidecar serves none of these any more — E3S5):
+//! OAuth/`auth` server fields (typed skip), resource tools,
 //! the `/mcp` manager, the `mcp_servers` prompt section, and
 //! codemode/deferred reachability (no core codemode/tool_search — such
 //! tools are registered but only reachable by explicit name).
@@ -88,6 +91,15 @@ pub struct ServerConfig {
     /// Tool-name (or `*` pattern) -> exposure overrides.
     pub tool_exposure: BTreeMap<String, String>,
     pub timeout_secs: u64,
+    /// The original JSON entry (mcp.json / the forwarded
+    /// `registerMcpServer` config) — the `mcp_servers_change` payload
+    /// shape (upstream `RegisteredMcpServer.config`). Null for test
+    /// configs that never cross the wire.
+    pub raw: Value,
+    /// Set for servers an extension registered (`pi.registerMcpServer`
+    /// forwarded over the bridge) — the upstream
+    /// `RegisteredMcpServer.extensionPath` field.
+    pub extension_path: Option<String>,
 }
 
 /// `*`-pattern match (upstream `toolPatternRegExp`): `*` matches any
@@ -373,7 +385,7 @@ fn parse_http(ctx: &str, obj: &serde_json::Map<String, Value>) -> Result<Kind, S
     Ok(Kind::Http { url, headers })
 }
 
-/// Parses + validates the merged mcp config (the `mcpConfig` value).
+/// Parses + validates the merged mcp config (the `mcpServers` value).
 /// Returns (servers, warnings): an invalid entry is skipped with a
 /// message naming it, never fatal (upstream: load errors are collected,
 /// the session continues).
@@ -394,7 +406,7 @@ pub fn parse_servers(cfg: Option<&Value>) -> (Vec<ServerConfig>, Vec<String>) {
         };
         if obj.get("oauth").is_some() || obj.get("auth").is_some() {
             warnings.push(format!(
-                "{ctx}: oauth/auth is not supported by the core yet (E3S4) — server skipped"
+                "{ctx}: oauth/auth is not supported by the core yet (D17) — server skipped (the sidecar no longer hosts MCP servers, E3S5)"
             ));
             continue;
         }
@@ -494,6 +506,8 @@ pub fn parse_servers(cfg: Option<&Value>) -> (Vec<ServerConfig>, Vec<String>) {
             exposure,
             tool_exposure,
             timeout_secs,
+            raw: entry.clone(),
+            extension_path: None,
         });
     }
     (servers, warnings)
@@ -1175,6 +1189,92 @@ impl McpHost {
 
     pub fn is_empty(&self) -> bool {
         self.inner.servers.lock().unwrap().is_empty()
+    }
+
+    /// Runtime registration of a server (a user extension's
+    /// `pi.registerMcpServer`, forwarded by the sidecar — D13 final form,
+    /// E3S5 follow-up): the core hosts it exactly like a configured
+    /// server (same stdio/streamable-HTTP transports, naming, exposure,
+    /// native execution). `entry` is the mcp.json entry shape (the
+    /// sidecar sends the upstream-validated config). Typed errors: a
+    /// closed host, a duplicate name (v0: no replace — the sidecar's
+    /// registry enforces the upstream ownership/clash rules), an
+    /// `oauth`/`auth` entry (D17 — the core cannot authenticate it, no
+    /// host remains), or an invalid entry. A server added before
+    /// `start()` connects there; one added after connects at once.
+    pub fn register_server(
+        &self,
+        name: &str,
+        entry: &Value,
+        extension_path: Option<&str>,
+    ) -> Result<(), String> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("the MCP host is closed (session shutdown)".into());
+        }
+        // One synthetic config map: reuses the configured-server parse /
+        // validation exactly (incl. the D17 oauth/auth skip, which here
+        // surfaces as the single warning = the typed error).
+        let (servers, warnings) = parse_servers(Some(&json!({ "mcpServers": { name: entry } })));
+        let mut cfg = servers
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| {
+                warnings
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| format!("mcp server \"{name}\": invalid entry"))
+            })?;
+        cfg.extension_path = extension_path.map(str::to_string);
+        let pump_running = self.inner.update_rx.lock().unwrap().is_none();
+        {
+            let mut g = self.inner.servers.lock().unwrap();
+            if g.contains_key(name) {
+                return Err(format!("mcp server \"{name}\" is already registered"));
+            }
+            let state = if cfg.enabled {
+                ConnState::Starting
+            } else {
+                ConnState::Disabled
+            };
+            g.insert(
+                name.to_string(),
+                Server {
+                    cfg,
+                    state,
+                    error: None,
+                    tools: Vec::new(),
+                    gen: Gen(0),
+                    actor: None,
+                    done: None,
+                },
+            );
+        }
+        // The update pump is live (start() has run): connect now. Before
+        // start() the session-start sweep picks the server up.
+        if pump_running && self.server_enabled(name) {
+            let _ = self.start_attempt(name);
+        }
+        Ok(())
+    }
+
+    /// Every registered server as the `mcp_servers_change` payload:
+    /// `[{ name, config, extensionPath? }]` — the configured servers plus
+    /// the extension-registered ones (the core's full set; the core is the
+    /// single source of truth for MCP, D13).
+    pub fn server_entries(&self) -> Vec<Value> {
+        self.inner
+            .servers
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| {
+                let mut e = json!({ "name": s.cfg.name, "config": s.cfg.raw });
+                if let Some(p) = &s.cfg.extension_path {
+                    e["extensionPath"] = json!(p);
+                }
+                e
+            })
+            .collect()
     }
 }
 
@@ -2118,6 +2218,8 @@ mod tests {
             exposure: exposure.into(),
             tool_exposure,
             timeout_secs: 60,
+            raw: Value::Null,
+            extension_path: None,
         }
     }
 
@@ -2445,5 +2547,117 @@ mod tests {
             Some(("other".into(), "x".into()))
         );
         assert_eq!(host.server_prefix_of("read"), None);
+    }
+
+    // --- runtime registration (registerMcpServer forward, D13 follow-up) ---
+
+    #[test]
+    fn register_server_stdio_inserts_and_exposes_entry() {
+        let (host, _) = McpHost::new(None, Path::new("."));
+        let entry = json!({ "command": "node", "args": ["server.mjs"], "exposure": "direct" });
+        host.register_server("ext", &entry, Some("/exts/fixture.ts"))
+            .unwrap();
+        let cfg = host.server_config("ext").expect("server not registered");
+        assert!(matches!(cfg.kind, Kind::Stdio { .. }), "{:?}", cfg.kind);
+        assert_eq!(cfg.exposure, "direct");
+        assert_eq!(cfg.extension_path.as_deref(), Some("/exts/fixture.ts"));
+        // The mcp_servers_change payload carries name + the raw entry + owner.
+        let entries = host.server_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["name"], "ext");
+        assert_eq!(entries[0]["config"]["command"], "node");
+        assert_eq!(entries[0]["extensionPath"], "/exts/fixture.ts");
+    }
+
+    #[test]
+    fn register_server_http_inserts() {
+        let (host, _) = McpHost::new(None, Path::new("."));
+        host.register_server(
+            "remote",
+            &json!({ "url": "http://127.0.0.1:1/mcp", "headers": { "Authorization": "Bearer x" } }),
+            None,
+        )
+        .unwrap();
+        let cfg = host.server_config("remote").expect("server not registered");
+        assert!(matches!(cfg.kind, Kind::Http { .. }), "{:?}", cfg.kind);
+        // Configured servers carry no extensionPath (absent on the wire).
+        assert!(host.server_entries()[0].get("extensionPath").is_none());
+    }
+
+    #[test]
+    fn register_server_duplicate_is_typed_error() {
+        let (host, _) = McpHost::new(None, Path::new("."));
+        let entry = json!({ "command": "node" });
+        host.register_server("dup", &entry, None).unwrap();
+        let err = host
+            .register_server("dup", &json!({ "command": "other" }), None)
+            .unwrap_err();
+        assert!(err.contains("already registered"), "{err}");
+    }
+
+    #[test]
+    fn register_server_oauth_auth_is_typed_rejection() {
+        // D17: the core cannot authenticate oauth/auth servers — a forwarded
+        // registration is a typed error (the sidecar surfaces it to the
+        // extension), not a silent inert entry.
+        let (host, _) = McpHost::new(None, Path::new("."));
+        let err = host
+            .register_server(
+                "o",
+                &json!({ "url": "https://mcp.example.com", "oauth": {} }),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("D17"), "{err}");
+        assert!(host.is_empty());
+        let err = host
+            .register_server(
+                "a",
+                &json!({ "url": "http://127.0.0.1:1/mcp", "auth": { "provider": "openai" } }),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("D17"), "{err}");
+        assert!(host.is_empty());
+    }
+
+    #[test]
+    fn register_server_invalid_entries_are_typed_errors() {
+        let (host, _) = McpHost::new(None, Path::new("."));
+        // No command and no url.
+        let err = host
+            .register_server("bad", &json!({ "exposure": "direct" }), None)
+            .unwrap_err();
+        assert!(err.contains("needs \"command\""), "{err}");
+        // Both command and url.
+        let err = host
+            .register_server(
+                "bad2",
+                &json!({ "command": "node", "url": "http://127.0.0.1:1" }),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("exactly one"), "{err}");
+        // Bad exposure value.
+        let err = host
+            .register_server(
+                "bad3",
+                &json!({ "command": "node", "exposure": "loud" }),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("exposure"), "{err}");
+        assert!(host.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_server_after_close_is_typed_error() {
+        let (host, _) = McpHost::new(None, Path::new("."));
+        let host = Arc::new(host);
+        host.close().await;
+        let err = host
+            .register_server("late", &json!({ "command": "node" }), None)
+            .unwrap_err();
+        assert!(err.contains("closed"), "{err}");
     }
 }

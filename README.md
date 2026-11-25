@@ -132,24 +132,25 @@ milestone (all milestone stacks are merged into `main`):
 | TUI: themes, keybindings, pickers, slash commands, print/json modes | ✅ M6 |
 | `registerProvider` (custom providers invoked) | ✅ M7 |
 | custom providers from `~/.pi/agent/models.json` (OpenAI-compatible endpoints — no extension shim required) | ✅ M13/M14 (core-native since E3S1; the M13 sidecar route was removed in E3S2) |
-| core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; since E3S2 the sidecar no longer advertises or routes models.json providers) | ✅ M14 (E3S1/E3S2) |
-| core-native MCP hosting (the core connects + drives the configured `mcpServers` itself — stdio + streamable HTTP, upstream naming/schemas/exposure, native tool execution, works with the sidecar degraded; `oauth`/`auth` servers stay sidecar-hosted until E3S4 — D13) | ✅ M14 (E3S3) |
-| core-native oauth builtins (`kimi-coding` end-to-end: device-flow account login, auth.json storage, token refresh + rotated write-back, streaming through the built-in driver — no Node, works with the sidecar degraded; the other oauth builtins stay sidecar-side until the core has their wire APIs — D15) | ✅ M14 (E3S4) |
-| `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 (sidecar-side for extension-registered servers; the core hosts the config servers since E3S3) |
+| core-native `models.json` (the core parses the JSONC itself and streams `openai-completions` providers through the built-in driver — no Node/sidecar needed; since E3S2 the sidecar no longer advertises or routes models.json providers, and since the E3S5 follow-up the sidecar's `ModelRuntime` runs with `modelsPath: null` — no direct models.json access at all, D11) | ✅ M14 (E3S1/E3S2 + E3S5 follow-up) |
+| core-native MCP hosting (the core connects + drives the configured `mcpServers` itself — stdio + streamable HTTP, upstream naming/schemas/exposure, native tool execution, works with the sidecar degraded; since E3S5 the core is the ONLY MCP connector, and since the E3S5 follow-up also the extension-registered ones (`pi.registerMcpServer` forwarded over the bridge, `mcp_servers_change` carries the full set); `oauth`/`auth` servers are skipped with a warning, D17) | ✅ M14 (E3S3/E3S5 + E3S5 follow-up) |
+| core-native oauth builtins (`kimi-coding` end-to-end: device-flow account login, auth.json storage, token refresh + rotated write-back, streaming through the built-in driver — no Node, works with the sidecar degraded; the other four stay sidecar-side until E4S2 (M15) is green — D15 answered 2026-11-24) | ✅ M14 (E3S4/E3S5) |
+| sidecar mcp hosting removed + E3 end-state sidecar-degraded regression (the core is the single source of truth for MCP — the sidecar hosts no MCP servers; a Node-free run carries providers + MCP + the core-owned oauth builtin; the four wire-API-less oauth builtins stay sidecar-side until E4S2, M15) | ✅ M14 (E3S5) |
+| `registerMcpServer` (real MCP transport: stdio + HTTP) | ✅ M7/M8 (config servers core-hosted since E3S3; extension-registered servers are forwarded to the core since the E3S5 follow-up — the core hosts them exactly like config servers, a failed forward is a typed extension-side error) |
 | compaction events + auto-compaction | ✅ M7 |
 | `registerShortcut` (wired TUI actions) | ✅ M7 |
 | skills (`SKILL.md` discovery, `/skill:<name>`) | ✅ M8 |
 | RPC mode (upstream NDJSON command protocol) | ✅ M8 |
 | headless-safe API slice: `pi.events`, `registerMcpServer`, dialogs with upstream defaults | ✅ M1 (no-TTY runs answer with upstream defaults) |
 | `ctx.ui.custom` (descriptor pane: title/lines/list/input, live updates, keys; dialog-like timeout) | ✅ M10 (TUI; headless keeps the upstream noOp — WP-707 subset, full component model stays a non-goal) |
-| `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10/M14 (`kimi-coding` is core-native since E3S4 — device-flow account login, auth.json storage, refresh + rotated write-back and streaming all in the Rust core, works with the sidecar degraded; the other four — radius, github-copilot, xai, meta — stay sidecar-routed with sidecar-side refresh, no token crosses the wire — D15) |
+| `auth login` (terminal login flow, upstream unmodified) + oauth credentials (login, use, refresh) | ✅ M10/M14 (`kimi-coding` is core-native since E3S4 — device-flow account login, auth.json storage, refresh + rotated write-back and streaming all in the Rust core, works with the sidecar degraded; the other four — radius, github-copilot, xai, meta — log in through the node helper and stream through the sidecar's upstream runtime as before, until E4S2 (M15) makes them core plugins — D15 answered 2026-11-24) |
 | project `.pi/` config under the trust gate (D8 project skills now; the settings merge + project MCP are WP-1103) | ✅ M11 (gate, flags, `/trust`, store — WP-1102; settings merge + project MCP — WP-1103) |
 
 Evaluated, documented v0 limits: `ctx.ui.custom` full component model (mouse, focus trees, overlays — WP-707 decision memo in
 `odd/tasks/m7-extension-completeness.md`; the descriptor subset ships in M10), bundled extensions beyond `mcp`
 (WP-708), oauth credentials consumed by the core's built-in drivers (kimi-coding is
- core-native since E3S4; the other four: typed rejection — the
-sidecar-routed models of those providers work), `AWS_PROFILE`
+ core-native since E3S4; the other four: typed rejection — no core wire-API driver yet; they
+stream sidecar-side until E4S2 (M15) — D15/E4), `AWS_PROFILE`
 (typed rejection). Full out-of-scope list:
 [`docs/bridge-protocol.md` §Out of scope](docs/bridge-protocol.md).
 
@@ -221,8 +222,9 @@ projects only, pi-rust now also reads the two config files:
   `-`/`_`-conflicting namespaces are rejected; top-level
   `autoEnableCodemode` overrides the global. Rejected entries are
   logged and skipped; the session keeps the valid servers. Since E3S3 the
-  merged config is **hosted by the core** (the sidecar receives only the
-  `oauth`/`auth` servers it can still authenticate — D13).
+  merged config is **hosted by the core**, which since E3S5 is the only
+  MCP connector (the sidecar hosts no MCP servers; `oauth`/`auth` servers
+  are skipped with a warning — D13/D17).
 
 For **untrusted** projects neither file is read at all (zero effect —
 the earlier documented non-goals for project `.pi/` config are now

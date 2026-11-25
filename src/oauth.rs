@@ -3,8 +3,13 @@
 //!
 //! v0 owns exactly `kimi-coding` — the one oauth builtin whose wire API
 //! (`openai-completions`) a built-in driver speaks. The other four (radius,
-//! github-copilot, xai, meta) stay sidecar-side (login + stream) until the
-//! core has their wire APIs (D15).
+//! github-copilot, xai, meta) have no core driver for their wire APIs yet:
+//! they stay sidecar-side (login via the node helper `sidecar/auth-login.mjs`,
+//! streaming through the sidecar's upstream runtime) until E4S2 (M15
+//! provider plugin platform) is green — D15 answered by the PO 2026-11-24
+//! ("API interaktionen, auch logins soll der core machen" — the core does
+//! all API interactions incl. logins, as auto-loaded provider libraries); no
+//! capability regression mid-epic (E3 sequencing rule).
 //!
 //! Upstream protocol/credential semantics (pinned 64a15f4), mirrored here:
 //! - `packages/ai/src/auth/oauth/kimi-coding.ts` — RFC 8628 device-code
@@ -28,7 +33,8 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-/// The only oauth builtin the core serves natively in v0 (D15).
+/// The only oauth builtin the core serves natively in v0 (D15: the core
+/// owns what it can stream; the other four stay sidecar-side until E4S2).
 pub const KIMI_CODING: &str = "kimi-coding";
 
 /// Upstream `kimi-coding.ts` constants (pinned 64a15f4).
@@ -547,6 +553,20 @@ mod tests {
         d
     }
 
+    // The tests below set the process-wide KIMI_CODE_OAUTH_HOST /
+    // KIMI_OAUTH_HOST env vars (each pointing at its own random-port mock).
+    // Rust runs tests as parallel threads in one process, so without
+    // serialization a test's HTTP call can hit a SIBLING test's mock (CI
+    // cross-talk: 404/400/401 from a sibling's queued script — the
+    // 2026-11-24 macos-latest failure of the three refresh tests). Every
+    // env-touching test holds this lock for its whole body.
+    static KIMI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialize the KIMI_* env-var tests (see `KIMI_ENV_LOCK`).
+    fn lock_kimi_env() -> std::sync::MutexGuard<'static, ()> {
+        KIMI_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Queued-response HTTP mock: each accepted connection gets the next
     /// (status, json-body) pair; every request line + body is recorded.
     fn mock(responses: Vec<(u16, &str)>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -710,6 +730,7 @@ mod tests {
 
     #[test]
     fn resolve_fresh_credential_skips_network() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let cred = OauthCredential {
             access: "valid-access".into(),
@@ -731,6 +752,7 @@ mod tests {
 
     #[test]
     fn resolve_expired_credential_refreshes_and_writes_back() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -763,6 +785,7 @@ mod tests {
 
     #[test]
     fn refresh_retries_transient_then_succeeds() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -789,6 +812,7 @@ mod tests {
 
     #[test]
     fn refresh_unauthorized_fails_without_retry_and_without_material() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -821,7 +845,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_happy_path_saves_credential() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let device = r#"{"device_code":"dev-1","user_code":"KIMI-TEST","verification_uri":"__CB__","verification_uri_complete":"__CB2__","interval":1,"expires_in":60}"#;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -862,7 +891,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_denied_is_typed() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let (base, _recorded) = mock(vec![
             (
@@ -880,7 +914,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_expired_token_is_typed() {
+        let _env = lock_kimi_env();
         let (base, _recorded) = mock(vec![
             (
                 200,
@@ -895,8 +934,13 @@ mod tests {
         std::env::remove_var("KIMI_CODE_OAUTH_HOST");
     }
 
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn untrusted_verification_uri_is_rejected() {
+        let _env = lock_kimi_env();
         let (base, _recorded) = mock(vec![(
             200,
             r#"{"device_code":"dev-1","user_code":"U","verification_uri":"file:///etc/passwd","verification_uri_complete":"http://127.0.0.1/cb","interval":1,"expires_in":60}"#,
@@ -910,6 +954,7 @@ mod tests {
 
     #[test]
     fn host_override_env_wins_and_strips_trailing_slash() {
+        let _env = lock_kimi_env();
         std::env::set_var("KIMI_CODE_OAUTH_HOST", "http://127.0.0.1:1/");
         assert_eq!(kimi_oauth_host(), "http://127.0.0.1:1");
         std::env::remove_var("KIMI_CODE_OAUTH_HOST");

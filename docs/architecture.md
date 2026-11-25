@@ -46,31 +46,47 @@ flowchart LR
   already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
   Hosts **all** MCP servers itself — the configured ones (agent-dir
-  `mcp.json` + trusted project `.pi/mcp.json`) and those extensions register
-  via `pi.registerMcpServer` (the sidecar forwards the registration to the
-  core from E3S5; the sidecar hosts no MCP servers at all) — the core is the
-  **single source of truth for MCP (D13, answered by the PO 2026-11-24)**.
-  E3S3: JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/
-  exposure, native tool execution; until E3S5 the `oauth`/`auth` config
-  servers stay sidecar-side as the documented interim (D13).
+  `mcp.json` + trusted project `.pi/mcp.json`, E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
+  JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
+  native tool execution) — the core is the **single source of truth for
+  MCP (D13, answered by the PO 2026-11-24)**: from E3S5 the sidecar hosts
+  no MCP servers at all (its built-in mcp extension + `mcpConfig` path are
+  removed); until E3S5 the `oauth`/`auth` config servers stayed
+  sidecar-side as the documented interim — since E3S5 the core skips
+  them with a logged warning (no host remains; D17). Extension
+  `pi.registerMcpServer` registrations are forwarded to the core over the
+  bridge (`mcp_server_register`, additive in protocol v6 — E3S5 follow-up)
+  and hosted by the core exactly like configured servers (same transports,
+  naming, exposure, native execution); a failed forward is a typed
+  extension-side error, and the core's `mcp_servers_change` forward carries
+  the full set (configured + extension-registered). Owns the oauth builtin
+  it can natively stream (`kimi-coding`, E3S4,
+  [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs));
+  the other four stay sidecar-side until E4S2 (M15, D15 answered
+  2026-11-24).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
-  the js/ts-extension compatibility layer (E3: its built-in extension
-  hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
-  E3S2 it no longer reads or routes the agent dir's `models.json` — model
-  providers are the core's (E3S1) — and the core is the **single source of
-  truth for models.json (D11, answered by the PO 2026-11-24)**: from E3S5
-  the sidecar's `ModelRuntime` is created with `modelsPath: null` (no direct
-  file access at all); if the sidecar ever needs models.json data, the core
-  passes it via the `init` payload (the E3S3 `mcpConfig` pattern); since E3S3 its built-in mcp extension
-  connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
-  config servers the core still cannot host (documented interim — from E3S5
-  the sidecar hosts NO MCP servers at all: `registerMcpServer` calls are
-  forwarded to the core, D13); since E3S4 it no
-  longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
-  D15) and keeps its oauth branches for the other four builtins (radius,
-  github-copilot, xai, meta) until they are core-native (E3S5).
+  the js/ts-extension compatibility layer. Since E3S2 it no longer reads or
+  routes the agent dir's `models.json`, and since the E3S5 follow-up (D11,
+  PO 2026-11-24) it has no direct models.json access **at all** — the
+  sidecar's upstream `ModelRuntime` is created with `modelsPath: null`
+  (the runtime skips the load; its builtin oauth catalog is independent of
+  the file) — model providers are the core's (E3S1), and the core is the
+  **single source of truth for models.json (D11, answered by the PO
+  2026-11-24)**: the bridge never uses models.json data; if the sidecar
+  ever needs it, the core passes it via the `init` payload. Its only MCP
+  duty is to forward `pi.registerMcpServer` registrations to the core
+  (`mcp_server_register` — the core hosts them, D13). Since E3S5 its built-in
+  mcp extension +
+  `mcpConfig` registration path are gone (the core is the single source of
+  truth for MCP, D13); since E3S4 it no longer advertises or routes the
+  `kimi-coding` oauth builtin (core-owned — D15) and keeps its oauth
+  branches for the other four builtins (radius, github-copilot, xai, meta)
+  until E4S2 (M15 provider plugin platform) is green (D15 answered
+  2026-11-24). Its remaining built-in extension hosting
+  (tool-search/llama/codemode) is itself js/ts and stays until its own
+  core-native stories, if the user wants them.
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog
@@ -86,9 +102,9 @@ flowchart LR
 - **Trust:** WP-1102 — untrusted project-scope content has zero behavioral
   effect; the core sends the resolved decision as `init.projectTrusted` and
   the sidecar excludes untrusted project-scope TS extensions. WP-1103: trusted
-  project `.pi/` config (settings, MCP) is applied by the core and passed via
-  `init`. Since E3S3 the core hosts the merged MCP config itself and passes
-  the sidecar only the `oauth`/`auth` entries (D13).
+  project `.pi/` config (settings, MCP) is applied by the core; the core
+  hosts the merged MCP config itself (the sidecar hosts no MCP servers —
+  E3S3/E3S5, D13 final form).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
   respawn); clean shutdown or failed handshake → `Stopped`. A **spawn

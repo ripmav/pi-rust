@@ -185,10 +185,11 @@ pub struct Core {
     pub project_trusted: bool,
     /// E3S3/WP-1403: the core's MCP host — the configured servers (agent-dir
     /// `mcp.json` + the trusted project `.pi/mcp.json`, `config::merge_project_mcp`)
-    /// are connected and driven by the core itself (D13): upstream naming and
-    /// schemas, `direct`-exposure tools declared to the model, calls executed
-    /// natively (no `extension_tool_call` hop). Except `oauth`/`auth` servers
-    /// (E3S4), which the sidecar still hosts while alive.
+    /// are connected and driven by the core itself (D13, final form E3S5 —
+    /// the sidecar hosts no MCP servers): upstream naming and schemas,
+    /// `direct`-exposure tools declared to the model, calls executed
+    /// natively (no `extension_tool_call` hop). `oauth`/`auth` servers are
+    /// skipped with a warning (D17).
     pub mcp: Arc<crate::mcp::McpHost>,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
@@ -592,6 +593,40 @@ pub async fn event_task(
                     }
                 }
                 "tool_call_request" => nested_tool(&ctx, &ev).await,
+                "mcp_server_register" => {
+                    // E3S5 follow-up (D13): a user extension's
+                    // pi.registerMcpServer forwarded by the sidecar — the
+                    // core hosts the server itself (the same path as the
+                    // configured servers: stdio + streamable HTTP, native
+                    // tool execution). Rejection (invalid entry, duplicate,
+                    // oauth/auth — D17) is a typed error response the
+                    // sidecar surfaces to the extension; a successful
+                    // registration re-fires mcp_servers_change with the
+                    // core's FULL set (configured + extension-registered)
+                    // so subscribing extensions observe the change.
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = ev.get("name").and_then(Value::as_str);
+                    let config = ev.get("config").cloned().unwrap_or(Value::Null);
+                    let owner = ev.get("extensionPath").and_then(Value::as_str);
+                    let result = match name {
+                        Some(n) => ctx.mcp.register_server(n, &config, owner),
+                        None => Err("mcp_server_register needs a string name".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            let n = name.unwrap_or_default().to_string();
+                            crate::corelog::line(&format!("[core] mcp: extension-registered server \"{n}\" hosted by the core (D13 forward)"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":true}));
+                            if !ctx.mcp.is_empty() {
+                                ctx.client.fire(json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":ctx.mcp.server_entries()}}));
+                            }
+                        }
+                        Err(e) => {
+                            crate::corelog::line(&format!("[core] mcp: extension registration rejected: {e}"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":false,"error":e}));
+                        }
+                    }
+                }
                 other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
                 }
             }
@@ -810,8 +845,9 @@ async fn run_tool(
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
-    // model-script error (this now covers NON-configured servers — e.g. ones
-    // an extension registers — which stay sidecar-side until E3S5).
+    // model-script error. Since E3S5 this is the graceful path for
+    // `pi.registerMcpServer` servers (no host connects them — D13 final form)
+    // and for hallucinated/unknown `mcp__` names.
     let mcp_name = name.starts_with("mcp__")
         || matches!(
             name,
