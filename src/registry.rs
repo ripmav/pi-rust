@@ -4,7 +4,6 @@
 //! snapshot into a single JSON blob in OUT_DIR (zero runtime deps on the
 //! upstream tree; D14 — the catalog is frozen at the committed snapshot,
 //! refreshed only via the re-pin procedure in `catalog/README.md`).
-use serde::Deserialize;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
