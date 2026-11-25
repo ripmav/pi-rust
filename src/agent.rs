@@ -148,6 +148,10 @@ pub struct Core {
     /// empty when the file is missing or malformed (the run continues with
     /// the bundled catalog).
     pub models_json: Arc<crate::models_json::ModelsJson>,
+    /// E4S1/WP-1501: the provider plugins (bundled + user dirs); their models
+    /// join the registry and their streams route through the vtable (never
+    /// the bridge). Empty set = no plugin dirs.
+    pub plugins: Arc<crate::provider::plugin::PluginSet>,
     /// WP-1401/E3S1: the effective model registry, LAZILY built on first
     /// use (see [`Core::registry`] — the bundled catalog is ~1.1 MB JSON / a
     /// few MB of heap; parsing it at startup would inflate idle RSS past
@@ -181,10 +185,11 @@ pub struct Core {
     pub project_trusted: bool,
     /// E3S3/WP-1403: the core's MCP host — the configured servers (agent-dir
     /// `mcp.json` + the trusted project `.pi/mcp.json`, `config::merge_project_mcp`)
-    /// are connected and driven by the core itself (D13): upstream naming and
-    /// schemas, `direct`-exposure tools declared to the model, calls executed
-    /// natively (no `extension_tool_call` hop). Except `oauth`/`auth` servers
-    /// (E3S4), which the sidecar still hosts while alive.
+    /// are connected and driven by the core itself (D13, final form E3S5 —
+    /// the sidecar hosts no MCP servers): upstream naming and schemas,
+    /// `direct`-exposure tools declared to the model, calls executed
+    /// natively (no `extension_tool_call` hop). `oauth`/`auth` servers are
+    /// skipped with a warning (D17).
     pub mcp: Arc<crate::mcp::McpHost>,
     /// Dialog requests for the TUI (WP-604); headless keeps it unconnected.
     pub ui_tx: mpsc::UnboundedSender<Value>,
@@ -265,15 +270,15 @@ fn decision_data(ctx: &Core, resp: Decision, name: &str, req: &Value, fallback: 
 /// (bidirectional liveness, no head-of-line blocking).
 impl Core {
     /// WP-1401/E3S1: the effective model registry — the bundled catalog
-    /// merged with the core-native models.json models (cost, contextWindow,
-    /// input modality, set_model validation). Lazily built on first use:
-    /// without extras the shared bundled `Arc` is kept (no clone); the
-    /// merged copy exists only when the user's models.json has
-    /// core-native models.
+    /// merged with the core-native models.json models + provider plugin
+    /// models (cost, contextWindow, input modality, set_model validation).
+    /// Lazily built on first use: without extras the shared bundled `Arc` is
+    /// kept (no clone); the merged copy exists only when extras exist.
     pub fn registry(&self) -> &crate::registry::ModelRegistry {
         self.registry_slot
             .get_or_init(|| {
-                let extra = self.models_json.core_models();
+                let mut extra = self.models_json.core_models();
+                extra.extend(self.plugins.all_models());
                 if extra.is_empty() {
                     crate::registry::ModelRegistry::bundled_arc()
                 } else {
@@ -483,6 +488,25 @@ pub async fn event_task(
                                     Ok(None) => reply(false, json!(format!("provider {p} is not buildable at runtime (v0)"))),
                                     Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
                                 }
+                            } else if let Some(pl) = ctx.plugins.provider(&p).cloned() {
+                                // E4S1: a provider plugin — the core builds
+                                // the plugin driver (never the bridge; the
+                                // guard also covers a colliding extension
+                                // registration).
+                                match ctx.plugins.driver(&pl, Some(&m), &ctx.agent_dir) {
+                                    Ok(drv) => {
+                                        let prev = ctx.model.lock().unwrap().0.clone();
+                                        let model = json!({"id":m,"provider":p});
+                                        ctx.model.lock().unwrap().0 = model.clone();
+                                        ctx.session.set_model(&p, &m);
+                                        *ctx.provider.lock().unwrap() = Some(drv);
+                                        reply(true, json!({"ok":true}));
+                                        if subscribed(&ctx, "model_select") {
+                                            ctx.client.fire(json!({"type":"set_model","event":{"type":"model_select","model":model,"previousModel":prev,"source":"set"}}));
+                                        }
+                                    }
+                                    Err(e) => reply(false, json!(format!("cannot switch to {p}/{m}: {e}"))),
+                                }
                             } else if ctx
                                 .ext_models
                                 .lock()
@@ -569,6 +593,40 @@ pub async fn event_task(
                     }
                 }
                 "tool_call_request" => nested_tool(&ctx, &ev).await,
+                "mcp_server_register" => {
+                    // E3S5 follow-up (D13): a user extension's
+                    // pi.registerMcpServer forwarded by the sidecar — the
+                    // core hosts the server itself (the same path as the
+                    // configured servers: stdio + streamable HTTP, native
+                    // tool execution). Rejection (invalid entry, duplicate,
+                    // oauth/auth — D17) is a typed error response the
+                    // sidecar surfaces to the extension; a successful
+                    // registration re-fires mcp_servers_change with the
+                    // core's FULL set (configured + extension-registered)
+                    // so subscribing extensions observe the change.
+                    let id = ev.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let name = ev.get("name").and_then(Value::as_str);
+                    let config = ev.get("config").cloned().unwrap_or(Value::Null);
+                    let owner = ev.get("extensionPath").and_then(Value::as_str);
+                    let result = match name {
+                        Some(n) => ctx.mcp.register_server(n, &config, owner),
+                        None => Err("mcp_server_register needs a string name".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            let n = name.unwrap_or_default().to_string();
+                            crate::corelog::line(&format!("[core] mcp: extension-registered server \"{n}\" hosted by the core (D13 forward)"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":true}));
+                            if !ctx.mcp.is_empty() {
+                                ctx.client.fire(json!({"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":ctx.mcp.server_entries()}}));
+                            }
+                        }
+                        Err(e) => {
+                            crate::corelog::line(&format!("[core] mcp: extension registration rejected: {e}"));
+                            ctx.client.send_unchecked(json!({"id":id,"type":"response","command":"mcp_server_register","success":false,"error":e}));
+                        }
+                    }
+                }
                 other => crate::corelog::line(&format!("[core] ignoring unknown sidecar event: {other}")),
                 }
             }
@@ -787,8 +845,9 @@ async fn run_tool(
     // resource tools) are bridge-routable even when the server never connected
     // (no entry in ext_tools): the sidecar answers "Unknown extension tool" and
     // the call records an error tool result instead of aborting the run as a
-    // model-script error (this now covers NON-configured servers — e.g. ones
-    // an extension registers — which stay sidecar-side until E3S5).
+    // model-script error. Since E3S5 this is the graceful path for
+    // `pi.registerMcpServer` servers (no host connects them — D13 final form)
+    // and for hallucinated/unknown `mcp__` names.
     let mcp_name = name.starts_with("mcp__")
         || matches!(
             name,
@@ -1598,6 +1657,7 @@ async fn model_call<'a>(
     // and the guard also covers a colliding extension registration.
     let ext_model = if ctx.models_json.owner(&p, &mid).is_some()
         || (p == crate::oauth::KIMI_CODING && ctx.provider.lock().unwrap().is_some())
+        || ctx.plugins.provider(&p).is_some()
     {
         None
     } else {
@@ -1688,6 +1748,9 @@ async fn model_call<'a>(
                         d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     Some(ProviderDriver::Bedrock(d)) => {
+                        d.complete(&convo, deltas).await.map_err(|e| e.to_string())
+                    }
+                    Some(ProviderDriver::Plugin(d)) => {
                         d.complete(&convo, deltas).await.map_err(|e| e.to_string())
                     }
                     None => unreachable!("fake_driver is None only while a provider exists"),

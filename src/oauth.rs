@@ -3,8 +3,13 @@
 //!
 //! v0 owns exactly `kimi-coding` — the one oauth builtin whose wire API
 //! (`openai-completions`) a built-in driver speaks. The other four (radius,
-//! github-copilot, xai, meta) stay sidecar-side (login + stream) until the
-//! core has their wire APIs (D15).
+//! github-copilot, xai, meta) have no core driver for their wire APIs yet:
+//! they stay sidecar-side (login via the node helper `sidecar/auth-login.mjs`,
+//! streaming through the sidecar's upstream runtime) until E4S2 (M15
+//! provider plugin platform) is green — D15 answered by the PO 2026-11-24
+//! ("API interaktionen, auch logins soll der core machen" — the core does
+//! all API interactions incl. logins, as auto-loaded provider libraries); no
+//! capability regression mid-epic (E3 sequencing rule).
 //!
 //! Upstream protocol/credential semantics (pinned 64a15f4), mirrored here:
 //! - `packages/ai/src/auth/oauth/kimi-coding.ts` — RFC 8628 device-code
@@ -26,10 +31,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::Duration;
 
-/// The only oauth builtin the core serves natively in v0 (D15).
+/// The only oauth builtin the core serves natively in v0 (D15: the core
+/// owns what it can stream; the other four stay sidecar-side until E4S2).
 pub const KIMI_CODING: &str = "kimi-coding";
 
 /// Upstream `kimi-coding.ts` constants (pinned 64a15f4).
@@ -90,16 +95,13 @@ pub fn is_expired(cred: &OauthCredential) -> bool {
 // ---------------------------------------------------------------------------
 // Credential store (auth.json)
 
-/// Serializes the core's auth.json writes (in-process).
-// shortcut: upstream takes a cross-process lockfile (proper-lockfile); the
-// core serializes in-process only — fine while a single pi-rust process owns
-// the core-owned credentials (the sidecar writes only sidecar-owned ones).
-static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Reads the stored credential for `provider` (typed error on a malformed
-/// auth.json; `None` when the file or entry is absent, or the entry is not
-/// an oauth credential).
-pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential>> {
+/// Reads the stored oauth entry for `provider` as raw JSON (typed error on
+/// a malformed auth.json; `None` when the file or entry is absent, or the
+/// entry is not an oauth credential). The raw form keeps provider-specific
+/// extras (e.g. github-copilot's `enterpriseUrl`) that the typed
+/// [`OauthCredential`] drops — the E4S2 plugin refresh passes the full
+/// entry to the plugin.
+pub fn stored_raw(agent_dir: &Path, provider: &str) -> Result<Option<Value>> {
     let path = agent_dir.join("auth.json");
     if !path.exists() {
         return Ok(None);
@@ -114,64 +116,46 @@ pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential
     if cred.get("type").and_then(Value::as_str) != Some("oauth") {
         return Ok(None);
     }
+    for field in ["access", "refresh", "expires"] {
+        let has = match field {
+            "expires" => cred.get("expires").and_then(Value::as_i64).is_some(),
+            _ => cred.get(field).and_then(Value::as_str).is_some(),
+        };
+        if !has {
+            anyhow::bail!("auth.json {provider} credential has no `{field}`");
+        }
+    }
+    Ok(Some(cred.clone()))
+}
+
+/// Reads the stored credential for `provider` (typed error on a malformed
+/// auth.json; `None` when the file or entry is absent, or the entry is not
+/// an oauth credential).
+pub fn stored(agent_dir: &Path, provider: &str) -> Result<Option<OauthCredential>> {
+    let Some(cred) = stored_raw(agent_dir, provider)? else {
+        return Ok(None);
+    };
     Ok(Some(OauthCredential {
-        access: cred
-            .get("access")
-            .and_then(Value::as_str)
-            .with_context(|| format!("auth.json {provider} credential has no `access`"))?
-            .to_string(),
-        refresh: cred
-            .get("refresh")
-            .and_then(Value::as_str)
-            .with_context(|| format!("auth.json {provider} credential has no `refresh`"))?
-            .to_string(),
-        expires: cred
-            .get("expires")
-            .and_then(Value::as_i64)
-            .with_context(|| format!("auth.json {provider} credential has no `expires`"))?,
+        access: cred["access"].as_str().unwrap().to_string(),
+        refresh: cred["refresh"].as_str().unwrap().to_string(),
+        expires: cred["expires"].as_i64().unwrap(),
     }))
 }
 
-/// Writes the oauth credential for `provider` (read-modify-write; other
-/// provider entries preserved). Creates auth.json 0600 (unix).
+/// Writes the oauth credential for `provider` (the upstream auth.json shape;
+/// other provider entries preserved, 0600-on-create via
+/// [`crate::auth::save_credential`]).
 pub fn save(agent_dir: &Path, provider: &str, cred: &OauthCredential) -> Result<()> {
-    let _guard = AUTH_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = agent_dir.join("auth.json");
-    let existed = path.exists();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut data: Value = if existed {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if raw.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
-        }
-    } else {
-        json!({})
-    };
-    data.as_object_mut()
-        .expect("auth.json root is an object")
-        .insert(
-            provider.to_string(),
-            json!({
-                "type": "oauth",
-                "access": cred.access,
-                "refresh": cred.refresh,
-                "expires": cred.expires,
-            }),
-        );
-    let out = serde_json::to_string_pretty(&data)?;
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    if !existed {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::auth::save_credential(
+        agent_dir,
+        provider,
+        &json!({
+            "type": "oauth",
+            "access": cred.access,
+            "refresh": cred.refresh,
+            "expires": cred.expires,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +564,20 @@ mod tests {
         d
     }
 
+    // The tests below set the process-wide KIMI_CODE_OAUTH_HOST /
+    // KIMI_OAUTH_HOST env vars (each pointing at its own random-port mock).
+    // Rust runs tests as parallel threads in one process, so without
+    // serialization a test's HTTP call can hit a SIBLING test's mock (CI
+    // cross-talk: 404/400/401 from a sibling's queued script — the
+    // 2026-11-24 macos-latest failure of the three refresh tests). Every
+    // env-touching test holds this lock for its whole body.
+    static KIMI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialize the KIMI_* env-var tests (see `KIMI_ENV_LOCK`).
+    fn lock_kimi_env() -> std::sync::MutexGuard<'static, ()> {
+        KIMI_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Queued-response HTTP mock: each accepted connection gets the next
     /// (status, json-body) pair; every request line + body is recorded.
     fn mock(responses: Vec<(u16, &str)>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -600,7 +598,8 @@ mod tests {
         responses: Vec<(u16, String)>,
     ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let recorded: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec2 = recorded.clone();
         std::thread::spawn(move || {
             let mut queue = responses.into_iter();
@@ -742,6 +741,7 @@ mod tests {
 
     #[test]
     fn resolve_fresh_credential_skips_network() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let cred = OauthCredential {
             access: "valid-access".into(),
@@ -763,6 +763,7 @@ mod tests {
 
     #[test]
     fn resolve_expired_credential_refreshes_and_writes_back() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -795,6 +796,7 @@ mod tests {
 
     #[test]
     fn refresh_retries_transient_then_succeeds() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -821,6 +823,7 @@ mod tests {
 
     #[test]
     fn refresh_unauthorized_fails_without_retry_and_without_material() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         save(
             &d,
@@ -853,7 +856,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_happy_path_saves_credential() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let device = r#"{"device_code":"dev-1","user_code":"KIMI-TEST","verification_uri":"__CB__","verification_uri_complete":"__CB2__","interval":1,"expires_in":60}"#;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -894,7 +902,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_denied_is_typed() {
+        let _env = lock_kimi_env();
         let d = tmpdir();
         let (base, _recorded) = mock(vec![
             (
@@ -912,7 +925,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     async fn device_login_expired_token_is_typed() {
+        let _env = lock_kimi_env();
         let (base, _recorded) = mock(vec![
             (
                 200,
@@ -927,8 +945,13 @@ mod tests {
         std::env::remove_var("KIMI_CODE_OAUTH_HOST");
     }
 
+    // The KIMI_ENV_LOCK guard is held across the awaits below on purpose:
+    // #[tokio::test] is a current-thread runtime (the guard is never
+    // moved), and the env var must stay stable for the whole flow.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn untrusted_verification_uri_is_rejected() {
+        let _env = lock_kimi_env();
         let (base, _recorded) = mock(vec![(
             200,
             r#"{"device_code":"dev-1","user_code":"U","verification_uri":"file:///etc/passwd","verification_uri_complete":"http://127.0.0.1/cb","interval":1,"expires_in":60}"#,
@@ -942,6 +965,7 @@ mod tests {
 
     #[test]
     fn host_override_env_wins_and_strips_trailing_slash() {
+        let _env = lock_kimi_env();
         std::env::set_var("KIMI_CODE_OAUTH_HOST", "http://127.0.0.1:1/");
         assert_eq!(kimi_oauth_host(), "http://127.0.0.1:1");
         std::env::remove_var("KIMI_CODE_OAUTH_HOST");

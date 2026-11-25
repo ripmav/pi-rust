@@ -46,31 +46,52 @@ flowchart LR
   already applies to `auth.json` credentials.
   The core never streams models of *extension*-registered providers itself.
   Hosts **all** MCP servers itself — the configured ones (agent-dir
-  `mcp.json` + trusted project `.pi/mcp.json`) and those extensions register
-  via `pi.registerMcpServer` (the sidecar forwards the registration to the
-  core from E3S5; the sidecar hosts no MCP servers at all) — the core is the
-  **single source of truth for MCP (D13, answered by the PO 2026-11-24)**.
-  E3S3: JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/
-  exposure, native tool execution; until E3S5 the `oauth`/`auth` config
-  servers stay sidecar-side as the documented interim (D13).
+  `mcp.json` + trusted project `.pi/mcp.json`, E3S3, [src/mcp.rs](https://github.com/ripmav/pi-rust/blob/main/src/mcp.rs):
+  JSON-RPC over stdio + streamable HTTP, upstream naming/schemas/exposure,
+  native tool execution) — the core is the **single source of truth for
+  MCP (D13, answered by the PO 2026-11-24)**: from E3S5 the sidecar hosts
+  no MCP servers at all (its built-in mcp extension + `mcpConfig` path are
+  removed); until E3S5 the `oauth`/`auth` config servers stayed
+  sidecar-side as the documented interim — since E3S5 the core skips
+  them with a logged warning (no host remains; D17). Extension
+  `pi.registerMcpServer` registrations are forwarded to the core over the
+  bridge (`mcp_server_register`, additive in protocol v6 — E3S5 follow-up)
+  and hosted by the core exactly like configured servers (same transports,
+  naming, exposure, native execution); a failed forward is a typed
+  extension-side error, and the core's `mcp_servers_change` forward carries
+  the full set (configured + extension-registered). Owns the oauth builtin
+  it streams compiled-in (`kimi-coding`, E3S4,
+  [src/oauth.rs](https://github.com/ripmav/pi-rust/blob/main/src/oauth.rs))
+  and, since E4S2 (M15), the other four oauth builtins (radius,
+  github-copilot, xai, meta) as **provider plugins** — auto-loaded cdylibs
+  (ABI v1, `docs/provider-plugin-abi.md`) from `<exe dir>/providers/`
+  (bundled) + `<agentDir>/providers/` (user): the core drives their
+  device-flow logins, refreshes (ABI refresh request) and streams.
+  `kimi-coding` stays compiled-in (E4S3 descoped by the PO).
 - **Sidecar (Node):** spawned next to the binary
   ([`find_sidecar`](https://github.com/ripmav/pi-rust/blob/main/src/cli.rs),
   override `PI_RUST_SIDECAR`); runs the unmodified upstream loader/runner —
-  the js/ts-extension compatibility layer (E3: its built-in extension
-  hosting — mcp/tool-search/llama/codemode — stays until E3S3–E3S5); since
-  E3S2 it no longer reads or routes the agent dir's `models.json` — model
-  providers are the core's (E3S1) — and the core is the **single source of
-  truth for models.json (D11, answered by the PO 2026-11-24)**: from E3S5
-  the sidecar's `ModelRuntime` is created with `modelsPath: null` (no direct
-  file access at all); if the sidecar ever needs models.json data, the core
-  passes it via the `init` payload (the E3S3 `mcpConfig` pattern); since E3S3 its built-in mcp extension
-  connects only `pi.registerMcpServer` servers plus the `oauth`/`auth`
-  config servers the core still cannot host (documented interim — from E3S5
-  the sidecar hosts NO MCP servers at all: `registerMcpServer` calls are
-  forwarded to the core, D13); since E3S4 it no
-  longer advertises or routes the `kimi-coding` oauth builtin (core-owned —
-  D15) and keeps its oauth branches for the other four builtins (radius,
-  github-copilot, xai, meta) until they are core-native (E3S5).
+  the js/ts-extension compatibility layer. Since E3S2 it no longer reads or
+  routes the agent dir's `models.json`, and since the E3S5 follow-up (D11,
+  PO 2026-11-24) it has no direct models.json access **at all** — the
+  sidecar's upstream `ModelRuntime` is created with `modelsPath: null`
+  (the runtime skips the load; its builtin oauth catalog is independent of
+  the file) — model providers are the core's (E3S1), and the core is the
+  **single source of truth for models.json (D11, answered by the PO
+  2026-11-24)**: the bridge never uses models.json data; if the sidecar
+  ever needs it, the core passes it via the `init` payload. Its only MCP
+  duty is to forward `pi.registerMcpServer` registrations to the core
+  (`mcp_server_register` — the core hosts them, D13). Since E3S5 its built-in
+  mcp extension +
+  `mcpConfig` registration path are gone (the core is the single source of
+  truth for MCP, D13); since E3S4 it no longer advertises or routes the
+  `kimi-coding` oauth builtin (core-owned — D15), and since E4S2 (M15)
+  neither for the other four (radius, github-copilot, xai, meta) — those
+  are core provider plugins now, so the sidecar's final form is
+  **js/ts-extensions-only** (D15 answered 2026-11-24). Its remaining
+  built-in extension hosting
+  (tool-search/llama/codemode) is itself js/ts and stays until its own
+  core-native stories, if the user wants them.
 - **Bridge:** NDJSON over stdio,
   [bridge protocol v6](./bridge-protocol.md) — handshake with
   `protocolVersion` + capability negotiation, `ready` catalog
@@ -86,9 +107,9 @@ flowchart LR
 - **Trust:** WP-1102 — untrusted project-scope content has zero behavioral
   effect; the core sends the resolved decision as `init.projectTrusted` and
   the sidecar excludes untrusted project-scope TS extensions. WP-1103: trusted
-  project `.pi/` config (settings, MCP) is applied by the core and passed via
-  `init`. Since E3S3 the core hosts the merged MCP config itself and passes
-  the sidecar only the `oauth`/`auth` entries (D13).
+  project `.pi/` config (settings, MCP) is applied by the core; the core
+  hosts the merged MCP config itself (the sidecar hosts no MCP servers —
+  E3S3/E3S5, D13 final form).
 - **Degradation:** sidecar crash or unanswered blocking command → `Degraded`
   (extension tools dropped, decisions resolve to protocol defaults, no
   respawn); clean shutdown or failed handshake → `Stopped`. A **spawn
@@ -161,6 +182,42 @@ flowchart LR
   capabilities; core extensions call the vtable `ui_request` synchronously
   (core routes to the TUI or applies the headless default).
 
+## Provider plugins (E4S1, D16 option 1)
+
+Provider implementations can ship as **plugins**: Rust cdylibs the core
+loads in-process at startup (the ADR 0005/0006 pattern applied to
+providers). Contract: [`docs/provider-plugin-abi.md`](provider-plugin-abi.md).
+
+- **Loading:** `<exe dir>/providers/` (bundled, ships with the binary) then
+  `<agentDir>/providers/` (user dir) — name collision: the user dir wins,
+  override logged. Every failing plugin file (unreadable, missing entry
+  symbol, `abi_version` mismatch, bad `list_models` JSON, panic) is a typed
+  log line; the run continues with the remaining providers.
+- **Registry + dispatch:** plugin models merge into the model registry
+  (bundled catalog + `models.json` + plugins; per-id limit unchanged) and
+  are selectable exactly like built-ins (`--provider`/`--model`, TUI
+  picker, `settings.json`). The core resolves the credential (auth.json)
+  and drives a `ProviderDriver::Plugin` — the vtable stream
+  (`stream_open`/`stream_next`/`stream_close`) runs from a blocking task;
+  **plugin streams never cross the sidecar bridge** (Node-free, incl. with
+  the sidecar degraded).
+- **Login:** `pi-rust auth login <plugin-provider> [--api-key]
+  [--no-browser]` — the core owns the UX (URL print, browser, poll loop)
+  and stores the returned credential in `auth.json`; the plugin only
+  performs protocol steps (`auth_start`/`auth_status`) and never touches
+  the credential store.
+- **Trust (v0):** in-process with the same trust level as compiled-in
+  builtins (the user's own dirs) — no sandbox; a faulty plugin can take
+  down the run (ADR 0006 risk profile; panics are caught and become typed
+  errors).
+- **Reference implementation:** `plugin-samples/openai-compat/`
+  (crate `pi-sample-compat`, provider `sample-compat`) — standalone crate
+  (own workspace) so the normal build stays lean; the e2e
+  (`tests/provider_plugin.rs`) builds it on demand.
+- The compiled-in builtins (openai/anthropic/google/bedrock) stay
+  compiled-in for the MVP (D16 option 1); E4S2 adds the four remaining
+  oauth builtins as plugins, E4S3 (backlog) the rest.
+
 ## Workspace layout
 
 ```
@@ -171,9 +228,11 @@ pi-rust/
 ├── pi-ext/           # public API crate (ADR 0003): pi+ctx surface (ADR 0002),
 │                     #   bridge wire types, v6 process client (user target),
 │                     #   core vtable binding (cdylib target)
-└── core-ext/         # the six core extensions, one cdylib crate each (ADR 0005)
-    ├── hello/  permission-gate/  claude-rules/
-    └── prompt-customizer/  with-deps/  plan-mode/
+├── core-ext/         # the six core extensions, one cdylib crate each (ADR 0005)
+│   ├── hello/  permission-gate/  claude-rules/
+│   └── prompt-customizer/  with-deps/  plan-mode/
+└── plugin-samples/   # provider plugin samples (standalone crates, E4S1)
+    └── openai-compat/  # pi-sample-compat: reference ABI v1 implementation
 ```
 
 ## Release & install

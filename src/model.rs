@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 
 /// One scripted tool call.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallSpec {
     pub id: String,
     pub name: String,
@@ -14,7 +14,9 @@ pub struct ToolCallSpec {
 }
 
 /// One scripted assistant turn: optional text plus zero or more tool calls.
-#[derive(Clone, Debug, PartialEq)]
+/// (Serialize/Deserialize: the provider-plugin ABI ships turns as JSON,
+/// E4S1.)
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssistantTurn {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallSpec>,

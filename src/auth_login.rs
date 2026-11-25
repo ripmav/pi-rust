@@ -69,12 +69,6 @@ pub async fn run(
         return 1;
     }
 
-    // Upstream requires an interactive terminal for login prompts.
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        eprintln!("\"pi-rust auth login <provider>\" requires an interactive terminal");
-        return 1;
-    }
-
     let agent_dir = crate::config::resolve_agent_dir(
         None,
         std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
@@ -82,6 +76,49 @@ pub async fn run(
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(".")),
     );
+
+    // E4S1/WP-1501: a provider plugin — the core drives the login (the
+    // plugin performs the protocol and returns the credential material;
+    // the core owns the UX and the auth.json write — the plugin never
+    // touches the store). Account flow: headless-safe (URL printed,
+    // --no-browser skips the browser). --api-key: core-native prompt +
+    // api_key credential (needs a TTY like every prompt flow).
+    {
+        let plugins = crate::provider::plugin::PluginSet::load(&agent_dir);
+        if let Some(pl) = plugins.provider(&provider).cloned() {
+            if api_key {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                    eprintln!("\"pi-rust auth login <provider>\" requires an interactive terminal");
+                    return 1;
+                }
+                let key = read_secret_line("API key: ");
+                if key.trim().is_empty() {
+                    eprintln!("error: empty API key");
+                    return 1;
+                }
+                if let Err(e) = crate::auth::save_credential(
+                    &agent_dir,
+                    &provider,
+                    &serde_json::json!({ "type": "api_key", "key": key }),
+                ) {
+                    eprintln!("fatal: {e:#}");
+                    return 1;
+                }
+                println!(
+                    "Logged in to {provider}. Credentials saved to {}",
+                    agent_dir.join("auth.json").display()
+                );
+                return 0;
+            }
+            return plugin_account_login(&pl, &agent_dir, no_browser).await;
+        }
+    }
+
+    // Upstream requires an interactive terminal for login prompts.
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        eprintln!("\"pi-rust auth login <provider>\" requires an interactive terminal");
+        return 1;
+    }
 
     // E3S4/WP-1404: the kimi-coding account login is core-native — the core
     // performs the upstream device flow itself (no node helper; works with
@@ -281,6 +318,78 @@ pub async fn run(
 /// Read one line without echoing (raw mode turns off ICANON+ECHO, the same
 /// semantics as Node's `setRawMode` in the upstream secret reader). Ctrl+C
 /// aborts the line (empty answer).
+/// E4S1: the core-driven plugin login handshake. The core owns the UX
+/// (URL printed, browser opened) and the auth.json write; the plugin
+/// performs the protocol and returns the credential material. Headless-
+/// safe (no prompts); the URL is printed once, the handshake polled at
+/// 500 ms, 15-minute timeout (the upstream device-flow budget).
+async fn plugin_account_login(
+    pl: &crate::provider::plugin::LoadedPlugin,
+    agent_dir: &Path,
+    no_browser: bool,
+) -> i32 {
+    use std::time::Duration;
+    let status = match pl.auth(true, "{}") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: {e:#}");
+            return 1;
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15 * 60);
+    let mut url_printed = false;
+    let mut status = status;
+    loop {
+        match &status {
+            crate::provider::plugin::AuthStatus::Pending { url, code } => {
+                if !url_printed {
+                    if let Some(u) = url {
+                        if let Some(c) = code {
+                            // Device-code flows: the code is what the user
+                            // enters (upstream loginKimiCoding UX).
+                            println!("To continue, visit {u} and enter code {c}");
+                        } else {
+                            println!("Sign in: {u}");
+                        }
+                        if !no_browser {
+                            open_browser(u);
+                        }
+                    }
+                    url_printed = true;
+                }
+            }
+            crate::provider::plugin::AuthStatus::Done { credential } => {
+                if let Err(e) = crate::auth::save_credential(agent_dir, &pl.name, credential) {
+                    eprintln!("fatal: {e:#}");
+                    return 1;
+                }
+                println!(
+                    "Logged in to {}. Credentials saved to {}",
+                    pl.name,
+                    agent_dir.join("auth.json").display()
+                );
+                return 0;
+            }
+            crate::provider::plugin::AuthStatus::Failed { error } => {
+                eprintln!("Login failed: {error}");
+                return 1;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            eprintln!("Login timed out.");
+            return 1;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        status = match pl.auth(false, "{}") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("fatal: {e:#}");
+                return 1;
+            }
+        };
+    }
+}
+
 fn read_secret_line(message: &str) -> String {
     // Raw mode must be on BEFORE the prompt is shown: the terminal echoes
     // input that arrives while ECHO is still on (the caller can type as

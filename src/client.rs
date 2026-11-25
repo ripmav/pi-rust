@@ -239,6 +239,16 @@ impl BridgeClient {
             ));
             return;
         }
+        self.send_unchecked(line)
+    }
+
+    /// Reply that must work before the bridge is `Running`: the sidecar's
+    /// load-time `mcp_server_register` forwards arrive right after the
+    /// sidecar's `ready`, which the cli task has not turned into the
+    /// Running state yet — a state-gated reply would be dropped and the
+    /// sidecar would time out a healthy forward. Same transport-failure
+    /// handling as `send` (a broken pipe degrades the bridge).
+    pub fn send_unchecked(&self, line: Value) {
         if self.tx.send(line.to_string()).is_err() {
             Self::degrade(&self.state_tx, &self.degraded_seen);
         }

@@ -1,0 +1,26 @@
+# Sample provider plugin (E4S1/WP-1501): a reference implementation of the
+# pi provider plugin ABI v1 (docs/provider-plugin-abi.md) and the e2e test
+# fixture (tests/provider_plugin.rs). Standalone crate (own workspace — the
+# `[workspace]` table below keeps it OUT of the pi-rust workspace so the
+# normal `cargo build`/`cargo test`/`cargo clippy` stay lean); the e2e
+# builds it on demand with `cargo build --manifest-path .../Cargo.toml`.
+[package]
+name = "pi-sample-compat"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Own workspace root: excluded from the parent (pi-rust) workspace so the
+# normal build/test/clippy never compile it (E4S1: lean normal build).
+[workspace]
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# Async client + rustls (the mock endpoint is plain http; real providers
+# need https). reqwest 0.13 is async-only (no blocking client).
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+futures-util = "0.3"

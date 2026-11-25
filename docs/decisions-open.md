@@ -5,4 +5,5 @@ then. `Status` is `open` until the user answers; as soon as an answer arrives th
 becomes `answered — in progress` with the answer quoted, before any other work. Once the
 answer is recorded (ADR, story, tenet or `AGENTS.md`), the row is deleted in that change.
 
-No open decisions.
+| ID | Status | Decision | Options | Assumed until decided | Blocks |
+|---|---|---|---|---|---|
