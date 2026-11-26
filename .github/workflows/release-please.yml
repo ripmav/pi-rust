@@ -14,10 +14,10 @@ name: release-please
 # (release.yml), never by release-please. Hence:
 #   - the action runs with skip-github-release: true → on release-PR merge
 #     it creates NEITHER tag NOR release (release PRs still open/update);
-#   - the cut-tag job below cuts the `vX.Y.Z` tag and pushes it. Only a
-#     real `git push` fires the `push: tags` event that release.yml
-#     listens for — API-created refs (what release-please used to do) do
-#     not (v1.2.0 incident).
+#   - the cut-tag job below cuts the `vX.Y.Z` tag and pushes it, then
+#     dispatches release.yml explicitly: a tag pushed by the workflow's
+#     own token does NOT fire the `push: tags` event (GitHub suppresses
+#     self-triggering — the v1.3.0 incident).
 #
 # Run gate: the action only runs when main has commits beyond the latest
 # release tag — a push that lands nothing new since the tag skips it.
@@ -30,6 +30,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # gh workflow run (the cut-tag job dispatches release.yml — a tag pushed
+  # by the workflow's own token does not fire push:tags, self-trigger
+  # suppression).
+  actions: write
 
 jobs:
   # Cheap pre-flight: is there anything new to release?
@@ -81,10 +85,12 @@ jobs:
   # WHY (comment block, per the regime above):
   #  1. With skip-github-release: true, merging the release PR produces no
   #     tag from the action — the tag has to be cut by us.
-  #  2. A real `git push` of the tag is what fires release.yml's
-  #     `push: tags` trigger; API-created refs do not (v1.2.0 shipped with
-  #     0 assets exactly because of this).
-  #  3. The tag push then builds the artifacts and creates the release in
+  #  2. release.yml is dispatched explicitly after the push: a tag pushed
+  #     by the workflow's own token does not fire the `push: tags` trigger
+  #     (GitHub suppresses self-triggering — v1.3.0 shipped unreleased
+  #     until a manual dispatch); API-created refs likewise do not fire
+  #     it (v1.2.0 shipped with 0 assets exactly because of this).
+  #  3. release.yml then builds the artifacts and creates the release in
   #     ONE shot with all assets — the only shape that works under the
   #     immutable-release-assets setting.
   # Idempotent: manifest version already tagged → no-op. Runs only when
@@ -101,6 +107,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Cut tag for the manifest version
+        env:
+          # For the `gh workflow run` below: the dispatch requires the
+          # workflow token to carry `actions: write` (set in this file's
+          # permissions block).
+          GH_TOKEN: ${{ github.token }}
         run: |
           # The root (canonical) component lives under the key "." in the
           # manifest — verified against the checked-in file and against
@@ -118,3 +129,12 @@ jobs:
           git tag "${tag}" HEAD
           git push origin "${tag}"
           echo "cut + pushed ${tag} at $(git rev-parse HEAD)"
+          # A tag pushed with the workflow's own token does NOT fire the
+          # `push: tags` event (GitHub suppresses self-triggering), so
+          # release.yml must be triggered explicitly via its
+          # workflow_dispatch surface. Double-triggering is harmless by
+          # design: publish is idempotent (an asset-bearing release gets
+          # a clobber re-upload).
+          gh workflow run release.yml --field "tag=${tag}"
+          # NOTE: dispatch runs ONLY in this new-tag branch — the
+          # "already exists" path above exits 0 before reaching it.
