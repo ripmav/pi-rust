@@ -123,18 +123,38 @@ jobs:
           fi
           tag="v${version}"
           if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
-            echo "tag ${tag} already exists — nothing to do"
-            exit 0
+            echo "tag ${tag} already exists — nothing to cut"
+          else
+            git tag "${tag}" HEAD
+            git push origin "${tag}"
+            echo "cut + pushed ${tag} at $(git rev-parse HEAD)"
+            # A tag pushed with the workflow's own token does NOT fire the
+            # `push: tags` event (GitHub suppresses self-triggering), so
+            # release.yml must be triggered explicitly via its
+            # workflow_dispatch surface. Double-triggering is harmless by
+            # design: publish is idempotent (an asset-bearing release gets
+            # a clobber re-upload).
+            # NOTE: dispatch runs ONLY in this new-tag branch — the
+            # "already exists" path above skips it.
+            gh workflow run release.yml --field "tag=${tag}"
           fi
-          git tag "${tag}" HEAD
-          git push origin "${tag}"
-          echo "cut + pushed ${tag} at $(git rev-parse HEAD)"
-          # A tag pushed with the workflow's own token does NOT fire the
-          # `push: tags` event (GitHub suppresses self-triggering), so
-          # release.yml must be triggered explicitly via its
-          # workflow_dispatch surface. Double-triggering is harmless by
-          # design: publish is idempotent (an asset-bearing release gets
-          # a clobber re-upload).
-          gh workflow run release.yml --field "tag=${tag}"
-          # NOTE: dispatch runs ONLY in this new-tag branch — the
-          # "already exists" path above exits 0 before reaching it.
+
+          # release-please's createPullRequests() aborts while any MERGED
+          # release PR still carries "autorelease: pending". Normally
+          # createReleases() moves it to "autorelease: tagged" after
+          # tagging — but with skip-github-release the action never does
+          # that, so we must. (Verified in release-please 17.11.2,
+          # manifest.js: findMergedReleasePullRequests + the abort
+          # warning.) Title pattern from
+          # .github/release-please-config.json:
+          # "chore(release): ${version}". head -1: at most one merged
+          # release PR is expected per version title; if one ever
+          # duplicates, both get labeled across runs — idempotent.
+          pr_number="$(gh pr list --state merged --label "autorelease: pending" \
+            --json number,title --jq ".[] | select(.title == \"chore(release): ${version}\") | .number" | head -1)"
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+            echo "labeled PR #${pr_number} as tagged"
+          else
+            echo "no pending release PR for ${version} — nothing to label"
+          fi
