@@ -5,6 +5,14 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## [1.2.1](https://github.com/ripmav/pi-rust/compare/v1.2.0...v1.2.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* release workflow — support API-created tags via workflow_dispatch ([51de416](https://github.com/ripmav/pi-rust/commit/51de416599ab13c9351ded5b276f81a0a891a24b))
+* release workflow — support API-created tags via workflow_dispatch ([638160c](https://github.com/ripmav/pi-rust/commit/638160ccdaf80d953b29656ae981eb9eac8d21bf))
+
 ## [1.2.0](https://github.com/ripmav/pi-rust/compare/v1.1.0...v1.2.0) (2026-11-25)
 
 

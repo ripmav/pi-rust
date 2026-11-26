@@ -1,6 +1,6 @@
 [package]
 name = "pi-ext"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "Public Rust extension framework for pi (ADR 0001-0006)"
 
