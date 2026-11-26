@@ -592,7 +592,12 @@ above) — pi-rust sessions open in pi and vice versa.
 
 ## Releases
 
-Releases are cut by [release-please](https://github.com/google-github-actions/release-please) (`.github/release-please-config.json`): conventional commits on `main` open a release PR that bumps the root `Cargo.toml` version and writes the next `CHANGELOG.md` section; merging the release PR cuts the `vX.Y.Z` tag and the GitHub release. Release notes are generated from the commit messages (v1.0.0 and earlier have hand-written notes). Note: release-please creates the tag via the GitHub API, which does not fire the tag-push event, so the release workflow (`.github/workflows/release.yml`) is not triggered automatically — if the release has no assets, trigger it manually from the Actions tab (workflow_dispatch, tag input). The repo setting "immutable release assets" is permanently ON, so a release created asset-less (as release-please does) can never receive uploads: the publish job then deletes the release object (the tag stays) and recreates it in one shot with the assets, preserving the release-please changelog body.
+Releases are cut by [release-please](https://github.com/google-github-actions/release-please) (`.github/release-please-config.json`): conventional commits on `main` open a release PR that bumps the root `Cargo.toml` version and writes the next `CHANGELOG.md` section. Merging that PR is the only manual step — the rest is automatic:
+
+1. release-please creates no tag and no release itself (`skip-github-release: true` in `.github/workflows/release-please.yml`), so the `cut-tag` job of that workflow tags the version from `.release-please-manifest.json` and pushes it — a real tag push, which fires the `push: tags` event (API-created refs do not).
+2. `.github/workflows/release.yml` builds the per-architecture artifacts and creates the GitHub release with all assets in one shot. Release notes come from a checked-in `RELEASE_NOTES.md` when present, otherwise from the commit list (v1.0.0 and earlier have hand-written notes).
+
+Why one shot: the repo setting "immutable release assets" is permanently ON, so the release must be created with its assets in a single call — an immutable release can never receive an upload, and a tag ever used by an immutable release can never be reused. Manual fallback: trigger `release.yml` via `workflow_dispatch` (tag input, e.g. `v1.2.2`) — a release that already has assets is re-uploaded, an asset-less release is a hard error (delete the release object; the tag stays; re-run).
 
 The `pi-ext` crate keeps its own version (not yet published) and the `sidecar` package is private — neither is bumped by the release PR.
 
