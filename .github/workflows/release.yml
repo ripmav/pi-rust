@@ -12,11 +12,15 @@
 # creates its tags via the GitHub API (git.createRef), and GitHub does not
 # fire push:tags events for API-created refs — so the tag-push trigger below
 # never ran for v1.2.0 and the release shipped with 0 assets. Tags cannot be
-# deleted (repo rule; release assets are immutable), so "delete + re-push"
-# is off the table. Operating instruction: after a release PR is merged, if
-# the release has no assets, trigger this workflow manually via Actions
-# (workflow_dispatch, tag=vX.Y.Z). Re-running is safe: the publish job is
-# idempotent (create-if-missing, else `gh release upload --clobber`).
+# deleted (repo rule), so "delete + re-push" is off the table. Operating
+# instruction: after a release PR is merged, if the release has no assets,
+# trigger this workflow manually via Actions (workflow_dispatch,
+# tag=vX.Y.Z). Re-running is safe: the publish job is idempotent — a release
+# that already has assets is re-uploaded; an asset-less release (release-
+# please's, which under the repo's permanent "immutable release assets"
+# setting can NEVER receive an upload) is deleted and recreated in one shot
+# with the assets, preserving the changelog body (see the "Create release"
+# step).
 name: release
 
 # gh release (the gh CLI ships on the runners) publishes the artifacts —
@@ -230,12 +234,36 @@ jobs:
           # --target "$tag": without it, target_commitish defaults to the
           # checkout context (main), so the release page points at a moving
           # branch instead of the release commit.
-          # The release-please action creates the tag + GitHub release when
-          # the release PR merges, so only create the release if missing;
-          # otherwise (re-runs included) just (re)upload the assets.
-          if gh release view "$tag" >/dev/null 2>&1; then
+          # Immutability (repo setting "immutable release assets",
+          # permanently ON): GitHub stamps a release immutable AT CREATION
+          # TIME; a release created while the setting is on can NEVER
+          # receive asset uploads (HTTP 422: "Cannot upload assets to an
+          # immutable release" — observed on v1.2.0, even after the setting
+          # was temporarily disabled). release-please creates the tag +
+          # release asset-less when the release PR merges, so a plain
+          # `gh release upload` can never succeed for it. Creating a release
+          # WITH assets in one call IS allowed (that is how v1.1.0 shipped),
+          # and deleting the release object (not the tag — tag deletion is
+          # rule-blocked) is the only way to a fresh, asset-capable release.
+          # Publish logic:
+          #   release already has assets (re-run)   -> (re)upload --clobber
+          #   asset-less release (release-please)   -> capture its changelog
+          #     body, delete the release, recreate in one shot with the
+          #     assets; the captured body wins over the commit-list fallback
+          #   release missing (hand-cut tag push)   -> create in one shot
+          assets_count="$(gh release view "$tag" --json assets --jq '.assets | length' 2>/dev/null || echo 0)"
+          if [ "$assets_count" -gt 0 ]; then
+            # Re-run of a release that already has assets: just (re)upload.
             gh release upload "$tag" --clobber dist/*.tar.gz install.sh
           else
+            # Release missing (hand-cut tag push) or asset-less (created by
+            # release-please — under the repo's permanent "immutable
+            # releases" setting it can NEVER receive an upload): create it
+            # in one shot with the assets, preserving the release-please
+            # changelog body.
+            existing_notes="$(gh release view "$tag" --json body --jq -r '.body // empty' 2>/dev/null || true)"
+            [ -n "$existing_notes" ] && gh release delete "$tag" --yes
+            if [ -n "$existing_notes" ]; then notes="$existing_notes"; fi
             gh release create "$tag" --title "pi-rust ${tag}" --target "$tag" \
               --notes "$notes" $prerelease dist/*.tar.gz install.sh
           fi
