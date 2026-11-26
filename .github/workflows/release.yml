@@ -2,6 +2,22 @@
 # Tag `v*` (staging tags like v0.0.0-staging.1 use the same path) ->
 # GitHub release with per-architecture tarballs + generated changelog.
 #
+# Regime (repo setting "immutable release assets", permanently ON): GitHub
+# stamps a release immutable AT CREATION TIME — an immutable release can
+# NEVER receive an asset upload, and a tag ever used by an immutable
+# release can never be reused. So this workflow is the ONLY place a
+# release object is created: in one shot, with ALL its assets.
+# release-please no longer creates tags/releases (skip-github-release: true
+# in release-please.yml) — its cut-tag job pushes a real tag (an
+# API-created ref would not fire this `push: tags` event), which triggers
+# this workflow automatically.
+#
+# Manual fallback (workflow_dispatch, tag input): same publish path for a
+# tag that did not trigger this workflow. Re-running is safe: a release
+# that already has assets is re-uploaded; an asset-less release (impossible
+# in this regime) is a hard error — delete the release object (the tag
+# stays) and re-run.
+#
 # Package layout (the sidecar resolves ../upstream relative to itself):
 #   pi-rust-<tag>/
 #     pi-rust            (stripped release binary)
@@ -9,18 +25,15 @@
 #     upstream/          (built pinned upstream tree, dev deps pruned)
 #
 # WHY workflow_dispatch exists (v1.2.0 incident, 2026-11-25): release-please
-# creates its tags via the GitHub API (git.createRef), and GitHub does not
-# fire push:tags events for API-created refs — so the tag-push trigger below
-# never ran for v1.2.0 and the release shipped with 0 assets. Tags cannot be
-# deleted (repo rule), so "delete + re-push" is off the table. Operating
-# instruction: after a release PR is merged, if the release has no assets,
-# trigger this workflow manually via Actions (workflow_dispatch,
-# tag=vX.Y.Z). Re-running is safe: the publish job is idempotent — a release
-# that already has assets is re-uploaded; an asset-less release (release-
-# please's, which under the repo's permanent "immutable release assets"
-# setting can NEVER receive an upload) is deleted and recreated in one shot
-# with the assets, preserving the changelog body (see the "Create release"
-# step).
+# used to create its tags via the GitHub API (git.createRef), and GitHub
+# does not fire push:tags events for API-created refs — so the tag-push
+# trigger below never ran for v1.2.0 and the release shipped with 0 assets.
+# Tags cannot be deleted (repo rule), so "delete + re-push" was off the
+# table. That workaround is now structural: release-please.yml's cut-tag
+# job pushes real tags, so normal releases fire this workflow
+# automatically; the dispatch input remains the manual fallback (see
+# header). Operating instruction for a manual run: pick the tag to
+# build/publish in the Actions tab.
 name: release
 
 # gh release (the gh CLI ships on the runners) publishes the artifacts —
@@ -32,8 +45,8 @@ permissions:
 on:
   push:
     tags: ["v*"]
-  # release-please tags are API-created (git.createRef) and never fire the
-  # tag push above; the operator passes the tag here (see header comment).
+  # release-please tags are no longer a concern (cut-tag pushes real tags);
+  # this is the manual fallback for a tag that did not fire the push above.
   workflow_dispatch:
     inputs:
       tag:
@@ -231,39 +244,41 @@ jobs:
           else
             notes="$(git log --oneline -25 | sed 's/^/- /')"
           fi
-          # --target "$tag": without it, target_commitish defaults to the
-          # checkout context (main), so the release page points at a moving
-          # branch instead of the release commit.
           # Immutability (repo setting "immutable release assets",
           # permanently ON): GitHub stamps a release immutable AT CREATION
-          # TIME; a release created while the setting is on can NEVER
-          # receive asset uploads (HTTP 422: "Cannot upload assets to an
-          # immutable release" — observed on v1.2.0, even after the setting
-          # was temporarily disabled). release-please creates the tag +
-          # release asset-less when the release PR merges, so a plain
-          # `gh release upload` can never succeed for it. Creating a release
-          # WITH assets in one call IS allowed (that is how v1.1.0 shipped),
-          # and deleting the release object (not the tag — tag deletion is
-          # rule-blocked) is the only way to a fresh, asset-capable release.
-          # Publish logic:
-          #   release already has assets (re-run)   -> (re)upload --clobber
-          #   asset-less release (release-please)   -> capture its changelog
-          #     body, delete the release, recreate in one shot with the
-          #     assets; the captured body wins over the commit-list fallback
-          #   release missing (hand-cut tag push)   -> create in one shot
+          # TIME; an immutable release can NEVER receive an asset upload
+          # (HTTP 422), and a tag ever used by an immutable release can
+          # never be reused (HTTP 422 — verified on v1.2.1). Under this
+          # regime the release object is created exactly ONCE, in one
+          # shot, WITH its assets — so no delete/recreate dance exists
+          # anymore (the #180 logic is obsolete: release-please no longer
+          # creates asset-less releases, and creating one here is
+          # impossible). Publish logic:
+          #   release exists with assets (re-run)   -> (re)upload --clobber
+          #   release missing (normal tag push)     -> create in one shot
+          #                                            with all assets
+          #   release exists without assets         -> impossible: fail
+          #                                            loudly (an upload
+          #                                            would 422, and the
+          #                                            tag is now poisoned)
           assets_count="$(gh release view "$tag" --json assets --jq '.assets | length' 2>/dev/null || echo 0)"
           if [ "$assets_count" -gt 0 ]; then
             # Re-run of a release that already has assets: just (re)upload.
             gh release upload "$tag" --clobber dist/*.tar.gz install.sh
+          elif gh release view "$tag" >/dev/null 2>&1; then
+            # An asset-less release exists. Under the permanent immutable-
+            # releases setting it can never receive an upload, and its tag
+            # can never be reused — there is no in-workflow recovery.
+            echo "::error::Release $tag exists WITHOUT assets. Under the repo's permanent 'immutable release assets' setting an asset-less release can never receive an upload (HTTP 422) and the tag can never be reused. Delete the release object manually (the tag stays) and re-run this workflow." >&2
+            exit 1
           else
-            # Release missing (hand-cut tag push) or asset-less (created by
-            # release-please — under the repo's permanent "immutable
-            # releases" setting it can NEVER receive an upload): create it
-            # in one shot with the assets, preserving the release-please
-            # changelog body.
-            existing_notes="$(gh release view "$tag" --json body --jq -r '.body // empty' 2>/dev/null || true)"
-            [ -n "$existing_notes" ] && gh release delete "$tag" --yes
-            if [ -n "$existing_notes" ]; then notes="$existing_notes"; fi
-            gh release create "$tag" --title "pi-rust ${tag}" --target "$tag" \
+            # Normal path: the release does not exist yet — create it in
+            # one shot with all its assets.
+            # --target is a full SHA (git rev-list -n1): --target with the
+            # tag name itself 422s ("Release.target_commitish is invalid"),
+            # and without --target the release points at the checkout
+            # context (a moving branch), not the release commit.
+            gh release create "$tag" --title "pi-rust ${tag}" \
+              --target "$(git rev-list -n1 "$tag")" \
               --notes "$notes" $prerelease dist/*.tar.gz install.sh
           fi

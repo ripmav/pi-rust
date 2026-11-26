@@ -3,12 +3,26 @@ name: release-please
 # Release automation (config in .github/release-please-config.json,
 # versions in .release-please-manifest.json): a push to main with new
 # commits beyond the latest tag opens/updates a release PR — bumps the
-# root Cargo.toml version and rewrites the CHANGELOG.md section.
-# Merging that PR cuts the `vX.Y.Z` tag and the GitHub release. The
+# root Cargo.toml version and rewrites the CHANGELOG.md section. The
 # release PR gets the same manual review as every other PR.
+#
+# Regime (repo setting "immutable release assets", permanently ON): GitHub
+# stamps a release immutable AT CREATION TIME — an immutable release can
+# never receive an asset upload, and a tag ever used by an immutable
+# release can never be reused. So the GitHub release must be created
+# exactly once, in one shot, WITH its assets — by the tag-push workflow
+# (release.yml), never by release-please. Hence:
+#   - the action runs with skip-github-release: true → on release-PR merge
+#     it creates NEITHER tag NOR release (release PRs still open/update);
+#   - the cut-tag job below cuts the `vX.Y.Z` tag and pushes it. Only a
+#     real `git push` fires the `push: tags` event that release.yml
+#     listens for — API-created refs (what release-please used to do) do
+#     not (v1.2.0 incident).
 #
 # Run gate: the action only runs when main has commits beyond the latest
 # release tag — a push that lands nothing new since the tag skips it.
+# (After cut-tag has tagged the release-PR merge, the NEXT push
+# re-evaluates normally.)
 on:
   push:
     branches: [main]
@@ -52,3 +66,55 @@ jobs:
           # The googleapis action defaults to the repo root; this repo keeps
           # the config in .github/ (the former google-github-actions place).
           config-file: .github/release-please-config.json
+          # Never create the tag/release (see header): release-please would
+          # create the release asset-less, which under the permanent
+          # "immutable release assets" setting can never receive the
+          # assets — and would poison the tag forever. The action still
+          # opens/updates the release PR (skipGitHubPullRequest is unset).
+          # Verified in the action source: src/index.ts:141-144 —
+          # manifest.createReleases() (tag + release) is only called when
+          # this flag is false; the release-PR block (src/index.ts:147-150)
+          # is gated separately.
+          skip-github-release: true
+
+  # Cuts the release tag that release-please no longer creates.
+  # WHY (comment block, per the regime above):
+  #  1. With skip-github-release: true, merging the release PR produces no
+  #     tag from the action — the tag has to be cut by us.
+  #  2. A real `git push` of the tag is what fires release.yml's
+  #     `push: tags` trigger; API-created refs do not (v1.2.0 shipped with
+  #     0 assets exactly because of this).
+  #  3. The tag push then builds the artifacts and creates the release in
+  #     ONE shot with all assets — the only shape that works under the
+  #     immutable-release-assets setting.
+  # Idempotent: manifest version already tagged → no-op. Runs only when
+  # the gate ran the action job above (skipped together otherwise).
+  # Note: a tag push does NOT trigger ci.yml — its push trigger is
+  # filtered to branches: [main] — so this tag is the only workflow
+  # collateral of the merge push.
+  cut-tag:
+    needs: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Cut tag for the manifest version
+        run: |
+          # The root (canonical) component lives under the key "." in the
+          # manifest — verified against the checked-in file and against
+          # .github/release-please-config.json ("packages": { ".": {} }).
+          version="$(jq -r '."."' .release-please-manifest.json)"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "ERROR: no version under key \".\" in .release-please-manifest.json — refusing to guess a tag" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+            echo "tag ${tag} already exists — nothing to do"
+            exit 0
+          fi
+          git tag "${tag}" HEAD
+          git push origin "${tag}"
+          echo "cut + pushed ${tag} at $(git rev-parse HEAD)"
