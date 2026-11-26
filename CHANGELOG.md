@@ -5,6 +5,20 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## [1.3.0](https://github.com/ripmav/pi-rust/compare/v1.2.1...v1.3.0) (2026-11-26)
+
+
+### Features
+
+* release pipeline — cut tags + create asset-bearing releases under immutable releases ([40ebe57](https://github.com/ripmav/pi-rust/commit/40ebe575b13e56f90fb7850c1e932619368a8345))
+* release pipeline — cut tags + create asset-bearing releases under immutable releases ([e6b1c8e](https://github.com/ripmav/pi-rust/commit/e6b1c8e78d8a8eb612ec8ea41d3c3c4551f96ad9))
+
+
+### Bug Fixes
+
+* release workflow — publish under immutable release assets ([32b4cdc](https://github.com/ripmav/pi-rust/commit/32b4cdc20b4ae9813f8d8a8e44d7c90af7e71a3f))
+* release workflow — publish under immutable release assets ([0979e85](https://github.com/ripmav/pi-rust/commit/0979e85ef59753b2f50cba78c97bed2b8888710c))
+
 ## [1.2.1](https://github.com/ripmav/pi-rust/compare/v1.2.0...v1.2.1) (2026-11-26)
 
 
