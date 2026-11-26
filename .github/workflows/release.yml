@@ -7,6 +7,16 @@
 #     pi-rust            (stripped release binary)
 #     sidecar/           (the bridge + original loader wiring)
 #     upstream/          (built pinned upstream tree, dev deps pruned)
+#
+# WHY workflow_dispatch exists (v1.2.0 incident, 2026-11-25): release-please
+# creates its tags via the GitHub API (git.createRef), and GitHub does not
+# fire push:tags events for API-created refs — so the tag-push trigger below
+# never ran for v1.2.0 and the release shipped with 0 assets. Tags cannot be
+# deleted (repo rule; release assets are immutable), so "delete + re-push"
+# is off the table. Operating instruction: after a release PR is merged, if
+# the release has no assets, trigger this workflow manually via Actions
+# (workflow_dispatch, tag=vX.Y.Z). Re-running is safe: the publish job is
+# idempotent (create-if-missing, else `gh release upload --clobber`).
 name: release
 
 # gh release (the gh CLI ships on the runners) publishes the artifacts —
@@ -18,10 +28,22 @@ permissions:
 on:
   push:
     tags: ["v*"]
+  # release-please tags are API-created (git.createRef) and never fire the
+  # tag push above; the operator passes the tag here (see header comment).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build/publish, e.g. v1.2.0"
+        required: true
+        type: string
 
 env:
   UPSTREAM_SHA: "64a15f4bee63d761d5398bf4126ea63abef0dc98"
   CARGO_TERM_COLOR: always
+  # The tag for this run: the dispatch input when present, else the pushed
+  # tag. Steps and checkouts must use TAG, never GITHUB_REF_NAME — on
+  # workflow_dispatch the event ref is the base branch, not the tag.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -46,6 +68,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }} # the tag to build (dispatch input or pushed tag)
 
       # The sidecar runs the ORIGINAL upstream loader: the package ships the
       # pinned, built upstream tree (dev deps pruned for size).
@@ -92,7 +116,7 @@ jobs:
 
       - name: Stage + package
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           mkdir -p dist
           for t in ${{ join(matrix.targets, ' ') }}; do
             # WP-1008: the Windows artifact carries the .exe name (the four
@@ -118,7 +142,7 @@ jobs:
       # Cross targets run under qemu (linux) / Rosetta (macOS x86_64).
       - name: Smoke-check artifacts
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           # check <dir> [runner...]: run the artifact's pi-rust (under an
           # optional qemu/Rosetta runner) and expect the fake echo.
           # The runner is a command prefix — never an argument to the binary.
@@ -172,6 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TAG }} # the tag to publish (dispatch input or pushed tag)
           fetch-depth: 0 # full history for the changelog (git describe --tags)
       - uses: actions/download-artifact@v8
         with:
@@ -189,7 +214,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${TAG}"
           prerelease=""
           case "$tag" in *staging*) prerelease="--prerelease";; esac
           prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
