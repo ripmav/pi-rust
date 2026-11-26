@@ -8,9 +8,11 @@
 # release can never be reused. So this workflow is the ONLY place a
 # release object is created: in one shot, with ALL its assets.
 # release-please no longer creates tags/releases (skip-github-release: true
-# in release-please.yml) — its cut-tag job pushes a real tag (an
-# API-created ref would not fire this `push: tags` event), which triggers
-# this workflow automatically.
+# in release-please.yml) — its cut-tag job pushes a real tag and then
+# dispatches this workflow explicitly via the workflow_dispatch surface
+# below (a tag pushed by the workflow's own token does NOT fire this
+# `push: tags` event — self-trigger suppression, v1.3.0 incident). A
+# human-cut tag pushed manually still triggers it via the push event.
 #
 # Manual fallback (workflow_dispatch, tag input): same publish path for a
 # tag that did not trigger this workflow. Re-running is safe: a release
@@ -45,8 +47,10 @@ permissions:
 on:
   push:
     tags: ["v*"]
-  # release-please tags are no longer a concern (cut-tag pushes real tags);
-  # this is the manual fallback for a tag that did not fire the push above.
+  # The dispatch surface is the PRIMARY trigger (release-please.yml's
+  # cut-tag dispatches it explicitly after pushing the tag — self-trigger
+  # suppression) and the manual fallback for a tag that did not fire the
+  # push above.
   workflow_dispatch:
     inputs:
       tag:
