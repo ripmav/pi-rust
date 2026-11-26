@@ -261,7 +261,7 @@ jobs:
             # releases" setting it can NEVER receive an upload): create it
             # in one shot with the assets, preserving the release-please
             # changelog body.
-            existing_notes="$(gh release view "$tag" --json body --jq -r '.body // empty' 2>/dev/null || true)"
+            existing_notes="$(gh release view "$tag" --json body --jq '.body // empty' 2>/dev/null || true)"
             [ -n "$existing_notes" ] && gh release delete "$tag" --yes
             if [ -n "$existing_notes" ]; then notes="$existing_notes"; fi
             gh release create "$tag" --title "pi-rust ${tag}" --target "$tag" \
