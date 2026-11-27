@@ -5,6 +5,14 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## [1.3.2](https://github.com/ripmav/pi-rust/compare/v1.3.1...v1.3.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* release — build and bundle the four provider plugins (providers/ dir missing from tarballs) ([e9738d0](https://github.com/ripmav/pi-rust/commit/e9738d02b35509d32e0ff3ba39bdadb03eedfd66))
+* release — build and bundle the four provider plugins (providers/ dir missing from tarballs) ([3bad136](https://github.com/ripmav/pi-rust/commit/3bad136d8807fa275cd5c5728aa556ae2864ee26))
+
 ## [1.3.1](https://github.com/ripmav/pi-rust/compare/v1.3.0...v1.3.1) (2026-11-27)
 
 
