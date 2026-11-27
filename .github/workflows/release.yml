@@ -164,7 +164,7 @@ jobs:
       # core cannot dlopen anyway (musl: "Dynamic loading not supported")
       # — a bundled plugin could never load there. The musl artifact ships
       # without providers/ (a missing dir = "no plugins", the typed
-      # "plugin not found" login path applies; open decision D18).
+      # "plugin not found" login path applies; D18 answered: (a) dynamic musl core + musl plugins — E4S4, until then this is the interim state).
       - name: Build provider plugins
         run: |
           cd plugins
