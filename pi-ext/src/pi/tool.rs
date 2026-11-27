@@ -127,6 +127,12 @@ pub struct ToolContext<'a> {
 }
 
 impl<'a> ToolContext<'a> {
+    /// Build the context (runtime entry; tests).
+    #[must_use]
+    pub fn new(ctx: &'a ExtensionContext, transport: &'a dyn ExtensionTransport) -> Self {
+        Self { ctx, transport }
+    }
+
     /// The extension context of the running extension.
     pub fn ctx(&self) -> &ExtensionContext {
         self.ctx

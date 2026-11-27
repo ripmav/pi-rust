@@ -44,6 +44,30 @@ sidecar (server). The protocol is **versioned and additive-only**:
 - A protocol **bump** (protocolVersion +1) is required for any breaking
   change.
 
+## Extension API (`pi-ext`)
+
+The `pi-ext` crate's `pi` module — the `pi` object + `ctx` mirror of the
+upstream extension API ([ADR 0002](adr/0002-mirror-full-upstream-extension-api.md)) — is
+**pre-stable: 0.x policy** until the extension API is declared stable
+(ADR 0003):
+
+- **0.x semver**: breaking changes to the `pi` API surface are allowed in
+  **minor** crate releases and carry a migration note in that version's
+  release notes; non-breaking additions ship any time. The crate's
+  version number tracks the repo release for convenience — the
+  stability *level* is 0.x, so the v1 freeze above does not apply to it.
+- **The mirror is the contract**: the surface is the 1:1 wire-expressible
+  mirror of the upstream `pi` + `ctx` API. The catalog ↔ API parity test
+  (`pi-ext/tests/parity.rs` against `pi-ext/tests/fixtures/v6-catalog.jsonl`)
+  enforces the ADR 0002 parity rule on every run: no capability exists
+  in the framework that the bridge v6 catalog cannot express, and no v6
+  catalog capability is missing from the framework.
+- **Wire types**: `pi_ext::wire` is pinned to bridge protocol v6 —
+  additive-only, same rules as the Bridge protocol section above.
+- A **stable extension API** is a deliberate milestone decision (E1S2),
+  not a version-number change; only after it do the v1-freeze and
+  deprecation-policy sections of this contract apply to `pi-ext`.
+
 ## Session file format
 
 The **upstream JSONL v3 format** (README § Sessions): one JSON object

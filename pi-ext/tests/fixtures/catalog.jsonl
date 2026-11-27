@@ -52,3 +52,6 @@
 {"type":"pane_close","id":"p1"}
 {"id":"p1","type":"pane_key","key":{"code":"down"}}
 {"type":"provider_stream_event","streamId":"s-42","event":{"type":"done","reason":"toolUse","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"a"}}],"api":"fake","provider":"fake","model":"fake/m","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":4},"stopReason":"toolUse","timestamp":9}}}
+{"type":"mcp_server_register","name":"jira","config":{"url":"https://mcp.example.com/jira","exposure":"direct"},"extensionPath":"/home/u/.pi/extensions/jira/index.ts"}
+{"id":"r1","type":"response","command":"mcp_server_register","success":true}
+{"type":"mcp_servers_change","event":{"type":"mcp_servers_change","servers":[{"name":"cfg","config":{"command":"node","args":["srv.mjs"]}},{"name":"jira","config":{"url":"https://mcp.example.com/jira","exposure":"direct"},"extensionPath":"/home/u/.pi/extensions/jira/index.ts"}]}}

@@ -6,8 +6,10 @@
 //! (`{ id, type, …payload }`, `id` = UUID from the core — except
 //! `extension_ui_response`/`pane_key`, whose `id` is the dialog/pane id
 //! they reply to). Sidecar→core lines are [`Response`]s to commands
-//! (`{ id, type: "response", command, success, data? | error? }`) or
-//! standalone [`SidecarEvent`]s (no `id`, no response expected).
+//! (`{ id, type: "response", command, success, data? | error? }`),
+//! standalone [`SidecarEvent`]s (no `id`, no response expected) or the
+//! sidecar's req/resp requests to the core (modeled as
+//! [`SidecarEvent`] variants, the peer's `id` not modeled).
 //! `stdout` is protocol output only; logs go to stderr.
 //!
 //! Field tolerance rule (see `messages` module docs): apart from the
@@ -33,7 +35,8 @@ pub enum BridgeLine {
     Command(Command),
     /// Sidecar→core response to a command.
     Response(Response),
-    /// Sidecar→core standalone event (no `id`).
+    /// A standalone typed line (sidecar event, sidecar request or the
+    /// core's `mcp_servers_change`; see [`SidecarEvent`]).
     Event(SidecarEvent),
 }
 
@@ -376,8 +379,11 @@ pub struct Response {
     pub error: Option<String>,
 }
 
-/// Sidecar→core standalone events, `type`-tagged (no `id`, no response
-/// expected).
+/// Standalone typed lines without a matching `Command`: the sidecar's
+/// events (no `id`, no response expected), the sidecar's req/resp
+/// requests to the core (`set_model_request` & co — the peer's `id`
+/// field is not modeled here) and the core's fire-and-forget
+/// `mcp_servers_change` line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarEvent {
@@ -427,6 +433,20 @@ pub enum SidecarEvent {
     /// A provider registered/unregistered post-ready (v1): the core
     /// re-keys per-turn routing from the payload.
     ProvidersChanged { providers: Vec<Provider> },
+    /// `pi.registerMcpServer` forwarded to the core (v6, req/resp):
+    /// the core hosts the server (MCP servers §) and answers success;
+    /// an invalid entry, a duplicate name or an `oauth`/`auth` entry is a
+    /// typed error response the sidecar surfaces as `extension_error`.
+    #[serde(rename_all = "camelCase")]
+    McpServerRegister {
+        name: String,
+        config: McpServerConfig,
+        extension_path: String,
+    },
+    /// The core's full MCP set changed (core→sidecar, no `id`, F&F); the
+    /// sidecar relays it to extensions subscribed to
+    /// `mcp_servers_change`.
+    McpServersChange { event: McpServersChangeEvent },
     /// One event of a `provider_stream` invocation (v1); `done`/`error`
     /// is terminal for the `streamId`.
     #[serde(rename_all = "camelCase")]

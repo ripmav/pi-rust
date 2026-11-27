@@ -297,6 +297,38 @@ fn catalog_lines_carry_the_right_types() {
         }
         other => panic!("pane_key: {other:?}"),
     }
+
+    // v6 MCP forward (E3S5 follow-up): the extension's registerMcpServer.
+    let mreg: BridgeLine = serde_json::from_str(l(54)).unwrap();
+    match mreg {
+        BridgeLine::Event(SidecarEvent::McpServerRegister {
+            name,
+            config,
+            extension_path,
+        }) => {
+            assert_eq!(name, "jira");
+            assert_eq!(config.url.as_deref(), Some("https://mcp.example.com/jira"));
+            assert_eq!(config.exposure.as_deref(), Some("direct"));
+            assert_eq!(extension_path, "/home/u/.pi/extensions/jira/index.ts");
+        }
+        other => panic!("mcp_server_register: {other:?}"),
+    }
+
+    // The core's full MCP set (configured + extension-registered).
+    let mchange: BridgeLine = serde_json::from_str(l(56)).unwrap();
+    match mchange {
+        BridgeLine::Event(SidecarEvent::McpServersChange { event }) => {
+            assert_eq!(event.servers.len(), 2);
+            assert_eq!(event.servers[0].name, "cfg");
+            assert_eq!(event.servers[0].extension_path, None);
+            assert_eq!(event.servers[1].name, "jira");
+            assert_eq!(
+                event.servers[1].extension_path.as_deref(),
+                Some("/home/u/.pi/extensions/jira/index.ts")
+            );
+        }
+        other => panic!("mcp_servers_change: {other:?}"),
+    }
 }
 
 #[test]
