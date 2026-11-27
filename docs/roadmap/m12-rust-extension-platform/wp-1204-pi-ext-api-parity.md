@@ -1,6 +1,6 @@
 # WP-1204 — `pi-ext`: API surface — rest + parity
 
-**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** open · **Depends on:** WP-1203
+**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** done (PR #190) · **Depends on:** WP-1203
 
 ## Goal
 Complete the 1:1 mirror of the upstream API

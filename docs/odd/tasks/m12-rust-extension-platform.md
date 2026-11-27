@@ -78,3 +78,11 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
   involvement); E1S2 at 3/6, next: WP-1204. Note: GitHub stacks need ≥2
   open PRs, so the single open WP PRs are unregistered until the next
   WP PR opens (register [154, next] then).
+- **L6** (2026-11-27): WP-1204 delivered — PR #190
+  (`feat/wp-1204-pi-ext-api-parity`): remaining `pi-ext` API surface
+  (commands/shortcuts/flags, provider registration + stream surface, MCP
+  registration, `ctx.ui` surface incl. `custom` pane + no-UI default,
+  `on_mcp_servers_change` + the v6 MCP wire types) and the catalog ↔ API
+  parity test (52 capabilities, `pi-ext/tests/parity.rs` ↔
+  `fixtures/v6-catalog.jsonl`, both directions); `pi-ext` 0.x section added
+  to stability-contract.md; E1S2 at 4/6, next: WP-1205.
