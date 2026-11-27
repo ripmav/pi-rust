@@ -88,7 +88,11 @@ flowchart LR
   `kimi-coding` oauth builtin (core-owned — D15), and since E4S2 (M15)
   neither for the other four (radius, github-copilot, xai, meta) — those
   are core provider plugins now, so the sidecar's final form is
-  **js/ts-extensions-only** (D15 answered 2026-11-24). Its remaining
+  **js/ts-extensions-only** (D15 answered 2026-11-24). A separate helper in the
+  same tree (`sidecar/auth-login.mjs` — not the bridge sidecar) runs the
+  unmodified upstream terminal auth-login flow for the providers the core and
+  plugins do not own (Node required; parity audit 2026-11, §2 #27). Its
+  remaining
   built-in extension hosting
   (tool-search/llama/codemode) is itself js/ts and stays until its own
   core-native stories, if the user wants them.
@@ -188,7 +192,8 @@ Provider implementations can ship as **plugins**: Rust cdylibs the core
 loads in-process at startup (the ADR 0005/0006 pattern applied to
 providers). Contract: [`docs/provider-plugin-abi.md`](provider-plugin-abi.md).
 
-- **Loading:** `<exe dir>/providers/` (bundled, ships with the binary) then
+- **Loading:** `<exe dir>/providers/` (the bundled dir next to the installed
+  binary) then
   `<agentDir>/providers/` (user dir) — name collision: the user dir wins,
   override logged. Every failing plugin file (unreadable, missing entry
   symbol, `abi_version` mismatch, bad `list_models` JSON, panic) is a typed
@@ -237,9 +242,14 @@ pi-rust/
 
 ## Release & install
 
-One packed payload per target: binary + `sidecar/` + `core-ext/` (libraries +
-manifest); `install.sh` unpacks it. CI must `dlopen` each core library in a
-host process and run its suite before release.
+One packed payload per target: the stripped binary + `sidecar/` + `upstream/`
+(the pinned, built tree; the package layout is documented in the [release
+workflow](https://github.com/ripmav/pi-rust/blob/main/.github/workflows/release.yml));
+`install.sh` unpacks it. The `core-ext/` libraries join the payload when
+E1S2–E1S5 land (the target-state layout above,
+[ADR 0005](./adr/0005-bridge-matrix-ports-as-core-extensions.md) +
+[ADR 0006](./adr/0006-core-extensions-load-in-process-as-so.md)); CI must then
+`dlopen` each core library in a host process and run its suite before release.
 
 ## Cross-cutting
 
