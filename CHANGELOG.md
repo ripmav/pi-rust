@@ -5,6 +5,16 @@ since the first staging release is listed. Dates are tag dates.
 Entries from the first release-please release onward are generated from
 conventional commits (see `README.md` → Releases).
 
+## [1.3.1](https://github.com/ripmav/pi-rust/compare/v1.3.0...v1.3.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* cut-tag dispatches release.yml explicitly after tag push ([31877b0](https://github.com/ripmav/pi-rust/commit/31877b003460fcb374adbe41b7b2c796ea6e8ca4))
+* cut-tag moves release PR label to autorelease: tagged ([c069528](https://github.com/ripmav/pi-rust/commit/c069528b32451c7e5658da80e297a70726d528ef))
+* cut-tag moves release PR label to autorelease: tagged (release-please aborts otherwise) ([bdfd19a](https://github.com/ripmav/pi-rust/commit/bdfd19a47977c947111d65c2cec8037b6b1413ba))
+* cut-tag triggers release.yml explicitly (workflow token tag pushes don't fire push:tags) ([c589137](https://github.com/ripmav/pi-rust/commit/c58913714238cbbcd825b819f66932aeb21d09b1))
+
 ## [1.3.0](https://github.com/ripmav/pi-rust/compare/v1.2.1...v1.3.0) (2026-11-26)
 
 
