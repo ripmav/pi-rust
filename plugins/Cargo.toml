@@ -1,0 +1,11 @@
+# Workspace root for the four E4S2 provider plugins (radius,
+# github-copilot, xai, meta). The release pipeline (release.yml) builds
+# all four per target in ONE cargo invocation from this dir — the
+# shared plugins/target dir means one aws-lc C compile per target (the
+# four crates share the reqwest/tokio/aws-lc tree). Like
+# plugin-samples, this dir is a separate workspace: the parent (pi-rust)
+# workspace never includes it, so the normal root cargo build/test/clippy
+# never compiles the plugins.
+[workspace]
+resolver = "2"
+members = ["radius", "github-copilot", "xai", "meta"]
