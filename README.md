@@ -31,8 +31,10 @@ tree and the four provider plugins in `providers/` (radius,
 github-copilot, xai, meta — the bundled OAuth logins), no npm install
 needed). Exception: the Linux arm64 (musl) tarball has no `providers/`
 — a static musl binary cannot dlopen, so the plugins could never load
-there (their logins degrade to the typed "plugin not found" path; open
-decision D18).
+there (their logins degrade to the typed "plugin not found" path;
+D18 answered 2026-11-28: the musl core will be built dynamically and
+the plugins bundled for musl — **E4S4**, until then this is the
+interim state).
 
 **Windows (WP-1008):** `install.sh` stays POSIX-only (upstream ships no
 Windows installer either) — download the
@@ -294,8 +296,9 @@ symbol `pi_provider_plugin_init`, a 9-slot C vtable, JSON payloads,
   builds them on demand and ships them next to the test binary, the
   `<exe dir>/providers/` layout a release uses — the release pipeline
   builds them per target and bundles them in the tarball's `providers/`
-  dir; the musl target ships none — a static musl binary cannot dlopen,
-  so the plugins could never load there, D18). They implement the pinned
+  dir; the musl target ships none until E4S4 — a static musl binary cannot dlopen,
+  so the plugins could never load there; D18 answered (a): the musl core will be
+  built dynamically and the plugins bundled for musl (E4S4)). They implement the pinned
   upstream's provider logic: **xai** (device-code login, OpenAI-responses
   wire), **meta** (device-code login + the Muse Code key-mint — the minted
   key ≈24 h is the access token, the identity token is the refresh
@@ -617,7 +620,7 @@ pi-ext/         public Rust extension framework crate (M12, ADR 0003)
 sidecar/        Node sidecar (protocol server, API shim, dialogs, session view, smoke)
 tests/          e2e integration tests (spawn core + sidecar + unmodified extensions)
 tests/fixtures/ test-only fixture extensions (clearly marked; not upstream code)
-docs/           bridge-protocol.md (protocol contract), cli-reference.md (diff-tested CLI reference)
+docs/           bridge-protocol.md (protocol contract), cli-reference.md (diff-tested CLI reference), parity/ (upstream parity audits)
 benches/        baseline.json — perf baseline for the CI bench job (WP-905)
 odd/tasks/      feature spec + task log per milestone (S#/L# entries)
 upstream/       earendil-works/pi @ 64a15f4 (gitignored reference clone)
