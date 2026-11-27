@@ -1,5 +1,6 @@
 upstream/
 node_modules/
 target/
+dist/
 .atl/
 *.log

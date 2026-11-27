@@ -25,6 +25,14 @@
 #     pi-rust            (stripped release binary)
 #     sidecar/           (the bridge + original loader wiring)
 #     upstream/          (built pinned upstream tree, dev deps pruned)
+#     providers/         (the four E4S2 provider plugins — Rust cdylibs,
+#                          ABI v1: radius/github-copilot/xai/meta; the core
+#                          loads them from <exe dir>/providers/ at startup,
+#                          src/provider/plugin.rs) — ABSENT on the
+#                          aarch64-unknown-linux-musl target: rustc cannot
+#                          emit a cdylib for musl targets, and a static
+#                          musl binary cannot dlopen at all (see D18,
+#                          docs/decisions-open.md)
 #
 # WHY workflow_dispatch exists (v1.2.0 incident, 2026-11-25): release-please
 # used to create its tags via the GitHub API (git.createRef), and GitHub
@@ -86,7 +94,10 @@ jobs:
           - os: windows-latest
             targets: ["x86_64-pc-windows-msvc"]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # +10 min headroom over the pre-E4S2 budget: the provider plugins add
+    # one more per-target aws-lc C compile (the plugins/ workspace build
+    # below) on top of the core build.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
         with:
@@ -135,6 +146,36 @@ jobs:
             fi
           done
 
+      # E4S2: the four oauth builtins (radius, github-copilot, xai, meta)
+      # are provider plugins — Rust cdylibs the core loads from
+      # <exe dir>/providers/ at startup (src/provider/plugin.rs). They are
+      # NOT compiled into the binary, so the release must build + ship
+      # them. Same cross-compilation mechanism as the core above
+      # (cargo build --release --target <t>). plugins/ is its own cargo
+      # workspace: one invocation per target builds all four into the
+      # shared plugins/target (one aws-lc C compile per target — the four
+      # crates share the reqwest/tokio/aws-lc tree; the e2e's shared-target
+      # pattern). The packaging step stages the cdylibs into
+      # dist/<name>/providers/ with the loader's per-platform names.
+      #
+      # aarch64-unknown-linux-musl: SKIPPED — rustc cannot emit a cdylib
+      # for musl targets (the target spec defaults to a static CRT and
+      # disallows dylibs, invalid_output_for_target), and the static musl
+      # core cannot dlopen anyway (musl: "Dynamic loading not supported")
+      # — a bundled plugin could never load there. The musl artifact ships
+      # without providers/ (a missing dir = "no plugins", the typed
+      # "plugin not found" login path applies; open decision D18).
+      - name: Build provider plugins
+        run: |
+          cd plugins
+          for t in ${{ join(matrix.targets, ' ') }}; do
+            if [ "$t" = "aarch64-unknown-linux-musl" ]; then
+              echo "skip provider plugins for $t (no cdylib on musl, no dlopen in the static core — D18)"
+              continue
+            fi
+            cargo build --release --target "$t"
+          done
+
       - name: Stage + package
         run: |
           tag="${TAG#v}"
@@ -152,6 +193,30 @@ jobs:
             name="pi-rust-${tag}-${t}"
             mkdir -p "dist/${name}"
             install -m 0755 "target/${t}/release/$exe" "dist/${name}/$exe"
+            # E4S2: the four provider plugins (cdylibs, ABI v1). The loader
+            # scans <exe dir>/providers/ for the platform ext (so/dylib/dll,
+            # src/provider/plugin.rs); the provider name comes from the
+            # vtable, not the file name. File name = cargo lib naming for
+            # crate pi-provider-<p> (dashes -> underscores, lib prefix
+            # unix-only) — the same convention the e2e's plugin_file_name
+            # uses (tests/provider_oauth_plugins.rs). musl: no plugins
+            # (D18 — no cdylib on musl, no dlopen in the static core).
+            if [ "$t" != "aarch64-unknown-linux-musl" ]; then
+              mkdir -p "dist/${name}/providers"
+              case "$t" in
+                *windows*) pre=""; ext="dll" ;;
+                *darwin*) pre="lib"; ext="dylib" ;;
+                *) pre="lib"; ext="so" ;;
+              esac
+              for p in radius github-copilot xai meta; do
+                lib="${pre}pi_provider_${p//-/_}.${ext}"
+                src="plugins/target/${t}/release/${lib}"
+                [ -f "$src" ] || { echo "FATAL: missing provider plugin artifact ${src} (Build provider plugins step)"; exit 1; }
+                # best effort, same as the core binary above.
+                strip "$src" || echo "WARN: strip failed for ${lib}, packaging unstripped"
+                install -m 0644 "$src" "dist/${name}/providers/${lib}"
+              done
+            fi
             cp -r sidecar "dist/${name}/sidecar"
             mkdir -p "dist/${name}/upstream"
             cp -r upstream/packages upstream/node_modules upstream/package.json "dist/${name}/upstream/"
@@ -185,18 +250,34 @@ jobs:
               *"echo: hi"*) echo "smoke OK: $dir" ;;
               *) echo "smoke FAIL: $dir"; printf '%s\n' "$out" | head -5; head -10 "$err"; return 1 ;;
             esac
+            # E4S2: the four bundled provider plugins must be discovered
+            # from <exe dir>/providers/ (the load lines land on stderr in
+            # headless mode, src/corelog.rs) — this is what makes the
+            # bundled OAuth logins work in the installed artifact.
+            # musl: no bundled plugins (D18) — WANT_PLUGINS=0 below.
+            if [ "${WANT_PLUGINS:-1}" = "1" ]; then
+              for p in radius github-copilot xai meta; do
+                grep -q "provider plugin loaded: ${p} " "$err" || {
+                  echo "smoke FAIL: provider plugin ${p} not discovered in $dir"; head -10 "$err"; return 1
+                }
+              done
+            fi
           }
           for t in ${{ join(matrix.targets, ' ') }}; do
             name="pi-rust-${tag}-${t}"
             case "$t" in
-              x86_64-unknown-linux-gnu) check "dist/$name" ;;
+              x86_64-unknown-linux-gnu) WANT_PLUGINS=1; check "dist/$name" ;;
               aarch64-unknown-linux-musl)
+                # D18: no bundled plugins on musl (no dlopen in the
+                # static core) — the smoke check asserts the run works
+                # only.
+                WANT_PLUGINS=0
                 sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
                 check "dist/$name" qemu-aarch64 # static musl binary under qemu
                 ;;
-              aarch64-apple-darwin) check "dist/$name" ;;
-              x86_64-apple-darwin) check "dist/$name" ;; # Rosetta on the arm64 runner
-              x86_64-pc-windows-msvc) check "dist/$name" ;; # native on the Windows runner
+              aarch64-apple-darwin) WANT_PLUGINS=1; check "dist/$name" ;;
+              x86_64-apple-darwin) WANT_PLUGINS=1; check "dist/$name" ;; # Rosetta on the arm64 runner
+              x86_64-pc-windows-msvc) WANT_PLUGINS=1; check "dist/$name" ;; # native on the Windows runner
             esac
           done
 

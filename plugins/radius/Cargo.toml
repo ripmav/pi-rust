@@ -1,8 +1,9 @@
 # Radius provider plugin (E4S2/WP-1502): port of the upstream
 # `radiusProvider` (pinned upstream 64a15f4) — wire API `pi-messages`
 # (gateway /v1/messages) + the gateway device-code oauth flow
-# (upstream `auth/oauth/radius.ts`). Standalone crate (own workspace) like
-# plugin-samples/openai-compat; built on demand by the e2e
+# (upstream `auth/oauth/radius.ts`). Member of the plugins/ workspace
+# (plugins/Cargo.toml — the release pipeline builds all four per target
+# in one invocation); built on demand by the e2e
 # (tests/provider_oauth_plugins.rs), ships as a bundled plugin
 # (<exe dir>/providers/).
 [package]
@@ -14,9 +15,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
-# Own workspace root: excluded from the parent (pi-rust) workspace so the
-# normal build/test/clippy never compile it (same isolation as the sample).
-[workspace]
+# Excluded from the parent (pi-rust) workspace (own workspace root at
+# plugins/, same isolation as the sample): the normal root
+# build/test/clippy never compile it.
 
 [dependencies]
 serde_json = "1"

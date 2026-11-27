@@ -27,7 +27,12 @@ overridable with `PI_RUST_INSTALL_ROOT` / `PI_RUST_BIN_DIR`). Targets:
 Linux x86_64 (gnu), Linux arm64 (musl), macOS x86_64 + arm64, Windows
 x86_64 (msvc). Requires bash, curl, tar and **node ≥ 22.19** (the
 extension sidecar runs on Node; the tarball ships the built `upstream/`
-tree, no npm install needed).
+tree and the four provider plugins in `providers/` (radius,
+github-copilot, xai, meta — the bundled OAuth logins), no npm install
+needed). Exception: the Linux arm64 (musl) tarball has no `providers/`
+— a static musl binary cannot dlopen, so the plugins could never load
+there (their logins degrade to the typed "plugin not found" path; open
+decision D18).
 
 **Windows (WP-1008):** `install.sh` stays POSIX-only (upstream ships no
 Windows installer either) — download the
@@ -284,10 +289,13 @@ symbol `pi_provider_plugin_init`, a 9-slot C vtable, JSON payloads,
   compiled-in builtins (your own dirs) — no sandbox.
 - **The four oauth builtins ship as plugins (E4S2):**
   `plugins/radius/`, `plugins/github-copilot/`, `plugins/xai/`,
-  `plugins/meta/` — standalone crates like the sample (the normal
+  `plugins/meta/` — the `plugins/` cargo workspace (the normal root
   `cargo build` never compiles them; the e2e `tests/provider_oauth_plugins.rs`
   builds them on demand and ships them next to the test binary, the
-  `<exe dir>/providers/` layout a release uses). They implement the pinned
+  `<exe dir>/providers/` layout a release uses — the release pipeline
+  builds them per target and bundles them in the tarball's `providers/`
+  dir; the musl target ships none — a static musl binary cannot dlopen,
+  so the plugins could never load there, D18). They implement the pinned
   upstream's provider logic: **xai** (device-code login, OpenAI-responses
   wire), **meta** (device-code login + the Muse Code key-mint — the minted
   key ≈24 h is the access token, the identity token is the refresh
