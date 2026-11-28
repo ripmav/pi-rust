@@ -52,16 +52,30 @@ pub struct Capabilities {
     pub timeout_ms: u64,
 }
 
-/// An MCP server config entry (upstream `McpServerConfig`, the JSON
-/// fields that cross the wire; stdio = `command`/`args`/`env`, remote =
-/// `url`/`headers`; `$ENV_VAR` expansion happens sidecar-side).
+/// An MCP server config entry (upstream `McpServerConfig` — the
+/// `mcp.json` entry shape the core's `register_server` path accepts:
+/// `type` (`"stdio"` | `"http"`, inferred from `command`/`url` when
+/// absent), stdio = `command`/`args`/`cwd`/`env`, remote = `url`/
+/// `headers`, per-server `timeout`/`enabled`/`exposure`/`toolExposure`;
+/// `$ENV_VAR` expansion happens sidecar-side). Core-unconsumed fields:
+/// `auth` is opaque passthrough — the core rejects `oauth`/`auth`
+/// entries with a typed error (D17) but the wire carries the field;
+/// upstream `description` is not modeled (the core never consumes it).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
+    /// `"stdio"` | `"http"` (upstream `type`; an unknown value is a
+    /// typed core rejection).
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub server_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    /// stdio working directory (relative = against the session cwd,
+    /// `~` expands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,13 +84,20 @@ pub struct McpServerConfig {
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// `direct` | `codemode` | `deferred` (upstream `McpExposure`).
+    /// `direct` | `codemode` | `deferred` | `hidden` (upstream
+    /// `McpExposure`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<String>,
     /// Per-tool exposure overrides — opaque JSON (accepted by validation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_exposure: Option<Value>,
-    /// OAuth fields (v0: accepted by validation, not wired) — opaque JSON.
+    /// Per-request timeout in seconds (upstream `timeout`, a number;
+    /// the core rounds to whole seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<f64>,
+    /// Opaque upstream `auth` (e.g. `{ "provider": "…" }`): the core
+    /// rejects `oauth`/`auth` entries with a typed error (D17) —
+    /// modeled so the wire can carry the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Value>,
 }

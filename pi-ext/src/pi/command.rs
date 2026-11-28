@@ -5,8 +5,10 @@
 //! `command`/`shortcut` dispatch lines (v4). Flag *values* never cross
 //! the wire — the core spawns the extension with the CLI flags, and
 //! `getFlag` resolves them from the process command line (upstream CLI
-//! parsing: `--name=value`, `--name value`, bare `--name` = `true`),
-//! falling back to the registered default.
+//! parsing: `--name=value`, `--name value`, bare `--name` = `true`;
+//! the scan stops at `--`, the last occurrence wins), falling back to
+//! the registered default — a boolean flag is `true` for any
+//! occurrence, a string flag only for a valued one.
 
 use crate::pi::ExtensionContext;
 use serde_json::Value;

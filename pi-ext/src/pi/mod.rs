@@ -374,10 +374,14 @@ impl Pi {
     /// `pi.getFlag` — the CLI value when given on the process command
     /// line (the core spawns the extension with the CLI flags), else
     /// the registered default; `None` when the flag is not registered.
+    /// Upstream `applyExtensionFlagValues` coercion: a **boolean**
+    /// flag is `true` for any CLI occurrence (an `=value` is ignored);
+    /// a **string** flag takes the CLI string value — a bare occurrence
+    /// (no value) carries none, so the default stands.
     #[must_use]
     pub fn get_flag(&self, name: &str) -> Option<Value> {
         let flag = self.flags.iter().find(|f| f.name == name)?;
-        cli_flag_value(name).or_else(|| flag.default.clone())
+        resolve_flag_value(flag.kind, cli_flag_value(name), flag.default.clone())
     }
 
     /// Register or override a model provider (upstream
@@ -474,31 +478,68 @@ impl Pi {
     }
 }
 
-/// The value of `--<name>` on the process command line (upstream CLI
-/// parsing: `--name=value`, `--name value`, or a bare `--name` =
-/// `true`); `None` when absent. The first occurrence wins.
+/// The value of `--<name>` on the process command line, upstream
+/// `parseArgs`' `unknownFlags` semantics: `--name=value`, `--name
+/// value` (the following non-dash/non-`@` arg is the value) or a bare
+/// `--name` = `true`; the scan **stops at `--`** (everything after is
+/// positional) and the **last occurrence wins** (the `unknownFlags`
+/// map is last-write-wins); `None` when absent.
 fn cli_flag_value(name: &str) -> Option<Value> {
     let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len() {
+    cli_flag_value_from_args(&args, name)
+}
+
+/// [`cli_flag_value`] over an explicit argv (the parse is pure so the
+/// upstream semantics are testable without process args).
+fn cli_flag_value_from_args(args: &[String], name: &str) -> Option<Value> {
+    let mut value: Option<Value> = None;
+    let mut i = 0;
+    while i < args.len() {
         let arg = &args[i];
+        if arg == "--" {
+            break; // everything after `--` is positional
+        }
         let Some(rest) = arg.strip_prefix("--") else {
+            i += 1;
             continue;
         };
-        if rest == name {
-            match args.get(i + 1) {
-                Some(next) if !next.starts_with('-') && !next.starts_with('@') => {
-                    return Some(Value::String(next.clone()));
-                }
-                _ => return Some(Value::Bool(true)),
-            }
-        }
+        let mut next_i = i + 1;
         if let Some(eq) = rest.find('=') {
             if &rest[..eq] == name {
-                return Some(Value::String(rest[eq + 1..].to_string()));
+                value = Some(Value::String(rest[eq + 1..].to_string()));
+            }
+        } else if rest == name {
+            // Upstream: a bare `--name` takes the next arg as its value
+            // unless it starts with `-` or `@` (then it is `true`); the
+            // value arg is consumed.
+            if args
+                .get(next_i)
+                .is_some_and(|n| !n.starts_with('-') && !n.starts_with('@'))
+            {
+                value = Some(Value::String(args[next_i].clone()));
+                next_i += 1;
+            } else {
+                value = Some(Value::Bool(true));
             }
         }
+        i = next_i;
     }
-    None
+    value
+}
+
+/// Upstream `applyExtensionFlagValues` + `getFlag` resolution: a
+/// **boolean** flag is `true` for any CLI occurrence (an `=value` is
+/// ignored); a **string** flag takes the CLI string value — a bare
+/// occurrence (upstream: "requires a value" error) or no occurrence
+/// leaves the registered default standing.
+fn resolve_flag_value(kind: FlagKind, cli: Option<Value>, default: Option<Value>) -> Option<Value> {
+    match kind {
+        FlagKind::Boolean => cli.is_some().then_some(Value::Bool(true)).or(default),
+        FlagKind::String => match cli {
+            Some(v) if v.is_string() => Some(v),
+            _ => default,
+        },
+    }
 }
 
 /// The extension itself: the init entry (the Rust analog of upstream's
@@ -906,6 +947,112 @@ mod tests {
     #[should_panic(expected = "Invalid default for flag")]
     fn flag_default_type_mismatch_is_rejected() {
         let _ = Flag::new("gate-mode", FlagKind::String).with_default(json!(true));
+    }
+
+    /// Upstream `parseArgs` `unknownFlags` semantics, pinned: the scan
+    /// stops at `--` and the last occurrence wins.
+    #[test]
+    fn cli_flag_value_upstream_semantics() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // `--name=value`, incl. an empty value (still an occurrence).
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=world"]), "greet"),
+            Some(json!("world"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet="]), "greet"),
+            Some(json!(""))
+        );
+        // `--name value` (the value arg is consumed); a following
+        // dash/`@` arg is not the value → bare occurrence = `true`.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "world"]), "greet"),
+            Some(json!("world"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "--other"]), "greet"),
+            Some(json!(true))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "@file"]), "greet"),
+            Some(json!(true))
+        );
+        // The last occurrence wins (upstream last-write-wins).
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--greet=second"]), "greet"),
+            Some(json!("second"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--greet", "second"]), "greet"),
+            Some(json!("second"))
+        );
+        // The scan stops at `--`: everything after is positional.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--", "--greet=world"]), "greet"),
+            None
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--", "--greet=second"]), "greet"),
+            Some(json!("first"))
+        );
+        // Other flags' values are not occurrences of `greet`.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--other", "world"]), "greet"),
+            None
+        );
+    }
+
+    /// Upstream `applyExtensionFlagValues` coercion, pinned: a boolean
+    /// flag is `true` for any occurrence (`=x` ignored), a string flag
+    /// only for a valued one (a bare occurrence leaves the default
+    /// standing).
+    #[test]
+    fn get_flag_coerces_by_flag_kind() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Boolean: `--loud=x` and a bare `--loud` are both `true`.
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::Boolean,
+                cli_flag_value_from_args(&a(&["--loud=x"]), "loud"),
+                None,
+            ),
+            Some(json!(true))
+        );
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::Boolean,
+                cli_flag_value_from_args(&a(&["--loud"]), "loud"),
+                None,
+            ),
+            Some(json!(true))
+        );
+        // No occurrence: the registered default stands (or `None`).
+        assert_eq!(
+            resolve_flag_value(FlagKind::Boolean, None, Some(json!(true))),
+            Some(json!(true))
+        );
+        assert_eq!(resolve_flag_value(FlagKind::Boolean, None, None), None);
+        // String: the CLI value is taken as-is…
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::String,
+                cli_flag_value_from_args(&a(&["--greet", "world"]), "greet"),
+                Some(json!("default")),
+            ),
+            Some(json!("world"))
+        );
+        // …a bare occurrence carries no value → the default stands
+        // (upstream: "requires a value" error, no flagValue set).
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::String,
+                cli_flag_value_from_args(&a(&["--greet"]), "greet"),
+                Some(json!("default")),
+            ),
+            Some(json!("default"))
+        );
+        // No occurrence and no default: `None`.
+        assert_eq!(resolve_flag_value(FlagKind::String, None, None), None);
     }
 
     fn provider_config() -> ProviderConfig {
