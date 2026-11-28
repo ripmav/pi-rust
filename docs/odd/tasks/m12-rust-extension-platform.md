@@ -103,3 +103,26 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
   full-upstream-shaped stdio+http entry round-trip fixture
   (`pi-ext/tests/wire.rs`); the v6 catalog fixture is unchanged
   (capability set did not change).
+- **L8** (2026-11-28): WP-1205 delivered — PR #191
+  (`feat/wp-1205-pi-ext-user-target`, stack #192 on #190): the v6 user
+  process runtime — `pi_ext::process::run` turns an `Extension` into a
+  bridge-v6-speaking process (stdio NDJSON; `init` handshake with
+  `protocolVersion` validation, `apiVersion` answer and the `ready`
+  catalog from the stored registrations; load-time MCP forwards as v6
+  `mcp_server_register` requests; per-command dispatch tasks — no
+  head-of-line blocking, so a dialog or nested `executeTool` may block
+  while `extension_ui_response`/`pane_key`/responses keep flowing;
+  `provider_stream` ack + `provider_stream_event` lines; panic safety:
+  handler code runs in a child task, a panic yields a clean error
+  response / protocol default, and a single stdout writer keeps lines
+  complete). Example extension `pi-ext-demo` (tools, commands, event
+  handlers, flag, shortcut, provider, MCP) + NDJSON e2e harness
+  `pi-ext/tests/process.rs` (15 scenarios — ready catalog, tool
+  round-trip, decision block, UI dialog round-trip, provider stream,
+  parse error, unknown command, panics, shutdown/EOF — no Node sidecar
+  involved). Additive: `Extension::events()` (declares `ready.events`;
+  Rust has no handler reflection) + a `Sync` bound (concurrent
+  dispatch); `ProviderStreamFn`'s emit gains a `Send` bound (the future
+  was already `Send + 'a` — the seam was unusable by a stream that
+  calls `emit`); `tokio` becomes a `pi-ext` dependency. E1S2 at 5/6,
+  next: WP-1206.

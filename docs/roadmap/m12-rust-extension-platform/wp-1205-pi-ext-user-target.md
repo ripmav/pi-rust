@@ -1,6 +1,6 @@
 # WP-1205 — `pi-ext`: user target (v6 process)
 
-**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** open · **Depends on:** WP-1203, WP-1204
+**Milestone:** M12 · **Story:** E1S2 · **Size:** M · **Status:** done (PR #191) · **Depends on:** WP-1203, WP-1204
 
 ## Goal
 Turn an extension's `main` into a bridge-v6-speaking process
