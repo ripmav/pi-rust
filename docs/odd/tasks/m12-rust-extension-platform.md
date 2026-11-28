@@ -152,3 +152,64 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
   overridden away → advertised again; non-reserved → shadowed +
   diagnostic), panicking shutdown handler → `extension_error` then
   exit 0.
+- **L10** (2026-11-28): PR #191 bug-review fixes 1–9
+  (WP-1205, same branch — the bug review found 9 runtime bugs; all
+  fixed inside `pi-ext/src/process.rs` + demo/harness, no redesign):
+  (1) the EOF/stdin-error exit was a raw `process::exit`, dropping
+  queued stdout lines (and able to die mid-line) — the dispatch loop
+  and the pre-init handshake now use the async shutdown path: the
+  single writer drains its queue, flushes, then exits. (2) a
+  timed-out custom pane never emitted `pane_close` (the TUI pane
+  stayed open and swallowed all keys) — the timeout now closes an
+  opened pane before resolving to the upstream default (sidecar
+  `finish()` → `close()`; supersedes L9's "abandoned without one").
+  (3) a panicking pane factory was the one handler kind the panic
+  capture missed (full capability-timeout hang, no `extension_error`,
+  wrong log) — `custom()` now `select!`s on done_rx / the factory
+  task / the timeout: a `JoinError` emits `extension_error` (+
+  `pane_close` if the pane had already opened) and resolves to the
+  default immediately; `PaneOpen` moved to the component's first
+  host call (sidecar order — a failed factory emits no
+  `pane_open`); the close is idempotent across the done/timeout/
+  panic/ended paths. (4) no line-length cap (unbounded memory on a
+  huge single line) — both read loops now enforce the sidecar's
+  `MAX_LINE` = 1 MB with its typed parse errors (`line too long
+  (…)`, `line too long (unterminated, …)` + buffer reset). (5) lines
+  sent in the same pipe chunk as `init` (after it) were silently
+  lost — the handshake and the dispatch loop now share ONE stdin
+  reader (sidecar pump), so the remainder of the chunk is processed.
+  (6) `send_dialog` leaked its `dialogs` entry on timeout — removed
+  after the wait, like `request()`. (7) shortcut dispatch was
+  case-sensitive on the stored key and duplicates were never deduped
+  — dispatch compares lowercased keys and `resolve_shortcuts` dedupes
+  on the lowercased key (last wins + "registered by both" diagnostic,
+  upstream Map semantics; `ready.shortcuts` keeps the registered
+  case). (8) the load-time MCP forward went out AFTER `ready` while
+  the comment claimed before — the forward lines now emit
+  synchronously before the init response + ready (sidecar order);
+  only the response wait + typed failure stay in a task. (9)
+  `custom()` waited for the factory task to complete after
+  `done(result)` — `done` is now the pane's end signal: a lingering
+  task is aborted, not awaited.
+  Observable wire-order changes: (a) the load-time
+  `mcp_server_register` forward now precedes the init response +
+  ready (was after); (b) `pane_open` now goes out on the
+  component's first host call instead of before the factory runs —
+  identical happy-path order (`pane_open` before the first
+  `pane_update`), but no `pane_open` for a factory that fails before
+  its first host call. Protocol doc updated accordingly (Handshake
+  step 4, Custom pane timeout contract).
+  Demo: the `pane` tool gains a `mode` input (`panic` / `panic_late`
+  / `timeout` / `hang`) and the shortcut registers as `Ctrl+D`
+  (mixed case, to pin the case-insensitive dispatch). Harness:
+  9 new e2e scenarios (18 → 27) — `eof_flushes_queued_lines` +
+  `eof_before_init_flushes_and_exits_one`,
+  `same_chunk_as_init_lines_are_processed`,
+  `line_cap_rejects_huge_lines`, `pane_timeout_closes_pane`,
+  `pane_factory_panic_extension_error` +
+  `pane_factory_panic_late_closes_pane`,
+  `pane_done_then_lingering_task_resolves`,
+  `shortcut_dispatch_case_insensitive` — plus 2 unit tests
+  (`resolve_shortcuts_dedupes_lowercased_keys`,
+  `dialog_timeout_releases_its_entry`); `init_kb` now pins the
+  MCP-forward-before-init-response wire order.

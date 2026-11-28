@@ -21,9 +21,12 @@
 //!    `init.keybindings`, upstream `getShortcuts`: a reserved built-in
 //!    on the key is blocked, a non-reserved one shadowed —
 //!    flags/providers, the events the extension declares, the v5 initial
-//!    active tool set) and forward
+//!    active tool set), forward
 //!    load-time MCP registrations to the core as `mcp_server_register`
-//!    requests (a rejected forward → a typed `extension_error`).
+//!    requests (sidecar order: the forward lines go out **before** the
+//!    init response and `ready`; a rejected forward → a typed
+//!    `extension_error`) and only then answer `apiVersion: 0` +
+//!    `ready`.
 //! 2. **Dispatch loop** — every command line is handled by its own
 //!    task (bidirectional liveness: a handler may block on a dialog or
 //!    an extension→core request while `extension_ui_response` /
@@ -43,16 +46,24 @@
 //!    the rest → `None`). Unsupported methods (not in the advertised
 //!    `ui` list) resolve to that default without a request, the
 //!    fire-and-forget methods always emit. Custom panes use
-//!    `pane_open` / `pane_update` / `pane_close` + `pane_key`.
+//!    `pane_open` / `pane_update` / `pane_close` + `pane_key`: the
+//!    pane opens on the component's first host call (sidecar order —
+//!    a failed factory emits no `pane_open`), ends with `done` (a
+//!    lingering factory task is aborted, not awaited) or the
+//!    capability timeout (which also closes an opened pane).
 //!
 //! **Panic safety**: extension code runs in a child task, so a handler
 //! panic is captured and never kills the process. A panicking decision
 //! handler emits `extension_error` and the decision resolves to the
 //! protocol default (e.g. `tool_call` → no block, input unchanged); a
 //! panicking command/tool/shortcut gets a clean error response; a
-//! provider stream ends with a terminal `error` event. stdout carries
-//! complete lines only: a single writer task serializes every write,
-//! and all logs go to stderr.
+//! provider stream ends with a terminal `error` event; a panicking
+//! pane factory emits `extension_error` (+ `pane_close` if the pane
+//! had already opened) and resolves to the upstream default right
+//! away. stdout carries complete lines only: a single writer task
+//! serializes every write, and all logs go to stderr. Every exit path
+//! (stdin EOF, handshake failure, `session_shutdown`) drains the
+//! writer's queue first — no queued line is lost.
 
 use crate::pi::{
     ExecResult, Extension, ExtensionContext, ExtensionTransport, ExtensionUI, NotifyKind, Pane,
@@ -104,8 +115,13 @@ where
             ..Default::default()
         };
         let b = Bridge::start(tokio::io::stdout(), ctx, path);
-        let (ext, pi) = handshake(b.clone(), ext).await;
-        dispatch_loop(b, ext, pi).await;
+        // ONE stdin reader for the whole lifetime (sidecar pump): the
+        // handshake and the dispatch loop share the same buffer, so a
+        // line that arrives in the same pipe chunk as `init` (after it)
+        // is not consumed by the handshake's read and then lost.
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let (ext, pi) = handshake(b.clone(), ext, &mut reader).await;
+        dispatch_loop(b, ext, pi, &mut reader).await;
     });
     std::process::exit(0); // unreachable: the loop always exits the process
 }
@@ -122,10 +138,20 @@ enum OutLine {
 }
 
 /// An open custom pane: key waiters (FIFO, one per pending
-/// `Pane::next_key`) + the `done` waiter.
+/// `Pane::next_key`) + the `done` waiter + the lazy `pane_open` /
+/// `pane_close` state.
 struct PaneState {
     waiters: Mutex<VecDeque<oneshot::Sender<PaneKeyInput>>>,
     done: Mutex<Option<oneshot::Sender<Value>>>,
+    /// The lazy `pane_open` has gone out (the component's first host
+    /// call fired it; a factory that fails before that opens nothing).
+    opened: AtomicBool,
+    /// The `pane_close` has gone out (idempotent close).
+    closed: AtomicBool,
+    /// The `custom`-negotiated `blocked` (carried by the lazy `pane_open`).
+    blocked: Option<PaneBlocked>,
+    /// The `done(result)` value (stored before the done waiter resolves).
+    result: Mutex<Option<Value>>,
 }
 
 /// Shared runtime state: the single stdout writer's channel, the
@@ -294,18 +320,28 @@ impl Bridge {
             .and_then(Value::as_u64)
             .unwrap_or(*self.timeout_ms.lock().unwrap());
         let (tx, rx) = oneshot::channel::<Value>();
-        self.dialogs.lock().unwrap().insert(id, tx);
+        self.dialogs.lock().unwrap().insert(id.clone(), tx);
         self.emit_typed(&SidecarEvent::ExtensionUiRequest(req.clone()));
-        tokio::time::timeout(std::time::Duration::from_millis(timeout), rx)
+        let answer = tokio::time::timeout(std::time::Duration::from_millis(timeout), rx)
             .await
             .ok()
-            .and_then(Result::ok)
+            .and_then(Result::ok);
+        // The dialog is over: answered (`on_ui_response` already took
+        // the entry) or timed out — remove ours so a late
+        // `extension_ui_response` reads "unknown dialog" instead of
+        // sending into a dropped waiter (request() removes on timeout
+        // the same way).
+        self.dialogs.lock().unwrap().remove(&id);
+        answer
     }
 
-    /// An extension→core req/resp line (`{ id, type, …payload }`): emit,
-    /// wait for the `response` (or the capability timeout → a typed
-    /// failure).
-    async fn request(&self, rtype: &'static str, fields: Value) -> Value {
+    /// Emit an extension→core req/resp line (`{ id, type, …payload }`)
+    /// and return the id + waiter (the caller owns the wait).
+    fn request_emit(
+        &self,
+        rtype: &'static str,
+        fields: Value,
+    ) -> (String, oneshot::Receiver<Value>) {
         let id = next_id("req");
         let mut m = fields.as_object().cloned().unwrap_or_default();
         m.insert("id".into(), json!(id));
@@ -313,11 +349,22 @@ impl Bridge {
         let (tx, rx) = oneshot::channel::<Value>();
         self.pending.lock().unwrap().insert(id.clone(), tx);
         self.emit(&Value::Object(m));
+        (id, rx)
+    }
+
+    /// Wait for the `response` to a line emitted with [`request_emit`]
+    /// (or the capability timeout → a typed failure).
+    async fn wait_response(
+        &self,
+        rtype: &'static str,
+        id: &str,
+        rx: oneshot::Receiver<Value>,
+    ) -> Value {
         let timeout = std::time::Duration::from_millis(*self.timeout_ms.lock().unwrap());
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => resp,
             _ => {
-                self.pending.lock().unwrap().remove(&id);
+                self.pending.lock().unwrap().remove(id);
                 json!({
                     "id": id,
                     "type": "response",
@@ -327,6 +374,14 @@ impl Bridge {
                 })
             }
         }
+    }
+
+    /// An extension→core req/resp line (`{ id, type, …payload }`): emit,
+    /// wait for the `response` (or the capability timeout → a typed
+    /// failure).
+    async fn request(&self, rtype: &'static str, fields: Value) -> Value {
+        let (id, rx) = self.request_emit(rtype, fields);
+        self.wait_response(rtype, &id, rx).await
     }
 
     /// A `response` line for one of our requests (the main loop calls
@@ -384,6 +439,63 @@ impl Bridge {
         }
     }
 
+    /// The lazy `pane_open` (sidecar order: `pane_open` goes out only
+    /// for a live component — the sidecar emits it after a successful
+    /// factory, before the first update; the Rust equivalent moment is
+    /// the component's first host call). Returns `false` when the pane
+    /// is already gone (ended / timed out): the caller no-ops.
+    fn open_pane(&self, id: &str) -> bool {
+        let blocked = {
+            let panes = self.panes.lock().unwrap();
+            let Some(st) = panes.get(id) else {
+                return false;
+            };
+            if st
+                .opened
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return true; // already open
+            }
+            st.blocked.clone()
+        };
+        self.emit_typed(&SidecarEvent::PaneOpen {
+            id: id.to_string(),
+            blocked,
+        });
+        true
+    }
+
+    /// The single `pane_close` for a pane (idempotent across the done /
+    /// timeout / panic / ended paths): only for a pane that opened
+    /// (the sidecar closes only panes it opened) and only once.
+    fn emit_pane_close_once(&self, id: &str) {
+        let panes = self.panes.lock().unwrap();
+        let Some(st) = panes.get(id) else {
+            return;
+        };
+        if !st.opened.load(Ordering::SeqCst)
+            || st
+                .closed
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        self.emit_typed(&SidecarEvent::PaneClose { id: id.to_string() });
+    }
+
+    /// The `done(result)` value if the component called `done` (it is
+    /// stored before the done waiter resolves, so it is readable even
+    /// when the factory task finishes at the same moment).
+    fn pane_result(&self, id: &str) -> Option<Value> {
+        self.panes
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|st| st.result.lock().unwrap().clone())
+    }
+
     /// A panic in the extension code (the dispatch task calls this):
     /// the protocol default per command kind, never a crash.
     async fn on_panic(&self, policy: &Policy, id: Option<&str>, rtype: &str) {
@@ -423,18 +535,19 @@ impl Bridge {
 
     /// Forward a load-time MCP registration to the core (v6
     /// `mcp_server_register`); a rejected forward is a typed
-    /// `extension_error`, never a crash.
+    /// `extension_error`, never a crash. The forward line is emitted
+    /// synchronously (sidecar order: before the init response + ready);
+    /// only the response wait and the typed failure run in a task.
     fn flush_mcp_server(b: &Arc<Bridge>, name: &str, config: &McpServerConfig) {
         let b = Arc::clone(b);
         let name = name.to_string();
         let config = config.clone();
+        let (id, rx) = b.request_emit(
+            "mcp_server_register",
+            json!({ "name": name, "config": config, "extensionPath": b.path }),
+        );
         tokio::spawn(async move {
-            let resp = b
-                .request(
-                    "mcp_server_register",
-                    json!({ "name": name, "config": config, "extensionPath": b.path }),
-                )
-                .await;
+            let resp = b.wait_response("mcp_server_register", &id, rx).await;
             if resp.get("success") != Some(&Value::Bool(true)) {
                 let err = resp
                     .get("error")
@@ -551,24 +664,104 @@ fn parse_error_line(msg: &str) -> Value {
     response_line(None, "parse", false, None, Some(msg.to_string()))
 }
 
+/// v0 hardening (sidecar `MAX_LINE`): a single NDJSON command line
+/// never exceeds 1 MB — reject it (parse-error model) instead of letting
+/// JSON.parse eat the memory.
+const MAX_LINE: usize = 1024 * 1024;
+
+/// One capped stdin line (the sidecar pump's line rules).
+enum CappedLine {
+    /// A complete line (≤ `MAX_LINE`).
+    Line(String),
+    /// EOF (a non-empty tail was already returned as a `Line`).
+    Eof,
+    /// A complete line exceeded `MAX_LINE` (its byte length, for the
+    /// error); the whole line is discarded.
+    TooLong(usize),
+    /// An unterminated buffer exceeded `MAX_LINE`; the buffer was
+    /// reset, so the next line starts fresh.
+    Unterminated,
+}
+
+/// The next line of the stdin pump with the `MAX_LINE` cap:
+/// - a line past the cap → `TooLong` (reported, line discarded);
+/// - an unterminated buffer past the cap → `Unterminated` (reported,
+///   buffer reset — it would swallow every later line);
+/// - EOF → `Eof`, after flushing a non-empty tail as a final record
+///   (upstream jsonl semantics).
+async fn next_capped_line(reader: &mut BufReader<tokio::io::Stdin>) -> std::io::Result<CappedLine> {
+    let mut line = String::new();
+    loop {
+        let (consume, next) = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                // EOF: flush a non-empty tail as a final record.
+                (
+                    0usize,
+                    Some(if line.is_empty() {
+                        CappedLine::Eof
+                    } else {
+                        CappedLine::Line(std::mem::take(&mut line))
+                    }),
+                )
+            } else if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                if line.len() + i > MAX_LINE {
+                    (i + 1, Some(CappedLine::TooLong(line.len() + i)))
+                } else {
+                    line.push_str(&String::from_utf8_lossy(&buf[..i]));
+                    (i + 1, Some(CappedLine::Line(std::mem::take(&mut line))))
+                }
+            } else if line.len() + buf.len() > MAX_LINE {
+                (buf.len(), Some(CappedLine::Unterminated))
+            } else {
+                line.push_str(&String::from_utf8_lossy(buf));
+                (buf.len(), None) // keep accumulating
+            }
+        };
+        reader.consume(consume);
+        if let Some(next) = next {
+            return Ok(next);
+        }
+    }
+}
+
+/// The sidecar's typed parse error for a capped line.
+fn line_cap_error(c: &CappedLine) -> String {
+    match c {
+        CappedLine::TooLong(len) => {
+            format!("line too long ({len} bytes, max {MAX_LINE})")
+        }
+        CappedLine::Unterminated => {
+            format!("line too long (unterminated, max {MAX_LINE} bytes)")
+        }
+        _ => unreachable!("only the capped variants reach here"),
+    }
+}
+
 /// Wait for `init`, validate it, run `Extension::init`, answer with
 /// `apiVersion` and emit `ready`. Ends the process (1) on a handshake
 /// failure.
-async fn handshake<E: Extension>(b: Arc<Bridge>, mut ext: E) -> (Arc<E>, Arc<Pi>) {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-
+async fn handshake<E: Extension>(
+    b: Arc<Bridge>,
+    mut ext: E,
+    reader: &mut BufReader<tokio::io::Stdin>,
+) -> (Arc<E>, Arc<Pi>) {
     // 1. wait for the init command (tolerating everything else the
     //    protocol allows before init).
     let init_v = loop {
-        let line = match lines.next_line().await {
-            Ok(Some(l)) => l,
-            Ok(None) => {
+        let line = match next_capped_line(reader).await {
+            Ok(CappedLine::Line(l)) => l,
+            Ok(CappedLine::Eof) => {
                 eprintln!("[pi-ext] stdin closed before init");
-                std::process::exit(1);
+                b.exit_flush(1).await
+            }
+            Ok(e) => {
+                b.emit(&parse_error_line(&line_cap_error(&e)));
+                continue;
             }
             Err(e) => {
                 eprintln!("[pi-ext] reading stdin: {e}");
-                std::process::exit(1);
+                b.exit_flush(1).await
             }
         };
         let line = line.trim_end_matches('\r');
@@ -751,7 +944,10 @@ fn parse_keybindings(v: Option<&Value>) -> BTreeMap<String, Vec<String>> {
 /// key blocks the shortcut (skipped + conflict diagnostic); a
 /// **non-reserved** built-in is shadowed (the extension wins +
 /// diagnostic); when two actions share a key the reserved one wins the
-/// merge. Returns the `ready.shortcuts` set + `ready.shortcutDiagnostics`.
+/// merge; duplicates on the same (lowercased) key are deduped — the
+/// later registration wins + conflict diagnostic (upstream Map
+/// semantics). Returns the `ready.shortcuts` set +
+/// `ready.shortcutDiagnostics`.
 fn resolve_shortcuts(
     shortcuts: &[Shortcut],
     keybindings: &BTreeMap<String, Vec<String>>,
@@ -772,10 +968,13 @@ fn resolve_shortcuts(
     }
     let mut resolved = Vec::new();
     let mut diagnostics = Vec::new();
+    // Upstream `extensionShortcuts` is a Map keyed by the lowercased
+    // key: a duplicate is replaced in place — the later registration
+    // wins (Map.set keeps the original position).
+    let mut by_key: BTreeMap<String, usize> = BTreeMap::new();
     for s in shortcuts {
-        let blocked = builtins
-            .get(&s.key.to_lowercase())
-            .is_some_and(|(_, reserved)| *reserved);
+        let key = s.key.to_lowercase();
+        let blocked = builtins.get(&key).is_some_and(|(_, reserved)| *reserved);
         if blocked {
             diagnostics.push(format!(
                 "Extension shortcut '{}' from {} conflicts with built-in shortcut. Skipping.",
@@ -783,17 +982,30 @@ fn resolve_shortcuts(
             ));
             continue;
         }
-        if let Some((action, false)) = builtins.get(&s.key.to_lowercase()) {
+        if let Some((action, false)) = builtins.get(&key) {
             diagnostics.push(format!(
                 "Extension shortcut conflict: '{}' is built-in shortcut for {} and {}. Using {}.",
                 s.key, action, path, path
             ));
         }
-        resolved.push(ReadyShortcut {
+        let entry = ReadyShortcut {
             key: s.key.clone(),
             description: s.description.clone(),
             extension_path: path.to_string(),
-        });
+        };
+        match by_key.get(&key) {
+            Some(&pos) => {
+                diagnostics.push(format!(
+                    "Extension shortcut conflict: '{}' registered by both {} and {}. Using {}.",
+                    s.key, path, path, path
+                ));
+                resolved[pos] = entry; // last wins (position kept)
+            }
+            None => {
+                by_key.insert(key, resolved.len());
+                resolved.push(entry);
+            }
+        }
     }
     (resolved, diagnostics)
 }
@@ -891,18 +1103,30 @@ fn ready_payload(
 
 /// The main loop: read stdin, dispatch every line to its own task
 /// (bidirectional liveness). Ends the process (0) on stdin EOF.
-async fn dispatch_loop<E: Extension + 'static>(b: Arc<Bridge>, ext: Arc<E>, pi: Arc<Pi>) {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+async fn dispatch_loop<E: Extension + 'static>(
+    b: Arc<Bridge>,
+    ext: Arc<E>,
+    pi: Arc<Pi>,
+    reader: &mut BufReader<tokio::io::Stdin>,
+) {
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(l)) => l,
-            Ok(None) => {
+        let line = match next_capped_line(reader).await {
+            Ok(CappedLine::Line(l)) => l,
+            Ok(CappedLine::Eof) => {
                 eprintln!("[pi-ext] stdin closed; shutting down");
-                std::process::exit(0);
+                // The async shutdown path (sidecar `shutdown()`): the
+                // writer drains its queue, flushes, and only then exits
+                // — a raw `process::exit` here would drop queued lines
+                // and can die mid-line.
+                b.exit_flush(0).await
+            }
+            Ok(e) => {
+                b.emit(&parse_error_line(&line_cap_error(&e)));
+                continue;
             }
             Err(e) => {
                 eprintln!("[pi-ext] reading stdin: {e}");
-                std::process::exit(0);
+                b.exit_flush(0).await
             }
         };
         let line = line.trim_end_matches('\r');
@@ -1398,7 +1622,9 @@ async fn run_command<E: Extension>(b: &Arc<Bridge>, ext: &E, pi: &Pi, v: Value) 
         "shortcut" => {
             let raw = v.get("key").and_then(Value::as_str).unwrap_or_default();
             let key = raw.to_lowercase();
-            match pi.shortcuts().iter().find(|s| s.key == key) {
+            // Upstream keys the shortcut map by the lowercased key; the
+            // stored key keeps its registered case.
+            match pi.shortcuts().iter().find(|s| s.key.to_lowercase() == key) {
                 None => Some(response_line(
                     id.as_deref(),
                     "shortcut",
@@ -1903,41 +2129,88 @@ impl ExtensionUI for BridgeUi {
                 return None;
             }
             let id = next_id("p");
-            let (done_tx, done_rx) = oneshot::channel::<Value>();
+            let (done_tx, mut done_rx) = oneshot::channel::<Value>();
             b.panes.lock().unwrap().insert(
                 id.clone(),
                 PaneState {
                     waiters: Mutex::new(VecDeque::new()),
                     done: Mutex::new(Some(done_tx)),
+                    opened: AtomicBool::new(false),
+                    closed: AtomicBool::new(false),
+                    blocked,
+                    result: Mutex::new(None),
                 },
             );
-            b.emit_typed(&SidecarEvent::PaneOpen {
-                id: id.clone(),
-                blocked,
-            });
             let timeout = *b.timeout_ms.lock().unwrap();
             let pane = Pane::new(Arc::new(BridgePaneHost(b.clone())), id.clone());
+            // The factory's future IS the component's lifetime (sidecar:
+            // the factory builds the component, the host drives it; here
+            // the component drives itself through the `Pane` handle).
+            // The sidecar emits `pane_open` only after a successful
+            // factory — so the Rust pane opens lazily on the component's
+            // first host call (`update`/`next_key`), and a factory that
+            // fails before that emits no `pane_open`.
             let factory_task = tokio::spawn(async move {
                 let _ = factory(pane).await;
             });
-            // The pane resolves via `done(result)` or the capability
-            // timeout (the upstream default, `None`).
-            let result = tokio::time::timeout(std::time::Duration::from_millis(timeout), done_rx)
-                .await
-                .ok()
-                .and_then(Result::ok);
+            let abort = factory_task.abort_handle();
+            // The pane ends with `done(result)` — the component's end
+            // signal (sidecar: done resolves the local promise and
+            // disposes the component; a task lingering after done is
+            // aborted, not awaited) — or a factory panic
+            // (`extension_error`, the Rust panic protocol), a factory
+            // return without done (the component ended), or the
+            // capability timeout (the upstream default, `None`).
+            let result = tokio::select! {
+                _ = &mut done_rx => {
+                    // done fired: `BridgePaneHost::done` emitted
+                    // `pane_close` and stored the result before
+                    // resolving.
+                    b.pane_result(&id)
+                }
+                t = factory_task => match t {
+                    Err(je) if je.is_panic() => {
+                        // done had already ended the pane (a post-done
+                        // panic): the done result wins — no close (done
+                        // emitted it), no error (the sidecar disposes
+                        // the component on done).
+                        let r = b.pane_result(&id);
+                        if r.is_none() {
+                            b.emit_error(
+                                "ui.custom",
+                                &format!("pane factory panicked: {}", take_last_panic()),
+                            );
+                        }
+                        b.emit_pane_close_once(&id);
+                        r
+                    }
+                    Ok(()) => {
+                        // The component's future completed: if done fired
+                        // a moment before the return, its result wins
+                        // (close already emitted by done).
+                        let r = b.pane_result(&id);
+                        b.emit_pane_close_once(&id);
+                        r
+                    }
+                    Err(_) => None, // cancelled: nothing left to close
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(timeout)) => {
+                    // done may have won the same instant: its result
+                    // wins (no timeout log for it).
+                    let r = b.pane_result(&id);
+                    if r.is_none() {
+                        eprintln!("[pi-ext] pane {id} resolved to the timeout default");
+                    }
+                    b.emit_pane_close_once(&id);
+                    r
+                }
+            };
+            // No-op when the task already finished (done / panic /
+            // return); kills a task lingering after done.
+            abort.abort();
             // Drop the pane state: later pane_* lines for the id are
-            // ignored (the component's own lifetime ends with the
-            // factory's future, as sidecar-side).
+            // ignored.
             b.panes.lock().unwrap().remove(&id);
-            if result.is_none() {
-                // A timed-out pane is abandoned (a throwing factory
-                // resolves `None` with a log — never a crash).
-                eprintln!("[pi-ext] pane {id} resolved to the timeout default");
-                factory_task.abort();
-            } else {
-                let _ = factory_task.await;
-            }
             result
         })
     }
@@ -1975,7 +2248,7 @@ struct BridgePaneHost(Arc<Bridge>);
 
 impl PaneHost for BridgePaneHost {
     fn update(&self, id: &str, desc: &PaneDescriptor) {
-        if !self.0.panes.lock().unwrap().contains_key(id) {
+        if !self.0.open_pane(id) {
             return; // pane gone (timeout/done): no-op
         }
         self.0.emit_typed(&SidecarEvent::PaneUpdate {
@@ -1992,32 +2265,80 @@ impl PaneHost for BridgePaneHost {
         &self,
         id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<PaneKeyInput>> + Send + '_>> {
+        if !self.0.open_pane(id) {
+            return Box::pin(async { None });
+        }
         let (tx, rx) = oneshot::channel::<PaneKeyInput>();
-        {
-            let guard = self.0.panes.lock().unwrap();
-            let Some(st) = guard.get(id) else {
-                return Box::pin(async { None });
-            };
+        if let Some(st) = self.0.panes.lock().unwrap().get(id) {
             st.waiters.lock().unwrap().push_back(tx);
         }
         Box::pin(async move { rx.await.ok() })
     }
 
     fn done(&self, id: &str, result: Value) {
-        let Some(tx) = self
-            .0
-            .panes
-            .lock()
-            .unwrap()
-            .get(id)
-            .and_then(|st| st.done.lock().unwrap().take())
-        else {
-            return; // pane already ended (timeout / second `done`): no-op
+        let tx = {
+            let panes = self.0.panes.lock().unwrap();
+            let Some(st) = panes.get(id) else {
+                return; // pane already ended (timeout): no-op
+            };
+            let Some(tx) = st.done.lock().unwrap().take() else {
+                return; // second `done`: no-op
+            };
+            // Remember the result before resolving, so the select can
+            // read it even if the factory task finishes at the same
+            // instant.
+            *st.result.lock().unwrap() = Some(result.clone());
+            tx
         };
         // The component ended the pane: emit `pane_close` (the core
         // drops the pane) before resolving the local promise.
-        self.0
-            .emit_typed(&SidecarEvent::PaneClose { id: id.to_string() });
+        self.0.emit_pane_close_once(id);
         let _ = tx.send(result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bug-fix pin (7): duplicate shortcut keys dedupe on the
+    /// lowercased key (upstream Map semantics) — the later registration
+    /// wins + the conflict diagnostic (position kept, like Map.set).
+    #[test]
+    fn resolve_shortcuts_dedupes_lowercased_keys() {
+        let s1 = Shortcut::new("Ctrl+D", |_ctx: &ExtensionContext| Box::pin(async {}));
+        let s2 = Shortcut::new("ctrl+d", |_ctx: &ExtensionContext| Box::pin(async {}));
+        let (resolved, diags) = resolve_shortcuts(&[s1, s2], &BTreeMap::new(), "ext-a");
+        assert_eq!(resolved.len(), 1, "deduped: {resolved:?}");
+        assert_eq!(resolved[0].key, "ctrl+d", "the later registration wins");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].contains("registered by both"), "{diags:?}");
+    }
+
+    /// Bug-fix pin (6): a dialog timeout releases the `dialogs` entry
+    /// (request() removes on timeout the same way) — no leak, a late
+    /// `extension_ui_response` reads "unknown dialog".
+    #[tokio::test]
+    async fn dialog_timeout_releases_its_entry() {
+        let b = Bridge::start(
+            tokio::io::sink(),
+            ExtensionContext::default(),
+            "test".into(),
+        );
+        b.set_capabilities(vec!["confirm".into()], 30_000);
+        let req = UiRequest::Confirm {
+            id: "d-1".into(),
+            title: "t".into(),
+            message: "m".into(),
+            timeout: Some(30),
+        };
+        assert!(
+            b.send_dialog(&req).await.is_none(),
+            "timeout -> upstream default"
+        );
+        assert!(
+            b.dialogs.lock().unwrap().is_empty(),
+            "the dialogs entry must not leak"
+        );
     }
 }

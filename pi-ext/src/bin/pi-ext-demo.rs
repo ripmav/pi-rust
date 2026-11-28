@@ -62,19 +62,40 @@ impl Extension for Demo {
             },
         ));
         // Tool: pane — a custom pane (v6 `custom`): one descriptor
-        // update, then `done` with the key that ended it.
+        // update, then `done` with the key that ended it. The optional
+        // `mode` input drives the failure/edge shapes the harness pins:
+        // `panic` (factory panics before its first host call),
+        // `panic_late` (panics after the update), `timeout` (never
+        // done — the capability timeout closes the pane) and `hang`
+        // (done, then the component keeps awaiting — the runtime must
+        // not wait for it).
         pi.register_tool(Tool::new(
             "pane",
             "Open a custom pane",
-            pi_ext::pi::schema::object(&[], &[]),
-            |_input, ctx| {
+            pi_ext::pi::schema::object(
+                &[(
+                    "mode",
+                    pi_ext::pi::schema::string(Some(
+                        "demo mode: panic | panic_late | timeout | hang (default: happy path)",
+                    )),
+                )],
+                &[],
+            ),
+            |input, ctx| {
                 Box::pin(async move {
+                    let mode = input
+                        .get("mode")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     let result = ctx
                         .ctx()
                         .ui
                         .custom(
-                            Box::new(|pane: Pane| {
+                            Box::new(move |pane: Pane| {
                                 Box::pin(async move {
+                                    if mode.as_deref() == Some("panic") {
+                                        panic!("demo pane factory panic");
+                                    }
                                     pane.update(&PaneDescriptor {
                                         title: Some("Demo pane".into()),
                                         lines: Some(vec![PaneLine {
@@ -82,8 +103,27 @@ impl Extension for Demo {
                                         }]),
                                         ..Default::default()
                                     });
-                                    let key = pane.next_key().await;
-                                    pane.done(json!(key.map(|k| k.code)));
+                                    match mode.as_deref() {
+                                        Some("panic_late") => {
+                                            panic!("demo pane factory panic (late)")
+                                        }
+                                        Some("timeout") => {
+                                            // Never done: the capability
+                                            // timeout must close the pane.
+                                            let _ = pane.next_key().await;
+                                        }
+                                        Some("hang") => {
+                                            // `done` is the pane's end
+                                            // signal; the component keeps
+                                            // awaiting afterwards.
+                                            pane.done(json!("done"));
+                                            let _ = pane.next_key().await;
+                                        }
+                                        _ => {
+                                            let key = pane.next_key().await;
+                                            pane.done(json!(key.map(|k| k.code)));
+                                        }
+                                    }
                                 })
                             }),
                             None,
@@ -119,9 +159,12 @@ impl Extension for Demo {
             "[demo] greet flag = {}",
             pi.get_flag("greet").unwrap_or(Value::Null)
         );
-        // Shortcut: ctrl+d — a ready.shortcuts entry (the `shortcut`
-        // dispatch line).
-        pi.register_shortcut(Shortcut::new("ctrl+d", |_ctx: &ExtensionContext| {
+        // Shortcut: Ctrl+D — registered in mixed case on purpose: the
+        // dispatch must match case-insensitively (upstream keys the
+        // shortcut map by the lowercased key) while `ready.shortcuts`
+        // keeps the registered case. A `shortcut` line with
+        // `key: "ctrl+d"` must reach this handler.
+        pi.register_shortcut(Shortcut::new("Ctrl+D", |_ctx: &ExtensionContext| {
             Box::pin(async {})
         }));
         // Provider: faketest — a scripted one-line echo stream
