@@ -22,7 +22,7 @@ pub type ProviderStreamFn = Box<
             ModelRef,
             Vec<AgentMessage>,
             &ProviderStreamOptions,
-            &'a mut dyn FnMut(AssistantMessageEvent),
+            &'a mut (dyn FnMut(AssistantMessageEvent) + Send),
         ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
         + Send
         + Sync,
@@ -83,7 +83,7 @@ impl ProviderConfig {
                 ModelRef,
                 Vec<AgentMessage>,
                 &ProviderStreamOptions,
-                &'a mut dyn FnMut(AssistantMessageEvent),
+                &'a mut (dyn FnMut(AssistantMessageEvent) + Send),
             ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
             + Send
             + Sync

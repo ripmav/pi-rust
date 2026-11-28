@@ -8,10 +8,10 @@
 //! `ctx.ui`, [`NullUi`] = the no-UI default) and the
 //! message/session/model surface on [`Pi`].
 //!
-//! The transports (v6 user process, core cdylib) land in WP-1205/1206;
-//! registrations are stored on [`Pi`] (accessors below) so they can
-//! dispatch them, and the catalog ↔ API parity test (`tests/parity.rs`)
-//! keeps the mirror honest.
+//! The v6 user process runtime (WP-1205, [`crate::process`]) binds the
+//! stored registrations to stdio; the core cdylib target follows in
+//! WP-1206. The catalog ↔ API parity test (`tests/parity.rs`) keeps the
+//! mirror honest.
 //!
 //! # Example ("hello tool")
 //!
@@ -547,11 +547,24 @@ fn resolve_flag_value(kind: FlagKind, cli: Option<Value>, default: Option<Value>
 ///
 /// Fire-and-forget events have unit-returning handlers; decision events
 /// return `Option<…>` — `None` (the default) means "no change / default
-/// resolution", `Some(…)` the handler's result.
-pub trait Extension: Send {
+/// resolution", `Some(…)` the handler's result. `Send + Sync` because
+/// the process runtime dispatches concurrent commands over `&self`
+/// (bidirectional liveness: a dialog or nested `executeTool` may be in
+/// flight while another command's handler runs).
+pub trait Extension: Send + Sync {
     /// Called once with the `pi` object before any event; register
     /// tools here.
     fn init(&mut self, _pi: &mut Pi) {}
+
+    /// The v6-catalog event names this extension handles
+    /// (`ready.events`; the core only sends events listed here). The
+    /// runtime dispatches a command of that name to the matching
+    /// `on_*` handler — a declared name without an override is a no-op.
+    /// (Rust has no handler reflection, so the subscription is
+    /// declared, mirroring the upstream `Extension.handlers` keys.)
+    fn events(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
 
     // ------------------------------------------------------------------
     // Fire-and-forget events

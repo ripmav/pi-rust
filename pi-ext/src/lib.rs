@@ -11,7 +11,10 @@
 //! provider + MCP registration, the UI surface ([`pi::ExtensionUI`])
 //! and the message/session/model surface. The catalog ↔ API parity test
 //! (`pi-ext/tests/parity.rs`) enforces the mirror against the bridge v6
-//! catalog. The transports (WP-1205/1206) follow.
+//! catalog; [`process`] is the v6 user process runtime (WP-1205) that
+//! turns an [`pi::Extension`] into a bridge-v6-speaking process on
+//! stdio — the core cdylib target follows in WP-1206.
 
 pub mod pi;
+pub mod process;
 pub mod wire;
