@@ -17,8 +17,11 @@
 //!    `protocolVersion` (init error response + non-zero exit), run
 //!    [`Extension::init`] (a panic → init error + exit 1), answer
 //!    `apiVersion: 0`, emit `ready` with the catalog collected during
-//!    `init` (tools/commands/shortcuts/flags/providers, the events the
-//!    extension declares, the v5 initial active tool set) and forward
+//!    `init` (tools/commands/shortcuts — resolved against
+//!    `init.keybindings`, upstream `getShortcuts`: a reserved built-in
+//!    on the key is blocked, a non-reserved one shadowed —
+//!    flags/providers, the events the extension declares, the v5 initial
+//!    active tool set) and forward
 //!    load-time MCP registrations to the core as `mcp_server_register`
 //!    requests (a rejected forward → a typed `extension_error`).
 //! 2. **Dispatch loop** — every command line is handled by its own
@@ -30,8 +33,9 @@
 //!    subscribed, the combined result otherwise), `command` /
 //!    `shortcut` / `extension_tool_call` / `provider_stream` (ack + one
 //!    `provider_stream_event` line per upstream event, terminal
-//!    `done`/`error` ends the stream) and `session_shutdown` (clean
-//!    exit 0).
+//!    `done`/`error` ends the stream) and `session_shutdown` (handler
+//!    runs, then the process exits 0 — also when the handler panics,
+//!    after the `extension_error`).
 //! 3. **UI round-trip** — the [`ExtensionUI`] dialogs emit
 //!    `extension_ui_request` and wait for `extension_ui_response`;
 //!    the `init`-negotiated `timeoutMs` is the fallback timeout and a
@@ -52,7 +56,7 @@
 
 use crate::pi::{
     ExecResult, Extension, ExtensionContext, ExtensionTransport, ExtensionUI, NotifyKind, Pane,
-    PaneDescriptor, PaneHost, Pi, SendUserMessageOptions, ToolContext, UiDialogOptions,
+    PaneDescriptor, PaneHost, Pi, SendUserMessageOptions, Shortcut, ToolContext, UiDialogOptions,
 };
 use crate::wire::{
     AgentEndEvent, AgentMessage, AgentStartEvent, AgentToolResult, AssistantMessage,
@@ -67,7 +71,7 @@ use crate::wire::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -382,10 +386,18 @@ impl Bridge {
 
     /// A panic in the extension code (the dispatch task calls this):
     /// the protocol default per command kind, never a crash.
-    fn on_panic(&self, policy: &Policy, id: Option<&str>, rtype: &str) {
+    async fn on_panic(&self, policy: &Policy, id: Option<&str>, rtype: &str) {
         let msg = take_last_panic();
         match policy {
-            Policy::FireAndForget(event) => self.emit_error(event, &msg),
+            Policy::FireAndForget(event) => {
+                self.emit_error(event, &msg);
+                // A `session_shutdown` handler that ran (a panic is the
+                // case that reached here) still ends the process: the
+                // core waits for the child's exit. Error first, exit 0.
+                if event == "session_shutdown" {
+                    self.exit_flush(0).await;
+                }
+            }
             Policy::Decision(event, default_data) => {
                 self.emit_error(event, &msg);
                 self.emit(&response_line(
@@ -627,6 +639,11 @@ async fn handshake<E: Extension>(b: Arc<Bridge>, mut ext: E) -> (Arc<E>, Arc<Pi>
     b.set_capabilities(ui.clone(), timeout_ms);
     b.ctx.lock().unwrap().has_ui = !ui.is_empty();
 
+    // 3b. The core's resolved keybinding table (`init.keybindings`,
+    //     action → keys; v4): the registered shortcuts resolve against
+    //     it for `ready` (upstream `runner.getShortcuts`).
+    let keybindings = parse_keybindings(init_v.get("keybindings"));
+
     // 4. run the extension's init (a panic = handshake failure).
     let transport = BridgeTransport(b.clone());
     let mut pi = Pi::new(b.ctx_snapshot(), Box::new(transport));
@@ -663,7 +680,7 @@ async fn handshake<E: Extension>(b: Arc<Bridge>, mut ext: E) -> (Arc<E>, Arc<Pi>
     for server in pi.mcp_servers() {
         Bridge::flush_mcp_server(&b, &server.name, &server.config);
     }
-    let ready = ready_payload(&pi, &path, &events);
+    let ready = ready_payload(&pi, &path, &events, &keybindings);
     b.emit(&response_line(
         id.as_deref(),
         "init",
@@ -684,8 +701,111 @@ async fn handshake<E: Extension>(b: Arc<Bridge>, mut ext: E) -> (Arc<E>, Arc<Pi>
     (Arc::new(ext), Arc::new(pi))
 }
 
+/// The 18 reserved editor-global keybinding ids (upstream
+/// `runner.ts:98`): an extension shortcut on one of their keys is
+/// blocked (skipped), not shadowed.
+const RESERVED_KEYBINDINGS: &[&str] = &[
+    "app.interrupt",
+    "app.clear",
+    "app.exit",
+    "app.suspend",
+    "app.thinking.cycle",
+    "app.model.cycleForward",
+    "app.model.cycleBackward",
+    "app.model.select",
+    "app.tools.expand",
+    "app.thinking.toggle",
+    "app.editor.external",
+    "app.message.copy",
+    "app.message.followUp",
+    "tui.input.submit",
+    "tui.select.confirm",
+    "tui.select.cancel",
+    "tui.input.copy",
+    "tui.editor.deleteToLineEnd",
+];
+
+/// `init.keybindings` → the resolved action → keys table (upstream
+/// `buildBuiltinKeybindings` accepts a single key or a list per action).
+fn parse_keybindings(v: Option<&Value>) -> BTreeMap<String, Vec<String>> {
+    let Some(obj) = v.and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (action, keys) in obj {
+        let keys = match keys {
+            Value::String(k) => vec![k.clone()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect(),
+            _ => continue,
+        };
+        out.insert(action.clone(), keys);
+    }
+    out
+}
+
+/// Upstream `getShortcuts` resolution of the registered shortcuts
+/// against the core's keybinding table: a **reserved** built-in on the
+/// key blocks the shortcut (skipped + conflict diagnostic); a
+/// **non-reserved** built-in is shadowed (the extension wins +
+/// diagnostic); when two actions share a key the reserved one wins the
+/// merge. Returns the `ready.shortcuts` set + `ready.shortcutDiagnostics`.
+fn resolve_shortcuts(
+    shortcuts: &[Shortcut],
+    keybindings: &BTreeMap<String, Vec<String>>,
+    path: &str,
+) -> (Vec<ReadyShortcut>, Vec<String>) {
+    // Lowercased key → (action, reserved) of the built-in on that key.
+    let mut builtins: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    for (action, keys) in keybindings {
+        let reserved = RESERVED_KEYBINDINGS.contains(&action.as_str());
+        for key in keys {
+            let key = key.to_lowercase();
+            // A reserved binding already owns this key: it stays.
+            if builtins.get(&key).is_some_and(|(_, r)| *r) && !reserved {
+                continue;
+            }
+            builtins.insert(key, (action.clone(), reserved));
+        }
+    }
+    let mut resolved = Vec::new();
+    let mut diagnostics = Vec::new();
+    for s in shortcuts {
+        let blocked = builtins
+            .get(&s.key.to_lowercase())
+            .is_some_and(|(_, reserved)| *reserved);
+        if blocked {
+            diagnostics.push(format!(
+                "Extension shortcut '{}' from {} conflicts with built-in shortcut. Skipping.",
+                s.key, path
+            ));
+            continue;
+        }
+        if let Some((action, false)) = builtins.get(&s.key.to_lowercase()) {
+            diagnostics.push(format!(
+                "Extension shortcut conflict: '{}' is built-in shortcut for {} and {}. Using {}.",
+                s.key, action, path, path
+            ));
+        }
+        resolved.push(ReadyShortcut {
+            key: s.key.clone(),
+            description: s.description.clone(),
+            extension_path: path.to_string(),
+        });
+    }
+    (resolved, diagnostics)
+}
+
 /// The `ready` registry snapshot from the stored registrations.
-fn ready_payload(pi: &Pi, path: &str, events: &[String]) -> Ready {
+/// (`keybindings`: the resolved table for the shortcut resolution.)
+fn ready_payload(
+    pi: &Pi,
+    path: &str,
+    events: &[String],
+    keybindings: &BTreeMap<String, Vec<String>>,
+) -> Ready {
     let tools: Vec<ReadyTool> = pi
         .tools()
         .iter()
@@ -710,6 +830,9 @@ fn ready_payload(pi: &Pi, path: &str, events: &[String]) -> Ready {
         })
         .map(|t| t.name.clone())
         .collect();
+    // Upstream `getShortcuts` resolution (reserved built-in on the key
+    // blocks the shortcut; a non-reserved one is shadowed).
+    let shortcuts = resolve_shortcuts(pi.shortcuts(), keybindings, path);
     Ready {
         api_version: 0,
         extensions: vec![ReadyExtension {
@@ -726,18 +849,8 @@ fn ready_payload(pi: &Pi, path: &str, events: &[String]) -> Ready {
                 description: c.description.clone(),
             })
             .collect(),
-        shortcuts: Some(
-            pi.shortcuts()
-                .iter()
-                .map(|s| ReadyShortcut {
-                    key: s.key.clone(),
-                    description: s.description.clone(),
-                    extension_path: path.to_string(),
-                })
-                .collect(),
-        ),
-        // Single extension process: no keybinding conflicts can occur.
-        shortcut_diagnostics: Some(Vec::new()),
+        shortcuts: Some(shortcuts.0),
+        shortcut_diagnostics: Some(shortcuts.1),
         flags: pi
             .flags()
             .iter()
@@ -869,7 +982,7 @@ fn dispatch_line<E: Extension + 'static>(b: Arc<Bridge>, ext: Arc<E>, pi: Arc<Pi
                     b.emit(&line);
                 }
             }
-            Err(je) if je.is_panic() => b.on_panic(&policy, id.as_deref(), rtype.as_str()),
+            Err(je) if je.is_panic() => b.on_panic(&policy, id.as_deref(), rtype.as_str()).await,
             Err(_) => {
                 // runtime gone; nothing left to do
             }
@@ -1891,13 +2004,20 @@ impl PaneHost for BridgePaneHost {
     }
 
     fn done(&self, id: &str, result: Value) {
-        let _ = self
+        let Some(tx) = self
             .0
             .panes
             .lock()
             .unwrap()
             .get(id)
             .and_then(|st| st.done.lock().unwrap().take())
-            .map(|tx| tx.send(result));
+        else {
+            return; // pane already ended (timeout / second `done`): no-op
+        };
+        // The component ended the pane: emit `pane_close` (the core
+        // drops the pane) before resolving the local promise.
+        self.0
+            .emit_typed(&SidecarEvent::PaneClose { id: id.to_string() });
+        let _ = tx.send(result);
     }
 }

@@ -6,14 +6,18 @@
 //!
 //! Coverage (the WP-1205 acceptance list):
 //! - the `init` handshake: `protocolVersion` validation, the `apiVersion`
-//!   response, the `ready` catalog, the load-time MCP forward
+//!   response, the `ready` catalog, the `init.keybindings` shortcut
+//!   resolution (upstream `getShortcuts`), the load-time MCP forward
 //! - the dispatch loop: tool round-trip, a decision block, the
-//!   `extension_ui_request`/`extension_ui_response` round-trip,
-//!   `provider_stream` + `provider_stream_event` lines
+//!   `extension_ui_request`/`extension_ui_response` round-trip, the
+//!   custom-pane round-trip (`pane_open` → `pane_update` → `pane_key`
+//!   → `pane_close` → response), `provider_stream` +
+//!   `provider_stream_event` lines
 //! - protocol errors: malformed line → parse error; unknown command type
 //!   → `Unknown command` error (never a crash)
 //! - panic safety: a panicking handler yields a clean error response /
-//!   protocol default, never a half-line or a dead process
+//!   protocol default, never a half-line or a dead process — a
+//!   panicking `session_shutdown` handler still exits the process 0
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -111,12 +115,22 @@ impl Proc {
 
     /// The init handshake; returns the `ready` line.
     fn init(&mut self, ui: &[&str], timeout_ms: u64) -> Value {
-        self.send(&json!({
+        self.init_kb(ui, timeout_ms, None)
+    }
+
+    /// The init handshake with a resolved keybinding table
+    /// (`init.keybindings`, action → keys); returns the `ready` line.
+    fn init_kb(&mut self, ui: &[&str], timeout_ms: u64, keybindings: Option<&Value>) -> Value {
+        let mut init = json!({
             "id": "init-1",
             "type": "init",
             "protocolVersion": 6,
             "capabilities": { "ui": ui, "timeoutMs": timeout_ms },
-        }));
+        });
+        if let Some(kb) = keybindings {
+            init["keybindings"] = kb.clone();
+        }
+        self.send(&init);
         let resp = self.next_line("init response");
         assert_eq!(resp["id"], "init-1", "init response id: {resp}");
         assert_eq!(resp["success"], json!(true), "init failed: {resp}");
@@ -173,7 +187,7 @@ fn ready_catalog_from_stored_registrations() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tool_names, vec!["hello", "ask"]);
+    assert_eq!(tool_names, vec!["hello", "ask", "pane"]);
     let hello = &ready["tools"][0];
     assert_eq!(hello["description"], "Say hello to someone");
     assert_eq!(hello["parameters"]["properties"]["name"]["type"], "string");
@@ -201,10 +215,13 @@ fn ready_catalog_from_stored_registrations() {
         .iter()
         .map(|e| e.as_str().unwrap())
         .collect();
-    assert_eq!(events, vec!["session_start", "tool_call"]);
+    assert_eq!(
+        events,
+        vec!["session_shutdown", "session_start", "tool_call"]
+    );
 
-    // v5 active tool set: both tools are direct + default-active.
-    assert_eq!(ready["activeTools"], json!(["hello", "ask"]));
+    // v5 active tool set: all three tools are direct + default-active.
+    assert_eq!(ready["activeTools"], json!(["hello", "ask", "pane"]));
 
     // Load-time MCP registration forwarded to the core as a v6 request.
     answer_mcp_forward(&mut p);
@@ -597,5 +614,123 @@ fn stdin_eof_exits_zero() {
     p.init(&[], 2000);
     answer_mcp_forward(&mut p);
     p.close_stdin();
+    p.wait_exit(0);
+}
+
+/// Custom-pane round-trip (v6): `pane_open` → `pane_update` →
+/// `pane_key` in → `pane_close` when the component calls `done` →
+/// the tool response (the result does not cross the wire as data —
+/// the demo's handler reports it in its text).
+#[test]
+fn custom_pane_round_trip_closes() {
+    let mut p = Proc::spawn_demo();
+    p.init(&["custom"], 5000);
+    answer_mcp_forward(&mut p);
+    p.send(&json!({
+        "id": "cp-1",
+        "type": "extension_tool_call",
+        "toolCallId": "outer-5",
+        "toolName": "pane",
+        "input": {},
+    }));
+    let open = p
+        .lines_until(
+            |v| v.get("type").and_then(Value::as_str) == Some("pane_open"),
+            "pane_open",
+        )
+        .pop()
+        .unwrap();
+    let pane_id = open["id"].as_str().expect("pane id").to_string();
+    // The descriptor snapshot (by the time this line is on the wire the
+    // factory has already registered its key waiter — single-threaded
+    // runtime, no await between `update` and `next_key`).
+    let update = p.next_line("pane_update");
+    assert_eq!(update["type"], "pane_update");
+    assert_eq!(update["id"], pane_id);
+    assert_eq!(update["lines"][0]["text"], "press a key");
+    p.send(&json!({
+        "id": pane_id,
+        "type": "pane_key",
+        "key": { "code": "enter" },
+    }));
+    // The close line is observed after the round-trip (the core drops
+    // the pane on it).
+    let close = p.next_line("pane_close");
+    assert_eq!(close["type"], "pane_close");
+    assert_eq!(close["id"], pane_id);
+    let resp = p.next_line("pane tool response");
+    assert_eq!(resp["id"], "cp-1");
+    assert_eq!(resp["success"], json!(true), "{resp}");
+    assert_eq!(resp["data"]["content"][0]["text"], "pane: enter");
+}
+
+/// `init.keybindings` resolution (upstream `runner.getShortcuts`):
+/// no table → the registered key as-is; a reserved built-in on the
+/// key → the shortcut is blocked + conflict diagnostic; the reserved
+/// binding overridden away → the key is advertised again; a
+/// non-reserved built-in on the key → shadowed (extension wins) +
+/// diagnostic.
+#[test]
+fn keybinding_table_resolves_shortcuts() {
+    // No `keybindings` in init → default: the registered key, no
+    // diagnostics.
+    let mut p = Proc::spawn_demo();
+    let ready = p.init(&[], 2000);
+    assert_eq!(
+        ready["shortcuts"],
+        json!([{ "key": "ctrl+d", "extensionPath": env!("CARGO_BIN_EXE_pi-ext-demo") }])
+    );
+    assert_eq!(ready["shortcutDiagnostics"], json!([]));
+
+    // A reserved built-in (`app.interrupt`) on the key → blocked:
+    // no shortcut entry, the conflict diagnostic.
+    let mut p = Proc::spawn_demo();
+    let ready = p.init_kb(&[], 2000, Some(&json!({ "app.interrupt": ["ctrl+d"] })));
+    assert_eq!(ready["shortcuts"], json!([]), "{ready}");
+    let diag = ready["shortcutDiagnostics"][0].as_str().unwrap();
+    assert!(diag.contains("ctrl+d"), "{diag}");
+    assert!(diag.contains("conflicts with built-in shortcut"), "{diag}");
+
+    // The reserved binding overridden away (`app.interrupt` → ctrl+q)
+    // → the key is advertised again, no diagnostics.
+    let mut p = Proc::spawn_demo();
+    let ready = p.init_kb(&[], 2000, Some(&json!({ "app.interrupt": ["ctrl+q"] })));
+    assert_eq!(ready["shortcuts"][0]["key"], "ctrl+d", "{ready}");
+    assert_eq!(ready["shortcutDiagnostics"], json!([]));
+
+    // A non-reserved built-in (`app.session.delete`) on the key →
+    // shadowed: the shortcut stays, the shadow diagnostic.
+    let mut p = Proc::spawn_demo();
+    let ready = p.init_kb(
+        &[],
+        2000,
+        Some(&json!({ "app.session.delete": ["ctrl+d"] })),
+    );
+    assert_eq!(ready["shortcuts"][0]["key"], "ctrl+d", "{ready}");
+    let diag = ready["shortcutDiagnostics"][0].as_str().unwrap();
+    assert!(diag.contains("app.session.delete"), "{diag}");
+    assert!(diag.contains("Using"), "{diag}");
+}
+
+/// A panicking `session_shutdown` handler: the fire-and-forget
+/// `extension_error` is emitted first, then the process still exits 0
+/// (the core waits for the child's exit — it must not hang).
+#[test]
+fn panicking_session_shutdown_still_exits() {
+    let mut p = Proc::spawn_demo();
+    p.init(&[], 2000);
+    answer_mcp_forward(&mut p);
+    p.send(&json!({
+        "id": "sh-2",
+        "type": "session_shutdown",
+        "event": { "type": "sessionShutdown", "reason": "panic" },
+    }));
+    let err = p.next_line("session_shutdown extension_error");
+    assert_eq!(err["type"], "extension_error");
+    assert_eq!(err["event"], "session_shutdown");
+    assert!(err["error"]
+        .as_str()
+        .unwrap()
+        .contains("demo session_shutdown panic"));
     p.wait_exit(0);
 }

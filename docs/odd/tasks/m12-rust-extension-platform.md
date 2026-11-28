@@ -126,3 +126,29 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
   was already `Send + 'a` — the seam was unusable by a stream that
   calls `emit`); `tokio` becomes a `pi-ext` dependency. E1S2 at 5/6,
   next: WP-1206.
+- **L9** (2026-11-28): PR #191 completeness-review gap fixes
+  (WP-1205, same branch — 3 protocol-fidelity gaps): (1) `pane_close`
+  was never emitted — `BridgePaneHost::done` now emits
+  `SidecarEvent::PaneClose { id }` (the wire type already existed) when
+  the pane's component calls `done(result)`, before resolving the local
+  promise (protocol: `pane_close` = "the component called done(result)";
+  a timed-out pane is abandoned without one). (2) `init.keybindings`
+  was ignored — the handshake now parses the core's resolved keybinding
+  table (action → keys) and resolves the registered shortcuts with the
+  upstream `runner.getShortcuts` semantics (the 18 reserved
+  editor-global ids, `runner.ts:98`: reserved built-in on the key →
+  shortcut skipped + conflict diagnostic; non-reserved → shadowed,
+  extension wins + diagnostic; reserved wins the merge on shared keys),
+  so `ready.shortcuts`/`ready.shortcutDiagnostics` carry the effective
+  set instead of the raw registrations. (3) a panicking
+  `session_shutdown` handler left the process running (the core hangs
+  waiting for the exit) — `on_panic` is now async and, after the
+  fire-and-forget `extension_error`, exits 0 for `session_shutdown`.
+  Demo gains a `pane` tool (custom-pane round-trip) and a
+  `session_shutdown` handler (panics on `reason: "panic"`); harness
+  gains 3 e2e scenarios (18 total): pane round-trip asserting the
+  `pane_close` line, keybinding-table resolution (absent table →
+  default; reserved on the key → blocked + diagnostic; reserved
+  overridden away → advertised again; non-reserved → shadowed +
+  diagnostic), panicking shutdown handler → `extension_error` then
+  exit 0.

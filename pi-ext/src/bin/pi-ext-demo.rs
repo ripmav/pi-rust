@@ -1,16 +1,16 @@
 //! Example user extension (WP-1205): a bridge-v6-speaking process.
-//! Registers a tool + command + event handlers + flag + shortcut +
-//! provider + MCP server and is driven over NDJSON stdio by
-//! `pi-ext/tests/process.rs` — the same contract the core has for a TS
-//! extension (spawn, `init`, `ready`, dispatch).
+//! Registers tools (dialog + custom pane), commands, event handlers,
+//! a flag, a shortcut, a provider and an MCP server, and is driven over
+//! NDJSON stdio by `pi-ext/tests/process.rs` — the same contract the
+//! core has for a TS extension (spawn, `init`, `ready`, dispatch).
 
 use pi_ext::pi::{
-    Command, Extension, ExtensionContext, Flag, FlagKind, McpServer, Pi, Provider, ProviderConfig,
-    ProviderModel, Shortcut, Tool, UiDialogOptions,
+    Command, Extension, ExtensionContext, Flag, FlagKind, McpServer, Pane, PaneDescriptor, Pi,
+    Provider, ProviderConfig, ProviderModel, Shortcut, Tool, UiDialogOptions,
 };
 use pi_ext::wire::{
     AgentMessage, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    McpServerConfig, MessageContent, PartialMessage, ToolCallEvent, ToolCallEventResult,
+    McpServerConfig, MessageContent, PaneLine, PartialMessage, ToolCallEvent, ToolCallEventResult,
 };
 use serde_json::{json, Value};
 
@@ -18,7 +18,7 @@ struct Demo;
 
 impl Extension for Demo {
     fn events(&self) -> Vec<&'static str> {
-        vec!["session_start", "tool_call"]
+        vec!["session_start", "session_shutdown", "tool_call"]
     }
 
     fn init(&mut self, pi: &mut Pi) {
@@ -58,6 +58,43 @@ impl Extension for Demo {
                     } else {
                         "declined"
                     }))
+                })
+            },
+        ));
+        // Tool: pane — a custom pane (v6 `custom`): one descriptor
+        // update, then `done` with the key that ended it.
+        pi.register_tool(Tool::new(
+            "pane",
+            "Open a custom pane",
+            pi_ext::pi::schema::object(&[], &[]),
+            |_input, ctx| {
+                Box::pin(async move {
+                    let result = ctx
+                        .ctx()
+                        .ui
+                        .custom(
+                            Box::new(|pane: Pane| {
+                                Box::pin(async move {
+                                    pane.update(&PaneDescriptor {
+                                        title: Some("Demo pane".into()),
+                                        lines: Some(vec![PaneLine {
+                                            text: "press a key".into(),
+                                        }]),
+                                        ..Default::default()
+                                    });
+                                    let key = pane.next_key().await;
+                                    pane.done(json!(key.map(|k| k.code)));
+                                })
+                            }),
+                            None,
+                        )
+                        .await;
+                    let text = match result {
+                        Some(Value::String(s)) => format!("pane: {s}"),
+                        Some(_) => "pane: done".into(),
+                        None => "pane: dismissed".into(),
+                    };
+                    Ok(AgentToolResult::text(text))
                 })
             },
         ));
@@ -163,6 +200,19 @@ impl Extension for Demo {
 
     fn on_session_start(&self, _event: &pi_ext::pi::SessionStartEvent, _ctx: &ExtensionContext) {
         eprintln!("[demo] session started");
+    }
+
+    /// The `session_shutdown` handler: panics on `reason: "panic"`
+    /// (the panic-safety check — the process must still exit 0).
+    fn on_session_shutdown(
+        &self,
+        event: &pi_ext::pi::SessionShutdownEvent,
+        _ctx: &ExtensionContext,
+    ) {
+        if event.reason.as_deref() == Some("panic") {
+            panic!("demo session_shutdown panic");
+        }
+        eprintln!("[demo] session shutdown: {:?}", event.reason);
     }
 }
 
