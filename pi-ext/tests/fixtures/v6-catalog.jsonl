@@ -1,0 +1,52 @@
+{"cap":"event:session_start","ref":"message catalog: session_start (F&F)"}
+{"cap":"event:before_agent_start","ref":"message catalog: before_agent_start (decision)"}
+{"cap":"event:agent_start","ref":"message catalog: agent_start (F&F)"}
+{"cap":"event:agent_end","ref":"message catalog: agent_end (F&F)"}
+{"cap":"event:turn_start","ref":"message catalog: turn_start (F&F)"}
+{"cap":"event:turn_end","ref":"message catalog: turn_end (F&F)"}
+{"cap":"event:message_start","ref":"message catalog: message_start (F&F)"}
+{"cap":"event:message_update","ref":"message catalog: message_update (F&F)"}
+{"cap":"event:message_end","ref":"message catalog: message_end (F&F)"}
+{"cap":"event:tool_call","ref":"message catalog: tool_call (decision)"}
+{"cap":"event:tool_result","ref":"message catalog: tool_result (decision)"}
+{"cap":"event:context","ref":"message catalog: context (decision)"}
+{"cap":"event:context_with_system","ref":"message catalog: context_with_system (decision)"}
+{"cap":"event:input","ref":"message catalog: input (decision)"}
+{"cap":"event:user_bash","ref":"message catalog: user_bash (decision)"}
+{"cap":"event:session_before_compact","ref":"message catalog: session_before_compact (decision, v3)"}
+{"cap":"event:session_compact","ref":"message catalog: session_compact (F&F, v3)"}
+{"cap":"event:session_compact_failed","ref":"message catalog: session_compact_failed (F&F, v3)"}
+{"cap":"event:session_shutdown","ref":"message catalog: session_shutdown (F&F)"}
+{"cap":"event:model_select","ref":"message catalog: set_model (event name model_select, F&F)"}
+{"cap":"event:thinking_level_select","ref":"message catalog: set_thinking_level (event name thinking_level_select, F&F)"}
+{"cap":"event:session_info_changed","ref":"sidecar->core: session_info_changed (relayed to the extension)"}
+{"cap":"event:mcp_servers_change","ref":"MCP servers: core->sidecar event, sidecar relays it to the extension"}
+{"cap":"register:tool","ref":"ready.tools / tools_changed / extension_tool_call"}
+{"cap":"register:command","ref":"ready.commands / command"}
+{"cap":"register:shortcut","ref":"ready.shortcuts / shortcut (v4)"}
+{"cap":"register:flag","ref":"ready.flags"}
+{"cap":"register:provider","ref":"ready.providers / providers_changed (v1) / provider_stream (v1)"}
+{"cap":"register:mcp-server","ref":"sidecar->core: mcp_server_register (v6)"}
+{"cap":"action:send_user_message","ref":"sidecar->core: user_message"}
+{"cap":"action:append_entry","ref":"sidecar->core: session_append_entry"}
+{"cap":"action:set_session_name","ref":"sidecar->core: session_info_changed"}
+{"cap":"action:get_session_name","ref":"session_info_changed (ctx snapshot)"}
+{"cap":"action:set_label","ref":"core target only (in-process ABI); no v6 user-target message"}
+{"cap":"action:get_settings","ref":"local: agent-dir settings (sidecar-local in v6, no wire message)"}
+{"cap":"action:set_thinking_level","ref":"sidecar->core: set_thinking_level_request"}
+{"cap":"action:get_thinking_level","ref":"set_thinking_level (ctx snapshot)"}
+{"cap":"action:set_model","ref":"sidecar->core: set_model_request"}
+{"cap":"action:exec","ref":"local: the extension process shell (no wire message)"}
+{"cap":"action:execute_tool","ref":"sidecar->core: tool_call_request"}
+{"cap":"action:get_flag","ref":"local: process argv (upstream CLI parsing); declarations cross via ready.flags"}
+{"cap":"action:unregister_provider","ref":"providers_changed (v1): registerProvider/unregisterProvider after ready"}
+{"cap":"ui:select","ref":"init.capabilities.ui / extension_ui_request method select (req/resp)"}
+{"cap":"ui:confirm","ref":"init.capabilities.ui / extension_ui_request method confirm (req/resp)"}
+{"cap":"ui:input","ref":"init.capabilities.ui / extension_ui_request method input (req/resp)"}
+{"cap":"ui:editor","ref":"init.capabilities.ui / extension_ui_request method editor (req/resp)"}
+{"cap":"ui:notify","ref":"init.capabilities.ui / extension_ui_request method notify (F&F)"}
+{"cap":"ui:custom","ref":"init.capabilities.ui: custom (v6) / pane_open, pane_update, pane_close, pane_key"}
+{"cap":"ui:set_status","ref":"extension_ui_request method setStatus (F&F)"}
+{"cap":"ui:set_title","ref":"extension_ui_request method setTitle (F&F)"}
+{"cap":"ui:set_editor_text","ref":"extension_ui_request method set_editor_text (F&F)"}
+{"cap":"ctx:has_ui","ref":"init.capabilities.ui (non-empty -> hasUI true)"}

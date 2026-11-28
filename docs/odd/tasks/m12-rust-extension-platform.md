@@ -78,3 +78,28 @@ Each: same e2e scenario as the unmodified original (same fixtures), in-core.
   involvement); E1S2 at 3/6, next: WP-1204. Note: GitHub stacks need ≥2
   open PRs, so the single open WP PRs are unregistered until the next
   WP PR opens (register [154, next] then).
+- **L6** (2026-11-27): WP-1204 delivered — PR #190
+  (`feat/wp-1204-pi-ext-api-parity`): remaining `pi-ext` API surface
+  (commands/shortcuts/flags, provider registration + stream surface, MCP
+  registration, `ctx.ui` surface incl. `custom` pane + no-UI default,
+  `on_mcp_servers_change` + the v6 MCP wire types) and the catalog ↔ API
+  parity test (52 capabilities, `pi-ext/tests/parity.rs` ↔
+  `fixtures/v6-catalog.jsonl`, both directions); `pi-ext` 0.x section added
+  to stability-contract.md; E1S2 at 4/6, next: WP-1205.
+- **L7** (2026-11-28): PR #190 bug-review fixes (WP-1204, same branch,
+  3 bugs): (1) `get_flag` now coerces by `flag.kind` per upstream
+  `applyExtensionFlagValues` — a boolean flag is `true` for any CLI
+  occurrence (an `=value` is ignored), a string flag takes the CLI
+  string value and a bare occurrence leaves the registered default
+  standing; (2) the CLI scan (`cli_flag_value`) now stops at `--`
+  (everything after is positional) and is last-write-wins, matching
+  upstream `parseArgs`' `unknownFlags` map — was first-match-over-entire-
+  argv; (3) `pi_ext::wire::McpServerConfig` widened to the core's
+  `register_server` entry shape: added `type` (`stdio`|`http`), stdio
+  `cwd` and per-server `timeout` (seconds, number); `auth` stays opaque
+  passthrough, now documented as a core rejection (D17) the wire still
+  carries; exposure doc corrected to include `hidden`. Pinned by unit
+  tests (`pi-ext/src/pi/mod.rs`: flag parse/coercion semantics) and a
+  full-upstream-shaped stdio+http entry round-trip fixture
+  (`pi-ext/tests/wire.rs`); the v6 catalog fixture is unchanged
+  (capability set did not change).

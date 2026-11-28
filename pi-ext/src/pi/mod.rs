@@ -2,11 +2,16 @@
 //! object + `ctx` (ADR 0002), limited to what the bridge v6 catalog can
 //! express: the [`Extension`] trait (init entry + event handlers), the
 //! context ([`ExtensionContext`]), tool registration ([`Tool`],
-//! [`schema`] helpers), and the message/session/model surface on
-//! [`Pi`].
+//! [`schema`] helpers), commands/shortcuts/flags ([`Command`],
+//! [`Shortcut`], [`Flag`]), provider and MCP registration
+//! ([`Provider`], [`McpServer`]), the UI surface ([`ExtensionUI`] on
+//! `ctx.ui`, [`NullUi`] = the no-UI default) and the
+//! message/session/model surface on [`Pi`].
 //!
-//! UI, commands, shortcuts, flags, providers and MCP land in WP-1204;
-//! the transports (v6 user process, core cdylib) in WP-1205/1206.
+//! The transports (v6 user process, core cdylib) land in WP-1205/1206;
+//! registrations are stored on [`Pi`] (accessors below) so they can
+//! dispatch them, and the catalog ↔ API parity test (`tests/parity.rs`)
+//! keeps the mirror honest.
 //!
 //! # Example ("hello tool")
 //!
@@ -40,30 +45,80 @@
 //! # let _ = Hello;
 //! ```
 //!
-//! Runtime actions (messages, session, model) run through the
+//! Runtime actions (messages, session, model, UI) run through the
 //! [`ExtensionTransport`] supplied by the runtime — [`NullTransport`]
-//! no-ops them, which is what a standalone compile/test needs:
+//! no-ops them (and carries the [`NullUi`] no-UI default), which is what
+//! a standalone compile/test needs:
 //!
 //! ```
-//! use pi_ext::pi::{ExtensionContext, NullTransport, Pi};
-//! use pi_ext::wire::MessageContent;
+//! use pi_ext::pi::{
+//!     Command, Extension, ExtensionContext, Flag, FlagKind, McpServer, NullTransport,
+//!     Pi, Provider, ProviderConfig, ProviderModel, Tool, ToolContext,
+//! };
+//! use pi_ext::wire::{AgentToolResult, McpServerConfig, MessageContent};
+//! use serde_json::{json, Value};
 //!
-//! let pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+//! struct Hello;
+//!
+//! impl Extension for Hello {
+//!     fn init(&mut self, pi: &mut Pi) {
+//!         pi.register_tool(Tool::new(
+//!             "hello",
+//!             "Say hello to someone",
+//!             pi_ext::pi::schema::object(
+//!                 &[("name", pi_ext::pi::schema::string(Some("Who to greet")))],
+//!                 &["name"],
+//!             ),
+//!             |input: Value, _ctx: &ToolContext| Box::pin(async move {
+//!                 let name = input["name"].as_str().unwrap_or("world");
+//!                 Ok(AgentToolResult::text(format!("Hello, {name}!")))
+//!             }),
+//!         ));
+//!         pi.register_command(Command::new("hello", |args: String, _ctx: &ExtensionContext| {
+//!             Box::pin(async move { Some(json!({ "args": args })) })
+//!         }));
+//!         pi.register_flag(Flag::new("greet", FlagKind::String).with_default(json!("world")));
+//!         pi.register_provider(Provider::new(
+//!             "faketest",
+//!             ProviderConfig::new(
+//!                 vec![ProviderModel::new("faketest/echo-1")],
+//!                 |_model, _messages, _options, _emit| Box::pin(async {}),
+//!             ),
+//!         ));
+//!         pi.register_mcp_server(McpServer::new("docs", McpServerConfig::default()));
+//!     }
+//! }
+//!
+//! let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+//! let mut hello = Hello;
+//! hello.init(&mut pi);
 //! pi.send_user_message(MessageContent::Text("hi".into()), None);
-//! pi.append_entry("my-state", serde_json::json!({"step": 1}));
+//! pi.append_entry("my-state", json!({"step": 1}));
+//! // No --greet on the command line → the registered default.
+//! assert_eq!(pi.get_flag("greet"), Some(json!("world")));
+//! assert_eq!(pi.get_flag("nope"), None);
 //! ```
 
+mod command;
+mod provider;
 mod tool;
+mod ui;
 
+pub use command::{Command, CommandHandler, Flag, FlagKind, Shortcut, ShortcutHandler};
+pub use provider::{McpServer, Provider, ProviderConfig, ProviderModel, ProviderStreamFn};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 pub use tool::{schema, Tool, ToolContext, ToolExecutor, ToolOutcome};
+pub use ui::{
+    ExtensionUI, NotifyKind, NullUi, Pane, PaneDescriptor, PaneFactory, PaneHost, UiDialogOptions,
+};
 
 /// The extension context (upstream `ExtensionContext`, the wire-
 /// expressible subset per ADR 0002): the run mode, dialog availability,
-/// working directory and the session/model view.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// working directory, the session/model view and the UI surface.
+#[derive(Clone)]
 pub struct ExtensionContext {
     /// `"tui"` | `"rpc"` | `"json"` | `"print"`.
     pub mode: String,
@@ -77,6 +132,48 @@ pub struct ExtensionContext {
     pub model: Option<ModelRef>,
     /// The current thinking level, when the session runtime provides one.
     pub thinking_level: Option<String>,
+    /// The UI surface (upstream `ctx.ui`); [`NullUi`] = the headless
+    /// no-UI default. [`Pi::new`] wires it from the transport.
+    pub ui: Arc<dyn ExtensionUI>,
+}
+
+impl Default for ExtensionContext {
+    fn default() -> Self {
+        Self {
+            mode: String::new(),
+            has_ui: false,
+            cwd: String::new(),
+            session_name: None,
+            model: None,
+            thinking_level: None,
+            ui: Arc::new(NullUi),
+        }
+    }
+}
+
+impl std::fmt::Debug for ExtensionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionContext")
+            .field("mode", &self.mode)
+            .field("has_ui", &self.has_ui)
+            .field("cwd", &self.cwd)
+            .field("session_name", &self.session_name)
+            .field("model", &self.model)
+            .field("thinking_level", &self.thinking_level)
+            .field("ui", &"<ExtensionUI>")
+            .finish()
+    }
+}
+
+impl PartialEq for ExtensionContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.has_ui == other.has_ui
+            && self.cwd == other.cwd
+            && self.session_name == other.session_name
+            && self.model == other.model
+            && self.thinking_level == other.thinking_level
+    }
 }
 
 /// The result of `exec` (upstream `ExecResult`).
@@ -136,6 +233,8 @@ pub trait ExtensionTransport: Send + Sync {
         name: &str,
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<AgentToolResult, String>> + Send + '_>>;
+    /// `ctx.ui` — the target's UI surface ([`NullUi`] headless).
+    fn ui(&self) -> Arc<dyn ExtensionUI>;
 }
 
 /// A no-op [`ExtensionTransport`] for standalone compiles, doc examples
@@ -183,6 +282,9 @@ impl ExtensionTransport for NullTransport {
         let name = name.to_string();
         Box::pin(async move { Err(format!("NullTransport: {name} not wired")) })
     }
+    fn ui(&self) -> Arc<dyn ExtensionUI> {
+        Arc::new(NullUi)
+    }
 }
 
 /// The `pi` object handed to [`Extension::init`] and used from handlers:
@@ -193,16 +295,29 @@ pub struct Pi {
     pub ctx: ExtensionContext,
     pub(crate) transport: Box<dyn ExtensionTransport>,
     pub(crate) tools: Vec<Tool>,
+    pub(crate) commands: Vec<Command>,
+    pub(crate) shortcuts: Vec<Shortcut>,
+    pub(crate) flags: Vec<Flag>,
+    pub(crate) providers: Vec<Provider>,
+    pub(crate) mcp_servers: Vec<McpServer>,
 }
 
 impl Pi {
     /// Build the `pi` object (runtime entry; transports in WP-1205/1206
-    /// call this, tests use [`NullTransport`]).
+    /// call this, tests use [`NullTransport`]). Wires `ctx.ui` from the
+    /// transport's UI surface.
     pub fn new(ctx: ExtensionContext, transport: Box<dyn ExtensionTransport>) -> Self {
+        let mut ctx = ctx;
+        ctx.ui = transport.ui();
         Self {
             ctx,
             transport,
             tools: Vec::new(),
+            commands: Vec::new(),
+            shortcuts: Vec::new(),
+            flags: Vec::new(),
+            providers: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -214,6 +329,90 @@ impl Pi {
     /// The registered tools (in registration order).
     pub fn tools(&self) -> &[Tool] {
         &self.tools
+    }
+
+    /// Register a custom command (upstream `registerCommand`); a
+    /// same-name re-registration replaces it.
+    pub fn register_command(&mut self, command: Command) {
+        assert!(
+            !command.name.is_empty(),
+            "command must have a non-empty name"
+        );
+        self.commands.retain(|c| c.name != command.name);
+        self.commands.push(command);
+    }
+
+    /// The registered commands (in registration order).
+    pub fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
+    /// Register a keyboard shortcut (upstream `registerShortcut`); the
+    /// same key replaces the earlier registration.
+    pub fn register_shortcut(&mut self, shortcut: Shortcut) {
+        self.shortcuts.retain(|s| s.key != shortcut.key);
+        self.shortcuts.push(shortcut);
+    }
+
+    /// The registered shortcuts (in registration order).
+    pub fn shortcuts(&self) -> &[Shortcut] {
+        &self.shortcuts
+    }
+
+    /// Register a CLI flag (upstream `registerFlag`); a same-name
+    /// re-registration replaces it.
+    pub fn register_flag(&mut self, flag: Flag) {
+        self.flags.retain(|f| f.name != flag.name);
+        self.flags.push(flag);
+    }
+
+    /// The registered flags (in registration order).
+    pub fn flags(&self) -> &[Flag] {
+        &self.flags
+    }
+
+    /// `pi.getFlag` — the CLI value when given on the process command
+    /// line (the core spawns the extension with the CLI flags), else
+    /// the registered default; `None` when the flag is not registered.
+    /// Upstream `applyExtensionFlagValues` coercion: a **boolean**
+    /// flag is `true` for any CLI occurrence (an `=value` is ignored);
+    /// a **string** flag takes the CLI string value — a bare occurrence
+    /// (no value) carries none, so the default stands.
+    #[must_use]
+    pub fn get_flag(&self, name: &str) -> Option<Value> {
+        let flag = self.flags.iter().find(|f| f.name == name)?;
+        resolve_flag_value(flag.kind, cli_flag_value(name), flag.default.clone())
+    }
+
+    /// Register or override a model provider (upstream
+    /// `registerProvider`); a same-name re-registration replaces it.
+    pub fn register_provider(&mut self, provider: Provider) {
+        self.providers.retain(|p| p.name != provider.name);
+        self.providers.push(provider);
+    }
+
+    /// `pi.unregisterProvider` — removes the named provider (no-op when
+    /// not registered).
+    pub fn unregister_provider(&mut self, name: &str) {
+        self.providers.retain(|p| p.name != name);
+    }
+
+    /// The registered providers (in registration order).
+    pub fn providers(&self) -> &[Provider] {
+        &self.providers
+    }
+
+    /// Register an MCP server (upstream `registerMcpServer` — the core
+    /// hosts it); a same-name re-registration replaces the
+    /// extension's earlier registration.
+    pub fn register_mcp_server(&mut self, server: McpServer) {
+        self.mcp_servers.retain(|s| s.name != server.name);
+        self.mcp_servers.push(server);
+    }
+
+    /// The registered MCP servers (in registration order).
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp_servers
     }
 
     /// The context of this extension instance.
@@ -279,6 +478,70 @@ impl Pi {
     }
 }
 
+/// The value of `--<name>` on the process command line, upstream
+/// `parseArgs`' `unknownFlags` semantics: `--name=value`, `--name
+/// value` (the following non-dash/non-`@` arg is the value) or a bare
+/// `--name` = `true`; the scan **stops at `--`** (everything after is
+/// positional) and the **last occurrence wins** (the `unknownFlags`
+/// map is last-write-wins); `None` when absent.
+fn cli_flag_value(name: &str) -> Option<Value> {
+    let args: Vec<String> = std::env::args().collect();
+    cli_flag_value_from_args(&args, name)
+}
+
+/// [`cli_flag_value`] over an explicit argv (the parse is pure so the
+/// upstream semantics are testable without process args).
+fn cli_flag_value_from_args(args: &[String], name: &str) -> Option<Value> {
+    let mut value: Option<Value> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            break; // everything after `--` is positional
+        }
+        let Some(rest) = arg.strip_prefix("--") else {
+            i += 1;
+            continue;
+        };
+        let mut next_i = i + 1;
+        if let Some(eq) = rest.find('=') {
+            if &rest[..eq] == name {
+                value = Some(Value::String(rest[eq + 1..].to_string()));
+            }
+        } else if rest == name {
+            // Upstream: a bare `--name` takes the next arg as its value
+            // unless it starts with `-` or `@` (then it is `true`); the
+            // value arg is consumed.
+            if args
+                .get(next_i)
+                .is_some_and(|n| !n.starts_with('-') && !n.starts_with('@'))
+            {
+                value = Some(Value::String(args[next_i].clone()));
+                next_i += 1;
+            } else {
+                value = Some(Value::Bool(true));
+            }
+        }
+        i = next_i;
+    }
+    value
+}
+
+/// Upstream `applyExtensionFlagValues` + `getFlag` resolution: a
+/// **boolean** flag is `true` for any CLI occurrence (an `=value` is
+/// ignored); a **string** flag takes the CLI string value — a bare
+/// occurrence (upstream: "requires a value" error) or no occurrence
+/// leaves the registered default standing.
+fn resolve_flag_value(kind: FlagKind, cli: Option<Value>, default: Option<Value>) -> Option<Value> {
+    match kind {
+        FlagKind::Boolean => cli.is_some().then_some(Value::Bool(true)).or(default),
+        FlagKind::String => match cli {
+            Some(v) if v.is_string() => Some(v),
+            _ => default,
+        },
+    }
+}
+
 /// The extension itself: the init entry (the Rust analog of upstream's
 /// `export default (pi) => { … }`) plus one handler per v6-catalog event.
 ///
@@ -314,6 +577,8 @@ pub trait Extension: Send {
     fn on_model_select(&self, _event: &ModelSelectEvent, _ctx: &ExtensionContext) {}
     fn on_thinking_level_select(&self, _event: &ThinkingLevelSelectEvent, _ctx: &ExtensionContext) {
     }
+    /// The core's MCP set changed (configured + extension-registered).
+    fn on_mcp_servers_change(&self, _event: &McpServersChangeEvent, _ctx: &ExtensionContext) {}
 
     // ------------------------------------------------------------------
     // Decision events
@@ -386,17 +651,18 @@ pub trait Extension: Send {
 pub use crate::wire::{
     AgentEndEvent, AgentMessage, AgentStartEvent, AgentToolResult, AssistantMessageEvent,
     BeforeAgentStartEvent, BeforeAgentStartResult, ContentBlock, ContextEvent,
-    ContextWithSystemEvent, InputEvent, InputEventResult, MessageContent, MessageEndEvent,
-    MessageStartEvent, MessageUpdateEvent, ModelRef, ModelSelectEvent, SessionBeforeCompactEvent,
-    SessionBeforeCompactResult, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChanged,
-    SessionShutdownEvent, SessionStartEvent, ThinkingLevelSelectEvent, ToolCallEvent,
-    ToolCallEventResult, ToolResultEvent, ToolResultEventResult, TurnEndEvent, TurnStartEvent,
-    UserBashEvent, UserBashEventResult,
+    ContextWithSystemEvent, InputEvent, InputEventResult, McpServerEntry, McpServersChangeEvent,
+    MessageContent, MessageEndEvent, MessageStartEvent, MessageUpdateEvent, ModelRef,
+    ModelSelectEvent, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionCompactEvent,
+    SessionCompactFailedEvent, SessionInfoChanged, SessionShutdownEvent, SessionStartEvent,
+    ThinkingLevelSelectEvent, ToolCallEvent, ToolCallEventResult, ToolResultEvent,
+    ToolResultEventResult, TurnEndEvent, TurnStartEvent, UserBashEvent, UserBashEventResult,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::McpServerConfig;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -475,6 +741,9 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<AgentToolResult, String>> + Send + '_>> {
             let name = name.to_string();
             Box::pin(async move { Ok(AgentToolResult::text(name)) })
+        }
+        fn ui(&self) -> Arc<dyn ExtensionUI> {
+            Arc::new(NullUi)
         }
     }
 
@@ -616,5 +885,219 @@ mod tests {
             &ctx,
         );
         assert!(seen.load(Ordering::SeqCst));
+    }
+
+    fn command(name: &str) -> Command {
+        Command::new(name, |_args: String, _ctx: &ExtensionContext| {
+            Box::pin(async { None })
+        })
+    }
+
+    #[test]
+    fn command_registration_replaces_same_name() {
+        let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        pi.register_command(command("gates"));
+        pi.register_command(command("gates"));
+        pi.register_command(command("other"));
+        assert_eq!(pi.commands().len(), 2);
+        assert_eq!(pi.commands()[0].name, "gates");
+        assert_eq!(pi.commands()[1].name, "other");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty name")]
+    fn empty_command_name_is_rejected() {
+        let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        pi.register_command(command(""));
+    }
+
+    #[test]
+    fn shortcut_registration_replaces_same_key() {
+        let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        pi.register_shortcut(Shortcut::new("ctrl+g", |_ctx: &ExtensionContext| {
+            Box::pin(async {})
+        }));
+        pi.register_shortcut(Shortcut::new("ctrl+g", |_ctx: &ExtensionContext| {
+            Box::pin(async {})
+        }));
+        pi.register_shortcut(Shortcut::new("ctrl+h", |_ctx: &ExtensionContext| {
+            Box::pin(async {})
+        }));
+        assert_eq!(pi.shortcuts().len(), 2);
+        assert_eq!(pi.shortcuts()[0].key, "ctrl+g");
+        assert_eq!(pi.shortcuts()[1].key, "ctrl+h");
+    }
+
+    #[test]
+    fn get_flag_resolves_default_for_unspecified_flag() {
+        let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        pi.register_flag(Flag::new("gate-mode", FlagKind::String).with_default(json!("warn")));
+        pi.register_flag(Flag::new("loud", FlagKind::Boolean));
+        // No --gate-mode/--loud on this process's command line.
+        assert_eq!(pi.get_flag("gate-mode"), Some(json!("warn")));
+        assert_eq!(pi.get_flag("loud"), None);
+        assert_eq!(pi.get_flag("nope"), None);
+        // Same-name re-registration replaces.
+        pi.register_flag(Flag::new("gate-mode", FlagKind::String).with_default(json!("block")));
+        assert_eq!(pi.flags().len(), 2);
+        assert_eq!(pi.get_flag("gate-mode"), Some(json!("block")));
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid default for flag")]
+    fn flag_default_type_mismatch_is_rejected() {
+        let _ = Flag::new("gate-mode", FlagKind::String).with_default(json!(true));
+    }
+
+    /// Upstream `parseArgs` `unknownFlags` semantics, pinned: the scan
+    /// stops at `--` and the last occurrence wins.
+    #[test]
+    fn cli_flag_value_upstream_semantics() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // `--name=value`, incl. an empty value (still an occurrence).
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=world"]), "greet"),
+            Some(json!("world"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet="]), "greet"),
+            Some(json!(""))
+        );
+        // `--name value` (the value arg is consumed); a following
+        // dash/`@` arg is not the value → bare occurrence = `true`.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "world"]), "greet"),
+            Some(json!("world"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "--other"]), "greet"),
+            Some(json!(true))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet", "@file"]), "greet"),
+            Some(json!(true))
+        );
+        // The last occurrence wins (upstream last-write-wins).
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--greet=second"]), "greet"),
+            Some(json!("second"))
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--greet", "second"]), "greet"),
+            Some(json!("second"))
+        );
+        // The scan stops at `--`: everything after is positional.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--", "--greet=world"]), "greet"),
+            None
+        );
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--greet=first", "--", "--greet=second"]), "greet"),
+            Some(json!("first"))
+        );
+        // Other flags' values are not occurrences of `greet`.
+        assert_eq!(
+            cli_flag_value_from_args(&a(&["--other", "world"]), "greet"),
+            None
+        );
+    }
+
+    /// Upstream `applyExtensionFlagValues` coercion, pinned: a boolean
+    /// flag is `true` for any occurrence (`=x` ignored), a string flag
+    /// only for a valued one (a bare occurrence leaves the default
+    /// standing).
+    #[test]
+    fn get_flag_coerces_by_flag_kind() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Boolean: `--loud=x` and a bare `--loud` are both `true`.
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::Boolean,
+                cli_flag_value_from_args(&a(&["--loud=x"]), "loud"),
+                None,
+            ),
+            Some(json!(true))
+        );
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::Boolean,
+                cli_flag_value_from_args(&a(&["--loud"]), "loud"),
+                None,
+            ),
+            Some(json!(true))
+        );
+        // No occurrence: the registered default stands (or `None`).
+        assert_eq!(
+            resolve_flag_value(FlagKind::Boolean, None, Some(json!(true))),
+            Some(json!(true))
+        );
+        assert_eq!(resolve_flag_value(FlagKind::Boolean, None, None), None);
+        // String: the CLI value is taken as-is…
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::String,
+                cli_flag_value_from_args(&a(&["--greet", "world"]), "greet"),
+                Some(json!("default")),
+            ),
+            Some(json!("world"))
+        );
+        // …a bare occurrence carries no value → the default stands
+        // (upstream: "requires a value" error, no flagValue set).
+        assert_eq!(
+            resolve_flag_value(
+                FlagKind::String,
+                cli_flag_value_from_args(&a(&["--greet"]), "greet"),
+                Some(json!("default")),
+            ),
+            Some(json!("default"))
+        );
+        // No occurrence and no default: `None`.
+        assert_eq!(resolve_flag_value(FlagKind::String, None, None), None);
+    }
+
+    fn provider_config() -> ProviderConfig {
+        ProviderConfig::new(
+            vec![ProviderModel::new("faketest/echo-1").with_api("faketest-api")],
+            |_model, _messages, _options, _emit| Box::pin(async {}),
+        )
+    }
+
+    #[test]
+    fn provider_and_mcp_registration_replace_same_name() {
+        let mut pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        pi.register_provider(Provider::new("faketest", provider_config()));
+        pi.register_provider(Provider::new("faketest", provider_config()));
+        assert_eq!(pi.providers().len(), 1);
+        assert_eq!(pi.providers()[0].name, "faketest");
+        assert_eq!(
+            pi.providers()[0].config.models[0].api.as_deref(),
+            Some("faketest-api")
+        );
+        pi.unregister_provider("faketest");
+        pi.unregister_provider("faketest"); // no-op
+        assert!(pi.providers().is_empty());
+
+        pi.register_mcp_server(McpServer::new("docs", McpServerConfig::default()));
+        pi.register_mcp_server(McpServer::new("docs", McpServerConfig::default()));
+        assert_eq!(pi.mcp_servers().len(), 1);
+        assert_eq!(pi.mcp_servers()[0].name, "docs");
+    }
+
+    #[tokio::test]
+    async fn ctx_ui_is_the_transport_ui() {
+        // NullTransport carries the NullUi no-UI default.
+        let pi = Pi::new(ExtensionContext::default(), Box::new(NullTransport));
+        let ctx = pi.ctx();
+        let opts = UiDialogOptions::default();
+        assert_eq!(ctx.ui.select("t", &["a".into()], &opts).await, None);
+        assert!(!ctx.ui.confirm("t", "m", &opts).await);
+        assert_eq!(ctx.ui.input("t", None, &opts).await, None);
+        assert_eq!(ctx.ui.editor("t", None).await, None);
+        assert_eq!(
+            ctx.ui
+                .custom(Box::new(|_p: Pane| Box::pin(async {})), None)
+                .await,
+            None
+        );
     }
 }

@@ -10,8 +10,9 @@
 //! the sidecar's full upstream objects and the core's documented subsets
 //! parse.
 
-use crate::wire::messages::{
-    AgentMessage, AssistantMessageEvent, ContentBlock, JsonTimestamp, ModelRef, Usage,
+use crate::wire::{
+    messages::{AgentMessage, AssistantMessageEvent, ContentBlock, JsonTimestamp, ModelRef, Usage},
+    McpServerConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -378,6 +379,28 @@ pub struct ThinkingLevelSelectEvent {
     pub level: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_level: Option<String>,
+}
+
+/// One `mcp_servers_change` server entry (upstream
+/// `RegisteredMcpServer`; `extensionPath` is set for the
+/// extension-registered servers).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerEntry {
+    pub name: String,
+    pub config: McpServerConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_path: Option<String>,
+}
+
+/// `mcp_servers_change` (upstream `McpServersChangeEvent`): the core's
+/// full MCP set after a change — configured plus extension-registered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServersChangeEvent {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub servers: Vec<McpServerEntry>,
 }
 
 // =====================================================================

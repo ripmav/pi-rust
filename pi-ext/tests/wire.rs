@@ -8,7 +8,7 @@
 //! the rest of the message catalog.
 
 use pi_ext::wire::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn lines(name: &str) -> Vec<String> {
     let path = format!("tests/fixtures/{name}");
@@ -297,6 +297,38 @@ fn catalog_lines_carry_the_right_types() {
         }
         other => panic!("pane_key: {other:?}"),
     }
+
+    // v6 MCP forward (E3S5 follow-up): the extension's registerMcpServer.
+    let mreg: BridgeLine = serde_json::from_str(l(54)).unwrap();
+    match mreg {
+        BridgeLine::Event(SidecarEvent::McpServerRegister {
+            name,
+            config,
+            extension_path,
+        }) => {
+            assert_eq!(name, "jira");
+            assert_eq!(config.url.as_deref(), Some("https://mcp.example.com/jira"));
+            assert_eq!(config.exposure.as_deref(), Some("direct"));
+            assert_eq!(extension_path, "/home/u/.pi/extensions/jira/index.ts");
+        }
+        other => panic!("mcp_server_register: {other:?}"),
+    }
+
+    // The core's full MCP set (configured + extension-registered).
+    let mchange: BridgeLine = serde_json::from_str(l(56)).unwrap();
+    match mchange {
+        BridgeLine::Event(SidecarEvent::McpServersChange { event }) => {
+            assert_eq!(event.servers.len(), 2);
+            assert_eq!(event.servers[0].name, "cfg");
+            assert_eq!(event.servers[0].extension_path, None);
+            assert_eq!(event.servers[1].name, "jira");
+            assert_eq!(
+                event.servers[1].extension_path.as_deref(),
+                Some("/home/u/.pi/extensions/jira/index.ts")
+            );
+        }
+        other => panic!("mcp_servers_change: {other:?}"),
+    }
 }
 
 #[test]
@@ -315,4 +347,77 @@ fn system_sections_null_is_meaningful_and_preserved() {
         }
         other => panic!("system message: {other:?}"),
     }
+}
+
+/// A full upstream-shaped `mcp.json` entry (the set the core's
+/// `register_server` path accepts) round-trips through
+/// [`McpServerConfig`] with the exact camelCase field names the core
+/// reads (`src/mcp.rs` `parse_servers`/`parse_stdio`/`parse_http`).
+#[test]
+fn mcp_server_config_full_entry_roundtrips() {
+    // stdio: every field the core accepts.
+    let stdio: Value = json!({
+        "type": "stdio",
+        "command": "node",
+        "args": ["server.js", "--port", "3000"],
+        "cwd": "/home/u/proj",
+        "env": { "TOKEN": "${API_TOKEN}" },
+        "exposure": "direct",
+        "toolExposure": { "search": "deferred", "get*": "hidden" },
+        "timeout": 90.5,
+        "enabled": true
+    });
+    let cfg: McpServerConfig = serde_json::from_value(stdio.clone()).unwrap();
+    assert_eq!(cfg.server_type.as_deref(), Some("stdio"));
+    assert_eq!(cfg.command.as_deref(), Some("node"));
+    let want_args = vec![
+        "server.js".to_string(),
+        "--port".to_string(),
+        "3000".to_string(),
+    ];
+    assert_eq!(cfg.args.as_ref(), Some(&want_args));
+    assert_eq!(cfg.cwd.as_deref(), Some("/home/u/proj"));
+    assert_eq!(
+        cfg.env.as_ref().unwrap().get("TOKEN").map(String::as_str),
+        Some("${API_TOKEN}")
+    );
+    assert_eq!(cfg.exposure.as_deref(), Some("direct"));
+    assert_eq!(cfg.tool_exposure.as_ref().unwrap()["get*"], "hidden");
+    assert_eq!(cfg.timeout, Some(90.5));
+    assert_eq!(cfg.enabled, Some(true));
+    // Re-serialization keeps the core's expected camelCase names.
+    assert_eq!(serde_json::to_value(&cfg).unwrap(), stdio);
+
+    // http: incl. the opaque `auth` passthrough (the core rejects it,
+    // D17 — the wire still carries it).
+    let http: Value = json!({
+        "type": "http",
+        "url": "https://mcp.example.com/jira",
+        "headers": { "Authorization": "Bearer ${TOKEN}" },
+        "exposure": "codemode",
+        "timeout": 45.5,
+        "enabled": false,
+        "auth": { "provider": "faketest" }
+    });
+    let cfg: McpServerConfig = serde_json::from_value(http.clone()).unwrap();
+    assert_eq!(cfg.server_type.as_deref(), Some("http"));
+    assert_eq!(cfg.url.as_deref(), Some("https://mcp.example.com/jira"));
+    assert_eq!(
+        cfg.headers
+            .as_ref()
+            .unwrap()
+            .get("Authorization")
+            .map(String::as_str),
+        Some("Bearer ${TOKEN}")
+    );
+    assert_eq!(cfg.enabled, Some(false));
+    assert_eq!(cfg.auth.as_ref().unwrap()["provider"], "faketest");
+    assert_eq!(serde_json::to_value(&cfg).unwrap(), http);
+
+    // Whole-second timeouts (the common case) parse too; the core
+    // rounds to whole seconds.
+    let int_timeout: McpServerConfig =
+        serde_json::from_value(json!({ "type": "stdio", "command": "node", "timeout": 60 }))
+            .unwrap();
+    assert_eq!(int_timeout.timeout, Some(60.0));
 }
